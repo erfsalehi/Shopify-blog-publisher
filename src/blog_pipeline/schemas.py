@@ -1,0 +1,70 @@
+"""Pydantic schemas for structured LLM outputs and shared pipeline types.
+
+These are the contracts between stages. Using `.with_structured_output(Schema)`
+on the LLM guarantees each agent returns parseable, typed data instead of free
+text we'd have to scrape.
+"""
+
+from __future__ import annotations
+
+from pydantic import BaseModel, Field
+
+
+class OutlineSection(BaseModel):
+    heading: str = Field(description="H2 heading text")
+    subpoints: list[str] = Field(
+        default_factory=list, description="H3 subheadings or key points to cover"
+    )
+
+
+class Outline(BaseModel):
+    working_title: str = Field(description="Provisional article title")
+    primary_keyword: str
+    secondary_keywords: list[str] = Field(default_factory=list)
+    sections: list[OutlineSection] = Field(
+        description="Ordered H2 sections, each with subpoints"
+    )
+
+
+class ImageSlot(BaseModel):
+    role: str = Field(description="'featured' or 'inline'")
+    placement_hint: str = Field(
+        description="Where in the article this image belongs (e.g. section heading)"
+    )
+    prompt: str = Field(description="Text-to-image prompt describing the visual")
+    alt: str = Field(description="SEO alt text for the image")
+
+
+class Draft(BaseModel):
+    title: str
+    meta_description: str = Field(description="150-160 char SEO meta description")
+    body_html: str = Field(description="Article body as clean semantic HTML")
+    image_slots: list[ImageSlot] = Field(
+        default_factory=list, description="Featured + inline image requests"
+    )
+
+
+class TopicCandidate(BaseModel):
+    topic: str
+    primary_keyword: str
+    secondary_keywords: list[str] = Field(default_factory=list)
+    search_volume: int | None = None
+    difficulty: float | None = Field(
+        default=None, description="Keyword difficulty 0-100"
+    )
+    rationale: str = Field(description="Why this topic — content gap / opportunity")
+
+
+class TopicCandidates(BaseModel):
+    candidates: list[TopicCandidate]
+
+
+class QAReport(BaseModel):
+    confidence: float = Field(description="Overall publish confidence 0.0-1.0")
+    unverifiable_claims: list[str] = Field(default_factory=list)
+    brand_safety_issues: list[str] = Field(default_factory=list)
+    duplicate_of: str | None = Field(
+        default=None, description="Title/topic this closely duplicates, if any"
+    )
+    verdict: str = Field(description="'pass', 'review', or 'block'")
+    notes: str = ""
