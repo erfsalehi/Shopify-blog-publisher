@@ -1,4 +1,4 @@
-# PRD: Topic Research → Publish Pipeline (Shopify Blog Automation)
+# PRD: Topic Research → Linear Handoff Pipeline (Blog Content Automation)
 
 **Owner:** Erfan Salehi
 **Status:** Final — Ready to Build
@@ -8,59 +8,77 @@
 
 ## 1. Problem Statement
 
-Manual blog content production for Shopify stores is slow and inconsistent: topic selection is ad hoc, SEO research is manual, drafting takes hours, and publishing requires a human to log in and format each post. This creates a bottleneck for stores that need consistent content velocity (e.g., 3–5 posts/week) to compound SEO gains.
+Manual blog content production is slow and inconsistent: topic selection is ad hoc, SEO research is manual, and drafting takes hours. This creates a bottleneck for stores that need consistent content velocity (e.g., 3–5 posts/week) to compound SEO gains. Publishing itself stays a deliberate human act — the goal is to eliminate everything upstream of it, not to auto-publish unreviewed content to a live storefront.
 
 ## 2. Goal
 
-Build an agentic pipeline that autonomously researches topics, drafts SEO-optimized articles, generates supporting images, and publishes directly to Shopify — with human review as an optional gate, not a bottleneck.
+Build an agentic pipeline that autonomously researches topics, drafts SEO-optimized articles, and generates supporting images. The content calendar lives in Linear from the moment a topic is queued. After QA, the pipeline splits by confidence: articles that pass QA with high confidence **auto-publish live to Shopify**, while anything uncertain is routed to Linear for a human to review and publish by hand. This keeps velocity high on safe content without letting low-confidence output reach the storefront unreviewed. Shopify is optional — with it unconfigured the pipeline is fully Linear-only (everything waits for a human).
 
 ## 3. Success Metrics
 
 | Metric | Target |
 |---|---|
-| End-to-end time per article (trigger → published) | < 15 min |
-| Human intervention required per article | 0 (fully auto) or 1 approval click (gated mode) |
+| End-to-end time per article (trigger → published or synced) | < 15 min |
+| Human intervention on a confident auto-published article | 0 |
+| Human intervention on a low-confidence article | 1 review + manual publish in Linear |
 | SEO score (on-page, via internal rubric) | ≥ 85/100 |
-| Publishing error rate | < 2% |
+| Publish / Linear-sync error rate | < 2% |
 | Cost per article (LLM + image + infra) | < $0.50 |
-| Calendar coverage maintained | ≥ 4 weeks scheduled ahead at all times |
+| Calendar coverage maintained | ≥ 4 weeks scheduled ahead at all times, visible in Linear |
 
 ## 4. Non-Goals
 
 - Social media distribution (future phase)
 - Multi-language localization (future phase)
 - Editing/updating existing legacy blog content
-- Human-in-the-loop long-form editorial workflows (this is for automation-first content, not flagship editorial pieces)
+- Automated publishing to any CMS/storefront — publishing is always a manual act performed from the Linear issue, not a pipeline stage
 
 ## 5. Users / Stakeholders
 
-- **Primary:** Store owners / marketing ops running content-driven SEO strategy
-- **Secondary:** Agencies managing content for multiple Shopify clients
-- **Internal:** Content ops reviewing flagged/low-confidence outputs
+- **Primary:** Store owners / marketing ops running content-driven SEO strategy, who review and publish from Linear
+- **Secondary:** Agencies managing content for multiple clients, each with their own Linear team/project
+- **Internal:** Content ops reviewing flagged/low-confidence drafts surfaced as "Needs Adjustments" in Linear
 
 ## 6. Pipeline Architecture
 
 ```
 [Weekly Calendar Agent] → [Content Calendar: rolling N-week queue]
+            ↓ (each new slot mirrored immediately as a Linear issue: Backlog, due date)
             ↓ (daily trigger pulls entries due today)
 [Outline Agent] → [Draft Agent] → [SEO Optimization Agent] → [Image Generation]
-   → [QA/Guardrail Check] → [Human Approval Gate (optional)]
-   → [Shopify Publish] → [LangSmith Trace Log]
+   → [QA/Guardrail Check] → [route on QA outcome]
+        ├─ confident pass + Shopify configured → [Publish live to Shopify]
+        │        → [Linear issue → Done + live URL]
+        └─ everything else → [Sync to Linear: Ready to Review / Needs Adjustments / Blocked]
+   → [LangSmith Trace Log]
             ↑
    (Topic Research Agent runs inside the Calendar Agent to fill queue slots,
     not re-invoked per article at publish time)
+
+QA confidence is the only gate: a confident pass auto-publishes; anything
+uncertain routes to Linear for a human to review and publish by hand. There
+is no execution-blocking approval interrupt. A publish failure is non-fatal —
+the article still syncs to Linear (Needs Adjustments) with the error noted.
+With Shopify unconfigured, every article takes the Linear-only branch.
 ```
 
 ### Stage breakdown
 
 **0. Content Calendar Agent (runs weekly)**
 - Checks current calendar coverage against target window (e.g., always keep 4 weeks scheduled ahead)
+- If no seed keywords are configured, invokes the **Seed Keyword Research Agent** to brainstorm them from the niche alone — so a cold-start refresh needs nothing but a niche description
 - Invokes the **Topic Research Agent** to fill empty slots up to the coverage target
-- Dedupes candidates against already-published articles and existing calendar entries (topic + keyword overlap check)
+- Dedupes candidates against already-synced articles and existing calendar entries (topic + keyword overlap check)
 - Assigns each new topic a scheduled publish date/time based on configured cadence (e.g., Mon/Wed/Fri, 3x/week)
+- Creates a Linear issue per new topic (`Backlog` state, due date = scheduled date, `Blog` label) so the calendar is visible and reorderable in Linear immediately
 - Writes the updated calendar to the data store
 - Sends a weekly digest (Slack/email) summarizing added topics, so a human can reorder, swap, or veto before drafting begins
 - Idle weeks (queue already full) are a no-op — the agent only tops up what was consumed
+
+**Seed Keyword Research Agent** *(invoked by the Calendar Agent when seed keywords are empty)*
+- Input: niche/vertical, optional competitor URLs
+- Output: a diverse list of realistic seed keywords (broad category + long-tail intent) via a single LLM call
+- Feeds directly into the Topic Research Agent's `seed_keywords` input — no DataForSEO/SERP calls of its own
 
 **Topic Research Agent** *(invoked by the Calendar Agent, not standalone)*
 - Inputs: niche/vertical, target keywords, competitor URLs
@@ -68,7 +86,7 @@ Build an agentic pipeline that autonomously researches topics, drafts SEO-optimi
 - Output: ranked topic candidates with search volume, difficulty, and content gap analysis
 - LangChain: ReAct agent with search + SERP tool calling
 
-**1. Daily Publish Trigger**
+**1. Daily Draft Trigger**
 - Cron (daily) queries the calendar for entries scheduled for today
 - Feeds each due entry into the drafting pipeline below
 - Entries with no due items today = no-op (this is what makes cadence, not just frequency, configurable)
@@ -78,35 +96,32 @@ Build an agentic pipeline that autonomously researches topics, drafts SEO-optimi
 - Validates against top-ranking competitor structures (scraped headers)
 
 **3. Draft Agent**
-- LLM call via OpenRouter (`anthropic/claude-sonnet-5`) with outline + brand voice guide + word count target
+- LLM call via Google AI Studio (`gemini-3.5-flash`) with outline + brand voice guide + word count target
 - Structured output: title, meta description, body (HTML), alt text per image slot
 
 **4. SEO Optimization Agent**
-- Checks keyword density, readability (Flesch score), internal linking opportunities
-- Auto-inserts internal links from a maintained sitemap/product catalog
-- Generates `seo.title` and `seo.description` fields for Shopify
+- Checks keyword density, readability (Flesch score)
+- Generates `seo.title` and `seo.description` meta fields
+- (Internal linking to a product/page catalog is out of scope now that there's no fixed storefront target — see §9 Known simplifications)
 
 **5. Image Generation**
-- Generate or source featured + inline images
-- Upload via Shopify `stagedUploadsCreate` → attach to article
+- Generate featured + inline images via OpenRouter (`google/gemini-3.1-flash-lite-image` — token-billed, fractions of a cent/image)
+- Upload the generated bytes to Linear's own file storage (`fileUpload`, `makePublic: true`) and embed the resulting public URL inline in the Linear description — no third-party image host needed
 
 **6. QA / Guardrail Check**
-- Fact-check pass via OpenRouter (`anthropic/claude-opus-4.8`) — flags unverifiable claims
-- Plagiarism/duplicate-content check
+- Fact-check pass via Google AI Studio (`gemini-3-flash`) — flags unverifiable claims
+- Plagiarism/duplicate-content check (against previously drafted titles + the store's published articles)
 - Brand safety check (tone, banned topics/claims)
-- Confidence score determines auto-publish vs. human review routing
+- Confidence score + verdict determine the routing at stage 7 — auto-publish vs. Linear-only, and which Linear state the issue lands in
 
-**7. Human Approval Gate (configurable)**
-- Slack/email notification with preview link
-- Approve / Edit / Reject actions
+**7. Publish routing (auto-publish or Linear handoff)**
+- **Confident pass + Shopify configured** → publish the article **live to Shopify** (`articleCreate`, `isPublished: true`), then update the calendar entry's Linear issue to the published state (`Done`) with the live URL recorded — a done-record, not a to-do.
+- **Everything else** (low confidence, verdict `review`/`block`, or Shopify unconfigured) → sync the full draft to the Linear issue (body as Markdown, SEO meta, images, QA notes, raw-HTML block) in state `Ready to Review` / `Needs Adjustments` / `Blocked`, for a human to review and publish by hand.
+- A publish failure is non-fatal: the article falls back to the Linear handoff (`Needs Adjustments`, error noted) so no work is lost.
 
-**8. Shopify Publish**
-- `articleCreate` GraphQL mutation with all fields populated
-- Sets `publishedAt` (immediate, since the calendar already handled scheduling)
-
-**9. Observability**
+**8. Observability**
 - Every run traced in LangSmith: latency per stage, token cost, failure points
-- Dashboard: articles published, avg SEO score, cost/article, error rate, calendar coverage (weeks ahead)
+- Dashboard: articles published, articles synced, avg SEO score, cost/article, publish/sync error rate, calendar coverage (weeks ahead)
 
 ## 7. Technical Requirements
 
@@ -114,9 +129,9 @@ Build an agentic pipeline that autonomously researches topics, drafts SEO-optimi
 |---|---|
 | Orchestration | LangChain (agent graph) or LangGraph for stateful flow |
 | Tracing/Eval | LangSmith |
-| LLM gateway | OpenRouter (single API key, OpenAI-compatible endpoint) — see Section 12 for model assignments |
-| Shopify integration | Admin GraphQL API, custom app, `write_content` + `write_files` scopes |
-| Image gen | Flux Schnell (via fal.ai or Replicate) — see Section 12 |
+| LLM gateway | Google AI Studio (single API key, OpenAI-compatible endpoint) — see Section 12 for model assignments |
+| Linear integration | Linear GraphQL API, personal/workspace API key — calendar + draft handoff, no publish scope needed |
+| Image gen | Gemini image models via OpenRouter, hosted on Linear's file storage — see Section 12 |
 | SEO/SERP data | DataForSEO Standard Queue — see Section 12 |
 | Data store | Postgres or Airtable for content calendar + run history |
 | Trigger/scheduling | Cron (GitHub Actions / n8n) or serverless scheduled function |
@@ -134,9 +149,11 @@ Article {
   seo_description
   images: []
   qa_confidence_score
-  status: (draft | pending_review | approved | published | failed)
-  shopify_article_id
-  published_at
+  status: (draft | synced | failed)
+  linear_issue_id
+  linear_identifier
+  linear_url
+  synced_at
   cost_usd
   trace_id (LangSmith)
 }
@@ -157,7 +174,10 @@ CalendarEntry {
   topic
   target_keywords: []
   source: (auto-researched | manually added)
-  status: (queued | drafting | drafted | published | skipped)
+  status: (queued | drafting | drafted | skipped)
+  linear_issue_id       # created the moment the slot is queued
+  linear_identifier
+  linear_url
   article_id (FK → Article, once drafting begins)
 }
 ```
@@ -166,85 +186,120 @@ CalendarEntry {
 
 | Risk | Mitigation |
 |---|---|
-| LLM hallucinated facts/claims | Mandatory QA fact-check stage; confidence threshold routing |
-| SEO cannibalization (duplicate topics) | Dedup check against existing published topics before draft stage |
-| Shopify API rate limits | Queue + backoff; batch scheduling instead of burst publishing |
+| LLM hallucinated facts/claims | Mandatory QA fact-check stage; confidence threshold routing to "Needs Adjustments" |
+| SEO cannibalization (duplicate topics) | Dedup check against existing synced topics before draft stage |
+| Linear API rate limits / outage | Best-effort sync with retry/backoff; a failed sync marks the Article `failed` locally without losing the draft, so it can be retried |
 | Brand voice drift at scale | Voice guide injected into every draft prompt; periodic human audit sample |
-| Over-automation reputational risk | Configurable human gate; start gated, graduate to full-auto per client |
+| Low-quality content reaching a live storefront | Not applicable by construction — the pipeline has no publish capability at all; every draft lands in Linear for human review first |
 | Calendar drifts stale (agent fails silently, queue empties) | Monitor "weeks of coverage remaining" as a health metric; alert if it drops below 1 week |
-| Weekly refresh piles up near-duplicate topics over time | Semantic similarity check (embeddings) against last N months of calendar + published topics, not just exact-match dedup |
+| Weekly refresh piles up near-duplicate topics over time | Semantic similarity check (embeddings) against last N months of calendar + synced topics, not just exact-match dedup |
 
 ## 10. Phased Rollout
 
-- **Phase 1:** Manual topic input → auto draft → auto publish (validate core pipeline)
-- **Phase 2:** Add Content Calendar Agent — weekly auto-refresh of a rolling topic queue with dedup, replacing manual per-post topic input
+- **Phase 1:** Manual topic input → auto draft → sync to Linear (validate core pipeline)
+- **Phase 2:** Add Content Calendar Agent — weekly auto-refresh of a rolling topic queue with dedup, mirrored to Linear as it's built, replacing manual per-post topic input
 - **Phase 3:** Add SEO optimization layer + image generation
-- **Phase 4:** Full QA guardrails with confidence-based routing
-- **Phase 5:** Full autonomy end-to-end; human gate becomes exception-only, calendar review becomes the only regular touchpoint
+- **Phase 4:** Full QA guardrails with confidence-based Linear-state routing
+- **Phase 5:** Everything up to Linear sync fully autonomous; calendar review and per-article publish in Linear remain the only regular human touchpoints — by design, not as a gate to eventually remove
 
 ## 12. Final Model Stack & Cost Estimate
 
-*Pricing as of July 2026 — verify against provider pages before committing budget; rates shift often (Claude Sonnet 5 is on introductory pricing through Aug 31, 2026, reverting to $3/$15 after).*
+*As of July 2026. LLM stages run on Google AI Studio's free tier — rate-limited, not billed. Verify current model names/limits at [aistudio.google.com](https://aistudio.google.com) before relying on this for capacity planning; free-tier quotas change without much notice.*
 
 ### 12.1 Model assignment (final)
 
-| Stage | Model | Why |
-|---|---|---|
-| Calendar Agent (weekly gap analysis) | Claude Haiku 4.5 | Pattern-matching/dedup task — no reasoning premium needed |
-| Topic Research Agent | Claude Haiku 4.5 | Same — summarizing SERP/trends data |
-| Outline Agent | Claude Haiku 4.5 | Structural task, well within Haiku's ability |
-| Draft Agent | Claude Sonnet 5 | Quality is reader-visible here — this is where spend matters |
-| SEO Optimization Agent | Claude Haiku 4.5 | Rule-checking (density, links, meta fields) |
-| QA / Fact-check / Guardrail | Claude Opus 4.8 | Last line of defense before publish — reasoning quality has the most leverage here |
-| Image generation | Flux Schnell | Good-enough output for blog featured/inline images at near-zero cost |
-| SEO/SERP research data | DataForSEO (Standard Queue) | Batch/overnight jobs — no need for real-time latency |
-
-All LLM calls route through **OpenRouter** using a single `OPENROUTER_API_KEY`:
+All LLM calls route through **Google AI Studio's OpenAI-compatible endpoint**
+using a single `GOOGLE_API_KEY`:
 
 ```
-Base URL: https://openrouter.ai/api/v1
-Models:
-  anthropic/claude-haiku-4.5    (research, outline, SEO)
-  anthropic/claude-sonnet-5     (draft)
-  anthropic/claude-opus-4.8     (QA/fact-check)
+Base URL: https://generativelanguage.googleapis.com/v1beta/openai/
 ```
 
-Since OpenRouter's API is OpenAI-compatible, LangChain's `ChatOpenAI` class works as a drop-in by pointing `base_url` at OpenRouter and swapping the `model` string per stage — no separate SDK per provider, and LangSmith tracing works unchanged since it wraps the LangChain call, not the transport.
+Since that endpoint is OpenAI-compatible, LangChain's `ChatOpenAI` class works
+as a drop-in by pointing `base_url` at Google and swapping the `model` string
+per stage — same pattern as the prior OpenRouter setup, no separate SDK.
 
-**Cost note on OpenRouter:** it passes through Anthropic's own per-token rates with no markup on inference — the only fee is 5.5% on credit-card top-ups (min $0.80), or 5% on crypto. Load credits in one larger top-up rather than many small ones to avoid the minimum-fee tax on small purchases. The cost table below includes this 5.5% on the LLM portion.
+| Stage | Model | Free-tier limit | Why |
+|---|---|---|---|
+| Calendar Agent / Topic Research | `gemini-3.1-flash-lite-preview` | generous, high rpm | Weekly-ish volume; separate bucket from Outline/SEO's `-lite` |
+| Outline Agent | `gemini-3.1-flash-lite` | 500 req/day, 15 rpm | Runs every article; needs the generous quota, not the top model |
+| Draft Agent | `gemini-2.5-flash` | 20 req/day, 5 rpm | Quality is reader-visible here, and this is the model verified reliably available (see note) |
+| SEO Optimization Agent | `gemini-3.1-flash-lite` | 500 req/day, 15 rpm | Rule-checking + meta polish; shares the outline stage's high-quota model |
+| QA / Fact-check / Guardrail | `gemini-3-flash-preview` | 20 req/day, 5 rpm | Last line of defense before a draft reaches Linear; kept on a **separate** 20/day bucket from Draft so the two don't compete |
+| Image generation | `google/gemini-3.1-flash-lite-image` via OpenRouter | — (paid, near-zero cost) | Cheapest confirmed image-output model on OpenRouter's live catalog; AI Studio's own free tier returned `429` (no free image quota) |
+| SEO/SERP research data | DataForSEO (Standard Queue) | — (paid) | Batch/overnight jobs — no need for real-time latency |
+
+**Note on model names (verified live, 2026-07):** `gemini-3-flash` doesn't
+exist — the real id carries a `-preview` suffix. `gemini-3.5-flash` and its
+alias `gemini-flash-latest` both returned `503 UNAVAILABLE` (over capacity)
+across repeated direct probes against `GET /v1beta/models` for a live key —
+that's why Draft defaults to `gemini-2.5-flash` rather than the newest model.
+Re-check `GET https://generativelanguage.googleapis.com/v1beta/models` for
+your own key before trusting any model string here; the catalog moves fast
+and free-tier availability isn't the same as the catalog listing existing.
+
+**Why five different Gemini models instead of one:** AI Studio's free tier
+rate-limits per model, not per account — the non-Lite Flash models are each
+capped at **20 requests/day** independently. Running every stage on one
+model would mean 4–5 LLM calls per article all draining the *same* 20/day
+bucket, leaving almost no headroom for a second article the same day,
+retries, or manual testing. Spreading stages across distinct models turns
+one shared 20/day ceiling into several independent ones. The `-flash-lite`
+variants (500 req/day) are deliberately used for the highest-volume,
+lowest-stakes calls (calendar/research, outline, SEO polish) so those never
+come close to any cap.
+
+Gemma is available too — on this key's live catalog that means Gemma 4
+(`gemma-4-26b-a4b-it`, `gemma-4-31b-it`), not Gemma 3 as older docs/tables
+may still say — with a much larger request-per-day cap, but it's not used by
+default: it's an open-weight model served
+without confirmed reliable support for the structured-output / tool-calling
+contract every stage here depends on (`.with_structured_output()`). Worth
+revisiting as a high-volume fallback if the Flash-family quotas prove too
+tight in practice — but verify structured-output reliability first.
 
 ### 12.2 Cost per article
 
-Assumes a ~1,500-word article: ~2,000 input / 2,500 output tokens for the draft step, smaller footprints for research/outline/SEO/QA, plus 2–3 images.
+**$0 in LLM spend** on the free tier — cost is bounded by rate limits, not
+billing, so there's no per-token number to compute. The `CostTracker` in
+`llm.py` still runs (for latency/token visibility in LangSmith), but
+`MODEL_RATES` is intentionally empty, so `cost_usd` reports as `0.0`.
 
 | Stage | Cost |
 |---|---|
-| Topic research (Haiku 4.5, amortized share) | ~$0.0045 |
-| Outline (Haiku 4.5) | ~$0.0035 |
-| Draft (Sonnet 5) | ~$0.029 |
-| SEO optimization (Haiku 4.5) | ~$0.0055 |
-| QA / fact-check (Opus 4.8) | ~$0.025 |
-| **LLM subtotal** | **~$0.068** |
-| OpenRouter credit fee (5.5% of LLM subtotal) | ~$0.004 |
-| Images (2–3, Flux Schnell) | ~$0.03 |
+| LLM stages (research, outline, draft, SEO, QA) | $0.00 (free tier, rate-limited) |
+| Images (2–3, `gemini-3.1-flash-lite-image` via OpenRouter, token-billed) | ~$0.005–0.01 |
 | SERP/keyword calls (DataForSEO) | ~$0.01 |
-| **Total per article** | **~$0.11** |
+| **Total per article** | **~$0.02** |
 
-Well under the $0.50/article target in Section 3 — even with the OpenRouter fee added, the LLM stage stays cheap because only the draft and QA steps use paid-tier reasoning.
+Well under the $0.50/article target in Section 3.
 
 ### 12.3 Monthly cost at typical cadence
 
-At 3 posts/week (~12 articles/month): **~$1.35/month** in AI spend (LLM + images + SERP). This excludes fixed infra (hosting, DB, orchestration compute, Slack/email notifications), which will dominate the actual bill at this volume — AI spend itself is close to a rounding error.
+At 3 posts/week (~12 articles/month): **~$0.24/month** in AI spend (images +
+SERP only — this also requires a small OpenRouter credit top-up for images,
+minimum ~$0.80, which will cover months at this volume). This excludes fixed
+infra (hosting, DB, orchestration compute, Slack notifications), which will
+dominate the actual bill at this volume.
 
 ### 12.4 When to reconsider
 
-- **Escalate the draft step to Opus 4.8 or Claude Fable 5** for cornerstone/pillar content where traffic value justifies the extra ~$0.04–0.15/article.
-- **Move off OpenRouter to direct Anthropic billing** if monthly LLM spend grows large enough that 5.5% becomes a meaningful line item (rough breakeven is in the low thousands of dollars/month) — until then, the single-key convenience across three model tiers outweighs the fee.
-- **Upgrade image generation** if featured images need to hold up as hero/campaign visuals rather than supporting blog imagery — Flux 2 Pro or GPT Image 1.5 at ~$0.045–0.055/image is the next step up.
+- **Move to a paid Gemini API tier (or Vertex AI)** once daily article volume
+  or manual testing regularly bumps into the 20-requests/day caps on the
+  Draft/QA/research models — no code change needed beyond raising the
+  `GOOGLE_API_KEY` quota and filling in `MODEL_RATES` in `llm.py` for real
+  cost tracking.
+- **Try Gemma 4** (`gemma-4-26b-a4b-it`) for the outline/SEO stages if the 3.1
+  Flash-Lite quota ever becomes the bottleneck, once structured-output
+  reliability is confirmed against it.
+- **Upgrade image generation** if featured images need to hold up as
+  hero/campaign visuals rather than supporting blog imagery — `openai/gpt-5-image`
+  or `google/gemini-3-pro-image` on OpenRouter are the next steps up in
+  quality (and cost) from the current `-flash-lite-image` default.
 
 ## 13. Open Questions
 
-- Which image generation provider balances cost vs. brand consistency?
-- Should internal linking use a static sitemap or live product catalog query?
-- What's the fallback behavior if Shopify API publish fails after QA approval?
+- Image generation is on OpenRouter's cheapest Gemini image model for now — worth upgrading to a higher-quality model (or switching to real stock photos, e.g. Pexels) once featured images need to hold up as hero/campaign visuals rather than supporting blog imagery?
+- Is internal linking worth reintroducing via a maintained sitemap now that there's no live product catalog to query?
+- What's the retry/backoff behavior if the Linear API is down when a run tries to sync — how many attempts before it's left `failed` for manual resync?
 - Per-client brand voice: shared prompt template vs. fine-tuned per client?

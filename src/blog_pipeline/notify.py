@@ -1,9 +1,7 @@
-"""Slack notifications (weekly calendar digest + approval requests).
+"""Slack notifications (weekly calendar digest + low-coverage alerts).
 
 Uses a simple incoming-webhook POST. When SLACK_WEBHOOK_URL is unset, messages
 are logged to stdout instead so the pipeline is fully runnable without Slack.
-Interactive approve/reject buttons require a hosted endpoint, so the approval
-message instead links to a preview and shows the CLI command to run.
 """
 
 from __future__ import annotations
@@ -47,28 +45,35 @@ def send_calendar_digest(added: list[dict], coverage_weeks: float) -> bool:
     return _post("\n".join(lines))
 
 
-def send_approval_request(
-    article_id: int, title: str, seo_score: float | None,
-    confidence: float | None, preview_url: str | None,
-) -> bool:
-    settings = get_settings()
-    preview = preview_url or (
-        f"{settings.preview_base_url.rstrip('/')}/article/{article_id}"
-        if settings.preview_base_url else "(no preview URL configured)"
-    )
-    text = (
-        f"📝 *Article pending review* (#{article_id})\n"
-        f"*{title}*\n"
-        f"SEO score: {seo_score}  |  QA confidence: {confidence}\n"
-        f"Preview: {preview}\n"
-        f"Approve: `blog-pipeline approve {article_id}`   "
-        f"Reject: `blog-pipeline reject {article_id}`"
-    )
-    return _post(text)
-
-
 def send_coverage_alert(weeks_remaining: float) -> bool:
     return _post(
         f"⚠️ *Calendar coverage low*: only {weeks_remaining:.1f} weeks of "
         f"scheduled content remain. Run the calendar agent to top up."
     )
+
+
+def send_article_update(topic: str, summary: dict) -> bool:
+    """Post a per-article result to Slack after a run-article/run-daily run.
+
+    `summary` is the dict returned by run_article: {status, result, ...}.
+    """
+    status = summary.get("status")
+    r = summary.get("result") or {}
+    linear = r.get("linear_identifier")
+    linear_url = r.get("url")
+    linear_tag = f" (<{linear_url}|{linear}>)" if linear and linear_url else (
+        f" ({linear})" if linear else ""
+    )
+
+    if status == "published":
+        text = (f"✅ *Published live:* {topic}\n{r.get('shopify_url')}"
+                f"\nLinear{linear_tag}")
+    elif status == "synced":
+        drafted = " · Shopify draft created" if r.get("shopify_article_id") else ""
+        text = (f"📝 *Drafted:* {topic}\nLinear{linear_tag} → "
+                f"*{r.get('linear_state', 'synced')}*{drafted}")
+    elif status == "failed":
+        text = f"⚠️ *Draft failed:* {topic}\n{r.get('error') or r}"
+    else:
+        return False
+    return _post(text)

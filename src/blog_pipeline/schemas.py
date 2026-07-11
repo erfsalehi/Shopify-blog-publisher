@@ -35,10 +35,25 @@ class ImageSlot(BaseModel):
     alt: str = Field(description="SEO alt text for the image")
 
 
+class FAQItem(BaseModel):
+    question: str = Field(description="A natural question a reader/AI might ask")
+    answer: str = Field(description="A direct, self-contained answer (1-3 sentences)")
+
+
 class Draft(BaseModel):
     title: str
     meta_description: str = Field(description="150-160 char SEO meta description")
     body_html: str = Field(description="Article body as clean semantic HTML")
+    key_takeaways: list[str] = Field(
+        default_factory=list,
+        description="3-5 concise, self-contained takeaway sentences (answer-first, "
+        "extractable by AI answer engines)",
+    )
+    faq: list[FAQItem] = Field(
+        default_factory=list,
+        description="3-6 FAQ pairs covering common questions on the topic, for a "
+        "visible FAQ section + FAQPage structured data",
+    )
     image_slots: list[ImageSlot] = Field(
         default_factory=list, description="Featured + inline image requests"
     )
@@ -57,6 +72,19 @@ class TopicCandidate(BaseModel):
 
 class TopicCandidates(BaseModel):
     candidates: list[TopicCandidate]
+
+
+class SeedKeywords(BaseModel):
+    keywords: list[str] = Field(
+        description="Diverse seed keywords real customers search for in this niche"
+    )
+
+
+class RevisedDraft(BaseModel):
+    body_html: str = Field(
+        description="The revised article body as clean semantic HTML "
+        "(<h2>/<h3>/<p>/<ul>/<ol>), no <html>/<head>/<body>/<h1>"
+    )
 
 
 class QAReport(BaseModel):

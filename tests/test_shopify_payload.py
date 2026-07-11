@@ -29,7 +29,11 @@ def test_dry_run_builds_payload_without_network():
     assert article["title"] == "Test Title"
     assert article["blogId"] == "gid://shopify/Blog/1"
     assert article["isPublished"] is True
-    assert article["seo"]["title"] == "SEO Title"
+    # SEO meta goes through global.title_tag / global.description_tag metafields.
+    tags = {m["key"]: m["value"] for m in article["metafields"]}
+    assert tags["title_tag"] == "SEO Title"
+    assert tags["description_tag"] == "SEO description here"
+    assert "seo" not in article
     assert "image" not in article  # no image supplied
     client.close()
 

@@ -5,7 +5,7 @@ Two parts:
      Flesch readability (textstat), heading/length checks -> rubric score /100.
   2. Internal link insertion: match published articles / catalog anchors to
      phrases in the body and hyperlink the first occurrence of each.
-  3. LLM polish of seo.title / seo.description for the Shopify SEO fields.
+  3. LLM polish of seo.title / seo.description for the SEO meta fields.
 
 Keeping scoring deterministic makes it unit-testable and keeps the rubric
 stable across runs (the PRD's >=85 target needs a reproducible measure).
@@ -21,7 +21,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel
 
 from blog_pipeline.config import get_settings
-from blog_pipeline.llm import CostTracker, make_llm
+from blog_pipeline.llm import CostTracker, structured_invoke
 from blog_pipeline.utils import html_to_text, word_count
 
 
@@ -67,11 +67,11 @@ def score_seo(
     metrics: dict = {}
     score = 0.0
 
-    # Length (20): within 60-140% of target.
+    # Length (15): within 60-140% of target.
     ratio = wc / target if target else 1.0
     length_ok = 0.6 <= ratio <= 1.4
     metrics["word_count"] = wc
-    score += 20 if length_ok else max(0, 20 - abs(1 - ratio) * 20)
+    score += 15 if length_ok else max(0, 15 - abs(1 - ratio) * 15)
 
     # Primary keyword in title (15) + first 100 words (10).
     metrics["kw_in_title"] = primary_keyword.lower() in title.lower()
@@ -111,6 +111,12 @@ def score_seo(
     md_len = len(meta_description or "")
     metrics["meta_description_length"] = md_len
     score += 10 if 120 <= md_len <= 160 else (5 if 80 <= md_len <= 200 else 0)
+
+    # Internal links (5): at least 2 in-body <a href> anchors (set by the
+    # internal-linking pass from the store's product/page catalog).
+    link_count = len(re.findall(r"<a\s+href=", body_html, re.I))
+    metrics["internal_links"] = link_count
+    score += 5 if link_count >= 2 else link_count * 2.5
 
     return round(min(score, 100.0), 1), metrics
 
@@ -163,10 +169,10 @@ def optimize_seo(
     # LLM polish of the SEO meta fields.
     seo_title, seo_description = title, meta_description
     try:
-        llm = make_llm(settings.model_seo, temperature=0.3)
-        structured = llm.with_structured_output(_SeoMeta, include_raw=True)
-        res = structured.invoke(
-            [
+        meta: _SeoMeta = structured_invoke(
+            model=settings.model_seo,
+            schema=_SeoMeta,
+            messages=[
                 SystemMessage(
                     content="You optimize on-page SEO meta fields. Return a "
                     "compelling <=60 char SEO title including the primary keyword, "
@@ -177,11 +183,11 @@ def optimize_seo(
                     f"Article title: {title}\n"
                     f"Current meta: {meta_description}"
                 ),
-            ]
+            ],
+            temperature=0.3,
+            stage="seo",
+            cost=cost,
         )
-        if cost is not None:
-            cost.record("seo", settings.model_seo, res["raw"])
-        meta = res["parsed"]
         seo_title, seo_description = meta.seo_title, meta.seo_description
     except Exception:
         # SEO meta polish is best-effort; keep draft values on failure.

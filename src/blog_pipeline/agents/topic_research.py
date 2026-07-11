@@ -17,7 +17,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from blog_pipeline.config import get_settings
-from blog_pipeline.llm import CostTracker, make_llm
+from blog_pipeline.llm import CostTracker, structured_invoke
 from blog_pipeline.schemas import TopicCandidate, TopicCandidates
 from blog_pipeline.tools.dataforseo import DataForSEOClient
 from blog_pipeline.tools.scraper import gather_competitor_headers
@@ -66,16 +66,27 @@ def research_topics(
                 + "\n".join(f"- {h}" for h in headers[:40])
             )
 
+    if settings.local_seo:
+        loc = settings.business_location
+        context_parts.append(
+            "This is a LOCAL business — prioritize topics with commercial or "
+            "high informational intent that a nearby customer would search "
+            "before buying/hiring" + (f" in {loc}" if loc else "")
+            + ". A portion should suit local/seasonal angles; avoid purely "
+            "national, generic listicles."
+        )
+
     context_parts.append(
         f"Propose {count} ranked topic candidates as structured output."
     )
 
-    llm = make_llm(settings.model_research, temperature=0.6)
-    structured = llm.with_structured_output(TopicCandidates, include_raw=True)
-    res = structured.invoke(
-        [SystemMessage(content=SYSTEM),
-         HumanMessage(content="\n\n".join(context_parts))]
+    result: TopicCandidates = structured_invoke(
+        model=settings.model_research,
+        schema=TopicCandidates,
+        messages=[SystemMessage(content=SYSTEM),
+                  HumanMessage(content="\n\n".join(context_parts))],
+        temperature=0.6,
+        stage="research",
+        cost=cost,
     )
-    if cost is not None:
-        cost.record("research", settings.model_research, res["raw"])
-    return res["parsed"].candidates
+    return result.candidates

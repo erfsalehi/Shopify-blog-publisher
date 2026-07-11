@@ -14,6 +14,7 @@ from functools import lru_cache
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 
@@ -25,39 +26,98 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    # ── LLM gateway ──────────────────────────────────────────────
-    openrouter_api_key: str = ""
+    # ── LLM gateway (Google AI Studio, OpenAI-compatible endpoint) ──
+    google_api_key: str = ""
 
-    model_calendar: str = "anthropic/claude-haiku-4.5"
-    model_research: str = "anthropic/claude-haiku-4.5"
-    model_outline: str = "anthropic/claude-haiku-4.5"
-    model_draft: str = "anthropic/claude-sonnet-5"
-    model_seo: str = "anthropic/claude-haiku-4.5"
-    model_qa: str = "anthropic/claude-opus-4.8"
+    # Spread across distinct model names deliberately — AI Studio's free-tier
+    # rate limits are per-model, so giving each stage its own model multiplies
+    # the effective daily budget instead of every stage competing for one
+    # model's 20-requests/day cap. Verified live against the actual model
+    # catalog (GET /v1beta/models) — "gemini-3-flash" doesn't exist (the real
+    # id is "-preview"), and "gemini-3.5-flash" / "gemini-flash-latest" were
+    # both returning 503 (over capacity) as of 2026-07. Flip MODEL_DRAFT back
+    # to gemini-3.5-flash once that settles down if you want the newer model.
+    model_calendar: str = "gemini-3.1-flash-lite-preview"
+    model_research: str = "gemini-3.1-flash-lite-preview"
+    model_outline: str = "gemini-3.1-flash-lite"
+    model_draft: str = "gemini-2.5-flash"
+    model_seo: str = "gemini-3.1-flash-lite"
+    model_qa: str = "gemini-3-flash-preview"
 
-    # ── Shopify ──────────────────────────────────────────────────
+    # Models tried, in order, when a stage's primary model errors (transient
+    # 429/503 over-capacity is common on the free tier). Reliable, generous-
+    # quota models. The primary is always tried first regardless of this list.
+    llm_fallback_models: list[str] = Field(
+        default_factory=lambda: ["gemini-2.5-flash", "gemini-3.1-flash-lite"]
+    )
+
+    # ── Linear (content calendar + draft handoff) ───────────────────
+    linear_api_key: str = ""
+    linear_team: str = ""
+    linear_project: str = "Blog Content Calendar"
+
+    # ── Shopify (auto-publish target for confident articles) ────────
+    # When configured, articles that pass QA with confidence >= threshold
+    # publish live to Shopify automatically; everything else waits in Linear.
+    # enable_shopify_publish is a kill-switch independent of the credentials.
+    enable_shopify_publish: bool = True
+    # If false, confident articles are still created in Shopify but UNPUBLISHED
+    # (hidden) for a human to review and click Publish in Shopify admin — a safe
+    # staging mode. True = go straight live.
+    shopify_publish_live: bool = True
     shopify_store_domain: str = ""
     shopify_access_token: str = ""
     shopify_blog_id: str = ""
     shopify_api_version: str = "2025-01"
+    # Public storefront domain (e.g. drflooring.ca) — used for links inside
+    # articles so they point at the live site, not the *.myshopify.com URL.
+    # Falls back to shopify_store_domain when empty.
+    public_domain: str = ""
+    # Weave the store in as the place to buy: naturally position the shop in
+    # the draft, and append a "Shop with us" CTA linking to the storefront.
+    shop_promo: bool = True
+    # Linear workflow states the pipeline moves an article's issue into.
+    # Defaults match a stock Linear team (Backlog/Todo/In Progress/Done). If
+    # your team has richer states, point these at e.g. "Ready to Review" /
+    # "Needs Adjustments" / "Blocked". A name that doesn't exist on the team
+    # falls back by state type so an issue is never left stuck in Backlog.
+    linear_published_state: str = "Done"        # auto-published live to Shopify
+    linear_review_state: str = "Todo"           # confident/ready — just needs a human to publish
+    linear_needs_work_state: str = "Todo"       # low confidence / QA wants a look
+    linear_blocked_state: str = "Todo"          # QA blocked (a comment explains why)
 
     # ── Optional integrations ────────────────────────────────────
-    fal_key: str = ""
+    # Image generation: OpenRouter (fractions of a cent/image on Gemini's
+    # token-based image billing) + Linear's own file storage for hosting —
+    # no fal.ai account/billing needed. Master switch below so the stage can
+    # be turned off deliberately even when a key is present (and vice versa).
+    # Generative Engine Optimization: answer-first content, a visible FAQ
+    # section, and JSON-LD (Article + FAQPage) structured data so AI answer
+    # engines (ChatGPT/Claude/Gemini/AI Overviews) can parse and cite the page.
+    enable_geo: bool = True
+
+    enable_images: bool = False
+    # When images aren't generated, drop each image slot's prompt into the body
+    # as a bold [bracketed] placeholder so the user can generate the image
+    # (e.g. with Shopify's AI) and swap it in before publishing.
+    image_placeholders: bool = True
+    openrouter_api_key: str = ""
+    openrouter_image_model: str = "google/gemini-3.1-flash-lite-image"
     dataforseo_login: str = ""
     dataforseo_password: str = ""
     slack_webhook_url: str = ""
-    preview_base_url: str = ""
 
     # ── Tracing ──────────────────────────────────────────────────
     langsmith_api_key: str = ""
     langsmith_tracing: bool = False
-    langsmith_project: str = "shopify-blog-pipeline"
+    langsmith_project: str = "blog-pipeline"
 
     # ── Data store ───────────────────────────────────────────────
     database_url: str = "sqlite:///data/pipeline.db"
 
     # ── Pipeline behavior ────────────────────────────────────────
-    gate_mode: str = "gated"  # "gated" | "auto"
+    # Articles with QA confidence below this land in "Needs Adjustments" in
+    # Linear instead of "Ready to Review". Everything reaches Linear either way.
     confidence_threshold: float = 0.75
     cadence: str = "3x/week: Mon/Wed/Fri"
     coverage_target_weeks: int = 4
@@ -72,19 +132,45 @@ class Settings(BaseSettings):
     niche: str = ""
     seed_keywords: list[str] = Field(default_factory=list)
     competitor_urls: list[str] = Field(default_factory=list)
+    # Bias research toward local + commercial/informational intent (good for a
+    # local business like a flooring retailer/installer). Set business_location
+    # to a city/region/service area to fold location into keywords + topics.
+    local_seo: bool = True
+    business_location: str = ""
+    # The publishing business itself. Injected into draft + QA so first-party
+    # brand mentions/CTAs are expected (not flagged as off-brand), and content
+    # is written in the business's own voice.
+    business_name: str = ""
+    business_description: str = ""
 
     # ── Convenience flags ────────────────────────────────────────
     @property
-    def has_openrouter(self) -> bool:
-        return bool(self.openrouter_api_key)
+    def store_link_base(self) -> str:
+        """https://<public storefront domain> for in-article links (no trailing
+        slash). Prefers public_domain, falls back to the myshopify domain."""
+        domain = (self.public_domain or self.shopify_store_domain).strip()
+        domain = domain.replace("https://", "").replace("http://", "").strip("/")
+        return f"https://{domain}" if domain else ""
+
+    @property
+    def has_google(self) -> bool:
+        return bool(self.google_api_key)
+
+    @property
+    def has_linear(self) -> bool:
+        return bool(self.linear_api_key and self.linear_team)
 
     @property
     def has_shopify(self) -> bool:
         return bool(self.shopify_store_domain and self.shopify_access_token)
 
     @property
+    def can_autopublish(self) -> bool:
+        return self.enable_shopify_publish and self.has_shopify
+
+    @property
     def has_images(self) -> bool:
-        return bool(self.fal_key)
+        return self.enable_images and bool(self.openrouter_api_key)
 
     @property
     def has_dataforseo(self) -> bool:

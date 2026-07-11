@@ -10,7 +10,7 @@ from __future__ import annotations
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from blog_pipeline.config import get_settings
-from blog_pipeline.llm import CostTracker, make_llm
+from blog_pipeline.llm import CostTracker, structured_invoke
 from blog_pipeline.schemas import Outline
 
 SYSTEM = """You are an SEO content strategist. Produce a clear, comprehensive \
@@ -26,7 +26,6 @@ def generate_outline(
     cost: CostTracker | None = None,
 ) -> Outline:
     settings = get_settings()
-    llm = make_llm(settings.model_outline, temperature=0.5)
 
     parts = [
         f"Topic: {topic}",
@@ -41,10 +40,11 @@ def generate_outline(
             f"verbatim, and find a gap to differentiate):\n{joined}"
         )
 
-    structured = llm.with_structured_output(Outline, include_raw=True)
-    result = structured.invoke(
-        [SystemMessage(content=SYSTEM), HumanMessage(content="\n\n".join(parts))]
+    return structured_invoke(
+        model=settings.model_outline,
+        schema=Outline,
+        messages=[SystemMessage(content=SYSTEM), HumanMessage(content="\n\n".join(parts))],
+        temperature=0.5,
+        stage="outline",
+        cost=cost,
     )
-    if cost is not None:
-        cost.record("outline", settings.model_outline, result["raw"])
-    return result["parsed"]

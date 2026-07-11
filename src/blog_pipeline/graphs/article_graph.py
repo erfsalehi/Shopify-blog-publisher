@@ -1,13 +1,17 @@
-"""Article drafting graph: outline -> draft -> seo -> images -> qa -> gate -> publish.
+"""Article drafting graph: outline -> draft -> seo -> images -> qa -> [publish?] -> sync.
 
 Design notes:
 - State is kept to JSON-friendly primitives/dicts so the SqliteSaver
-  checkpointer can serialize a paused run and resume it days later.
+  checkpointer can serialize a run and survive a mid-run crash.
 - Each node updates the backing Article row so progress is durable even if a
   later stage fails; the graph is the orchestrator, the DB is the record.
-- The human gate uses LangGraph `interrupt()`. In "auto" mode a high-confidence
-  pass skips the interrupt; otherwise the run pauses until `approve`/`reject`
-  resumes it with a Command(resume=...).
+- There is no human-approval interrupt. After QA the graph routes on the QA
+  outcome: a confident pass (verdict 'pass', confidence >= threshold) that
+  has Shopify configured publishes live to Shopify, then records that on the
+  Linear issue (moved to the published state, with the live URL). Anything
+  else — low confidence, verdict 'review', verdict 'block', or Shopify not
+  configured — skips publishing and just syncs to Linear for a human to
+  review and publish by hand.
 - Optional stages (images, qa) degrade to no-ops when their keys are absent so
   the same graph runs in a minimal Phase-1 configuration.
 """
@@ -18,20 +22,24 @@ from datetime import datetime, timezone
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import interrupt
 
 from blog_pipeline.agents.draft import generate_draft
 from blog_pipeline.agents.images import generate_images
 from blog_pipeline.agents.outline import generate_outline
 from blog_pipeline.agents.qa import review_article
+from blog_pipeline.agents.revise import revise_article
 from blog_pipeline.agents.seo import optimize_seo
 from blog_pipeline.config import get_settings
 from blog_pipeline.db import Article, ArticleStatus, get_session
 from blog_pipeline.db.models import CalendarEntry, EntryStatus
 from blog_pipeline.llm import CostTracker
-from blog_pipeline.schemas import Draft, ImageSlot, Outline
+from blog_pipeline.agents.geo import apply_geo
+from blog_pipeline.schemas import Draft, FAQItem, ImageSlot, Outline
+from blog_pipeline.tools.linear import IssueResult, LinearClient, LinearError
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
-from blog_pipeline.utils import slugify
+from blog_pipeline.utils import html_to_markdown, slugify
+
+BLOG_LABEL = "Blog"
 
 
 class ArticleState(TypedDict, total=False):
@@ -39,23 +47,33 @@ class ArticleState(TypedDict, total=False):
     topic: str
     target_keywords: list[str]
     competitor_headers: list[str]
+    linear_issue_id: str | None
 
     outline: dict
     title: str
     meta_description: str
     body_html: str
     image_slots: list[dict]
+    key_takeaways: list[str]
+    faq: list[dict]
 
     seo_title: str
     seo_description: str
     seo_score: float
     seo_metrics: dict
+    revision_count: int
 
     images: list[dict]
-    featured_file_id: str | None
+    featured_image_url: str | None
 
     qa_report: dict
     confidence: float
+
+    published: bool
+    shopify_draft: bool
+    shopify_article_id: str | None
+    shopify_url: str | None
+    publish_error: str | None
 
     cost_usd: float
     dry_run: bool
@@ -81,24 +99,57 @@ def _add_cost(state: ArticleState, tracker: CostTracker) -> float:
 
 
 # ── nodes ────────────────────────────────────────────────────────
+def _gather_competitor_headers(topic: str, keywords: list[str]) -> list[str]:
+    """Real SERP grounding: top-ranking competitor H2/H3s for the primary
+    keyword, so the outline/draft cover the angles Google already rewards
+    instead of generic filler. Falls back to SERP result titles when pages
+    can't be scraped; returns [] (no grounding) if DataForSEO is unconfigured
+    or anything errors — never blocks the run."""
+    settings = get_settings()
+    if not settings.has_dataforseo:
+        return []
+    primary = (keywords or [topic])[0]
+    try:
+        from blog_pipeline.tools.dataforseo import DataForSEOClient
+        from blog_pipeline.tools.scraper import gather_competitor_headers
+
+        serp = DataForSEOClient().serp_top(primary, depth=5)
+        urls = [r["url"] for r in serp[:3] if r.get("url")]
+        headers = gather_competitor_headers(urls) if urls else []
+        if not headers:
+            headers = [r["title"] for r in serp[:10] if r.get("title")]
+        return headers[:40]
+    except Exception:
+        return []
+
+
 def node_outline(state: ArticleState) -> dict:
     cost = CostTracker()
+    competitor_headers = state.get("competitor_headers") or _gather_competitor_headers(
+        state["topic"], state.get("target_keywords", [])
+    )
     outline: Outline = generate_outline(
         state["topic"],
         state.get("target_keywords", []),
-        competitor_headers=state.get("competitor_headers") or None,
+        competitor_headers=competitor_headers or None,
         cost=cost,
     )
     data = outline.model_dump()
     if state.get("article_id"):
         _update_article(state["article_id"], outline=data)
-    return {"outline": data, "cost_usd": _add_cost(state, cost)}
+    return {
+        "outline": data,
+        "competitor_headers": competitor_headers,
+        "cost_usd": _add_cost(state, cost),
+    }
 
 
 def node_draft(state: ArticleState) -> dict:
     cost = CostTracker()
     outline = Outline.model_validate(state["outline"])
-    draft: Draft = generate_draft(outline, cost=cost)
+    draft: Draft = generate_draft(
+        outline, competitor_headers=state.get("competitor_headers") or None, cost=cost
+    )
     if state.get("article_id"):
         _update_article(
             state["article_id"], title=draft.title, draft_html=draft.body_html
@@ -108,6 +159,8 @@ def node_draft(state: ArticleState) -> dict:
         "meta_description": draft.meta_description,
         "body_html": draft.body_html,
         "image_slots": [s.model_dump() for s in draft.image_slots],
+        "key_takeaways": draft.key_takeaways,
+        "faq": [f.model_dump() for f in draft.faq],
         "cost_usd": _add_cost(state, cost),
     }
 
@@ -120,6 +173,8 @@ def node_seo(state: ArticleState) -> dict:
     )[0]
     secondary = outline.get("secondary_keywords", [])
 
+    # Internal-link anchors from the store's own catalog (products + pages).
+    # Best-effort: a Shopify hiccup just means no internal links this run.
     link_targets: list[dict] = []
     if settings.has_shopify:
         try:
@@ -157,35 +212,117 @@ def node_seo(state: ArticleState) -> dict:
     }
 
 
+def node_revise(state: ArticleState) -> dict:
+    """Rewrite the body to fix the rubric's flagged weaknesses, then loop back
+    to SEO to re-score. Capped at one pass by route_after_seo."""
+    outline = state.get("outline", {})
+    primary = outline.get("primary_keyword") or (
+        state.get("target_keywords") or [state["topic"]]
+    )[0]
+    secondary = outline.get("secondary_keywords", [])
+
+    cost = CostTracker()
+    new_html = revise_article(
+        body_html=state["body_html"],
+        primary_keyword=primary,
+        secondary_keywords=secondary,
+        metrics=state.get("seo_metrics", {}),
+        cost=cost,
+    )
+    if state.get("article_id"):
+        _update_article(state["article_id"], draft_html=new_html)
+    return {
+        "body_html": new_html,
+        "revision_count": state.get("revision_count", 0) + 1,
+        "cost_usd": _add_cost(state, cost),
+    }
+
+
+def route_after_seo(state: ArticleState) -> str:
+    """One revision pass if the article scored below the SEO pass mark."""
+    settings = get_settings()
+    if (
+        state.get("seo_score", 100.0) < settings.seo_min_score
+        and state.get("revision_count", 0) < 1
+    ):
+        return "revise"
+    return "images"
+
+
 def node_images(state: ArticleState) -> dict:
     settings = get_settings()
-    if not settings.has_images:
-        return {}
     slots = [ImageSlot.model_validate(s) for s in state.get("image_slots", [])]
+    if not slots:
+        return {}
     slug = slugify(state.get("title", state["topic"]))
-    body, records, featured = generate_images(
-        body_html=state["body_html"], image_slots=slots, slug=slug
-    )
+
+    if settings.has_images:
+        # Generate real images and host them (Gemini via OpenRouter + Linear).
+        body, records, featured = generate_images(
+            body_html=state["body_html"], image_slots=slots, slug=slug
+        )
+    elif settings.image_placeholders:
+        # Don't generate — drop bold [bracketed] prompts into the body for the
+        # user to generate (e.g. with Shopify AI) and swap in before publishing.
+        from blog_pipeline.agents.images import place_image_prompts
+
+        body, records, featured = place_image_prompts(
+            body_html=state["body_html"], image_slots=slots
+        )
+    else:
+        return {}
+
     if state.get("article_id"):
         _update_article(state["article_id"], images=records, draft_html=body)
     return {
         "body_html": body,
         "images": records,
-        "featured_file_id": featured,
+        "featured_image_url": featured,
     }
 
 
-def node_qa(state: ArticleState) -> dict:
+def node_geo(state: ArticleState) -> dict:
+    """Enrichment before QA: append a "Shop with us" CTA (store promotion), then
+    add AI-SEO artifacts — a Key-takeaways box + FAQ section and JSON-LD
+    (Article + FAQPage) structured data so AI answer engines can parse and cite
+    the page. Runs after images and before QA (so QA reviews it all)."""
+    from blog_pipeline.agents.promote import render_shop_cta
+
     settings = get_settings()
-    # QA requires an LLM key; if research/QA disabled, pass through neutral.
+    body = state["body_html"]
+
+    # Store promotion: closing CTA sits at the end of the main content, before
+    # the FAQ that GEO appends.
+    cta = render_shop_cta()
+    if cta:
+        body += cta
+
+    if settings.enable_geo:
+        faq = [FAQItem.model_validate(f) for f in state.get("faq", [])]
+        body = apply_geo(
+            body_html=body,
+            title=state.get("seo_title") or state.get("title") or state["topic"],
+            description=state.get("seo_description") or state.get("meta_description", ""),
+            takeaways=state.get("key_takeaways", []),
+            faq=faq,
+        )
+
+    if body == state["body_html"]:
+        return {}
+    if state.get("article_id"):
+        _update_article(state["article_id"], draft_html=body)
+    return {"body_html": body}
+
+
+def node_qa(state: ArticleState) -> dict:
     existing_titles: list[str] = []
-    if settings.has_shopify:
-        try:
-            client = ShopifyClient()
-            existing_titles = [a["title"] for a in client.list_published()]
-            client.close()
-        except Exception:
-            existing_titles = []
+    with get_session() as s:
+        query = s.query(Article.title).filter(
+            Article.status == ArticleStatus.synced, Article.title.isnot(None)
+        )
+        if state.get("article_id"):
+            query = query.filter(Article.id != state["article_id"])
+        existing_titles = [row[0] for row in query.all()]
 
     cost = CostTracker()
     report = review_article(
@@ -208,120 +345,313 @@ def node_qa(state: ArticleState) -> dict:
     }
 
 
-def node_gate(state: ArticleState) -> dict:
-    """Pause for human approval. Resumed with {'action': 'approve'|'reject', ...}."""
-    if state.get("article_id"):
-        _update_article(state["article_id"], status=ArticleStatus.pending_review)
-
-    decision = interrupt(
-        {
-            "article_id": state.get("article_id"),
-            "title": state.get("seo_title") or state.get("title"),
-            "seo_score": state.get("seo_score"),
-            "confidence": state.get("confidence"),
-            "qa_report": state.get("qa_report"),
-            "prompt": "Approve, edit, or reject this article.",
-        }
-    )
-    action = (decision or {}).get("action", "reject")
-    return {"status": "approved" if action == "approve" else "rejected"}
-
-
-def node_publish(state: ArticleState) -> dict:
+def _target_state(verdict: str, confidence: float, threshold: float) -> str:
+    """Linear-only path (no Shopify publish): map QA outcome to a configured
+    workflow state that actually exists on the team."""
     settings = get_settings()
-    dry_run = state.get("dry_run", False)
+    if verdict == "block":
+        return settings.linear_blocked_state
+    if verdict == "pass" and confidence >= threshold:
+        return settings.linear_review_state
+    return settings.linear_needs_work_state
 
-    if not settings.has_shopify and not dry_run:
-        _fail(state, "Shopify not configured; cannot publish.")
-        return {"status": "failed", "result": {"error": "shopify_not_configured"}}
+
+def _build_description(state: ArticleState) -> str:
+    outline = state.get("outline") or {}
+    primary = outline.get("primary_keyword") or (
+        state.get("target_keywords") or [state.get("topic", "")]
+    )[0]
+    secondary = outline.get("secondary_keywords") or []
+    qa = state.get("qa_report") or {}
+
+    lines = [f"**Primary keyword:** {primary}"]
+    if secondary:
+        lines.append(f"**Secondary keywords:** {', '.join(secondary)}")
+    if state.get("seo_score") is not None:
+        lines.append(f"**SEO score:** {state['seo_score']}/100")
+    if state.get("confidence") is not None:
+        lines.append(f"**QA confidence:** {state['confidence']}")
+    lines.append("\n---")
+
+    featured = state.get("featured_image_url")
+    # Only embed a real hosted image; a placeholder "featured" is just prompt
+    # text and already appears inline in the body.
+    if featured and str(featured).startswith("http"):
+        lines.append(f"\n![featured image]({featured})")
+
+    if state.get("published"):
+        lines.insert(0, f"✅ **Published live to Shopify:** {state.get('shopify_url')}\n")
+    elif state.get("shopify_draft"):
+        lines.insert(
+            0,
+            "📝 **Created in Shopify as an UNPUBLISHED draft.** Open Shopify admin "
+            "→ Content → Blog posts, review it, and click **Publish** when ready "
+            f"(it'll live at {state.get('shopify_url')}).\n",
+        )
+    elif state.get("publish_error"):
+        lines.insert(
+            0,
+            f"⚠️ **Auto-publish to Shopify failed:** {state['publish_error']} — "
+            "review and publish this one manually.\n",
+        )
+
+    lines.append("\n" + html_to_markdown(state.get("body_html", "")))
+
+    lines.append("\n---\n### SEO meta")
+    lines.append(f"- **SEO title:** {state.get('seo_title') or state.get('title', '')}")
+    lines.append(f"- **Meta description:** {state.get('seo_description', '')}")
+
+    images = state.get("images") or []
+    hosted = [i for i in images if i.get("url")]
+    placeholders = [i for i in images if not i.get("url")]
+    if hosted:
+        lines.append("\n### Images")
+        for img in hosted:
+            lines.append(f"- {img.get('role')}: [{img.get('alt')}]({img.get('url')})")
+    if placeholders:
+        lines.append(
+            "\n### Image prompts (generate & insert before publishing)\n"
+            "The bold `[IMAGE — …]` markers in the body are prompts. Generate each "
+            "with Shopify's AI image tool and replace the marker."
+        )
+        for img in placeholders:
+            lines.append(f"- **{img.get('role')}**: {img.get('prompt')} _(alt: {img.get('alt')})_")
+
+    if qa:
+        lines.append("\n### QA notes")
+        if qa.get("notes"):
+            lines.append(qa["notes"])
+        if qa.get("unverifiable_claims"):
+            lines.append("**Unverifiable claims flagged:**")
+            lines.extend(f"- {c}" for c in qa["unverifiable_claims"])
+        if qa.get("brand_safety_issues"):
+            lines.append("**Brand safety issues flagged:**")
+            lines.extend(f"- {c}" for c in qa["brand_safety_issues"])
+        if qa.get("duplicate_of"):
+            lines.append(f"**Possible duplicate of:** {qa['duplicate_of']}")
+
+    if state.get("published"):
+        lines.append(
+            "\n### Status\n"
+            "Auto-published live to Shopify (QA passed with high confidence). "
+            "Edit in Shopify admin if you want to revise the live post."
+        )
+    elif state.get("shopify_draft"):
+        lines.append(
+            "\n### Publish checklist\n"
+            "- [ ] Review the unpublished draft in Shopify admin\n"
+            "- [ ] Click Publish in Shopify when ready\n"
+            "- [ ] Move this issue to Done"
+        )
+    else:
+        lines.append(
+            "\n### Publish checklist\n"
+            "- [ ] Review and edit the copy above\n"
+            "- [ ] Copy the HTML below into your CMS\n"
+            "- [ ] Set the featured image\n"
+            "- [ ] Publish, then mark this issue Done"
+        )
+    lines.append(
+        "\n<details><summary>Raw HTML</summary>\n\n```html\n"
+        + state.get("body_html", "") + "\n```\n</details>"
+    )
+    return "\n".join(lines)
+
+
+def node_publish_shopify(state: ArticleState) -> dict:
+    """Push the article to Shopify. Reached only for confident passes when
+    Shopify is configured (see route_after_qa). Goes live when
+    SHOPIFY_PUBLISH_LIVE is true; otherwise creates it unpublished (hidden)
+    for a human to review and publish from Shopify admin. A failure is
+    non-fatal: it's recorded on state so the Linear sync surfaces it as
+    'Needs Adjustments' for manual publishing rather than losing work."""
+    settings = get_settings()
+    live = settings.shopify_publish_live
+    dry_run = state.get("dry_run", False)
+    title = state.get("seo_title") or state.get("title") or state["topic"]
+    handle = slugify(title)
 
     try:
         client = ShopifyClient()
     except ShopifyError as e:
+        return {"published": False, "publish_error": str(e)}
+
+    try:
+        result = client.create_article(
+            title=title,
+            body_html=state["body_html"],
+            summary=state.get("seo_description"),
+            handle=handle,
+            seo_title=state.get("seo_title"),
+            seo_description=state.get("seo_description"),
+            published=live,
+            dry_run=dry_run,
+        )
+    except ShopifyError as e:
+        return {"published": False, "publish_error": str(e)}
+    finally:
+        client.close()
+
+    if dry_run:
+        return {
+            "published": False,
+            "result": {"shopify_payload": result.payload, "publish_live": live},
+        }
+
+    if live:
+        if state.get("article_id"):
+            _update_article(
+                state["article_id"],
+                status=ArticleStatus.published,
+                shopify_article_id=result.article_id,
+                shopify_url=result.url,
+                handle=result.handle,
+                published_at=datetime.now(timezone.utc),
+            )
+        return {
+            "published": True,
+            "shopify_article_id": result.article_id,
+            "shopify_url": result.url,
+        }
+
+    # Hidden-draft mode: real article created in Shopify, not public. It still
+    # needs a human to click Publish, so it's a Linear to-do, not Done.
+    if state.get("article_id"):
+        _update_article(
+            state["article_id"],
+            shopify_article_id=result.article_id,
+            shopify_url=result.url,
+            handle=result.handle,
+        )
+    return {
+        "published": False,
+        "shopify_draft": True,
+        "shopify_article_id": result.article_id,
+        "shopify_url": result.url,
+    }
+
+
+def route_after_qa(state: ArticleState) -> str:
+    """Confident pass + Shopify configured -> auto-publish; else Linear only."""
+    settings = get_settings()
+    report = state.get("qa_report") or {}
+    verdict = report.get("verdict", "review")
+    confidence = state.get("confidence", 0.0)
+    if (
+        settings.can_autopublish
+        and verdict == "pass"
+        and confidence >= settings.confidence_threshold
+    ):
+        return "publish"
+    return "sync_linear"
+
+
+def node_sync_linear(state: ArticleState) -> dict:
+    settings = get_settings()
+    dry_run = state.get("dry_run", False)
+    report = state.get("qa_report") or {}
+    verdict = report.get("verdict", "review")
+    confidence = state.get("confidence", 0.0)
+    if state.get("published"):
+        target_state = settings.linear_published_state
+    elif state.get("shopify_draft"):
+        # Real article created in Shopify but unpublished — human needs to
+        # click Publish, so it's a review item, not Done.
+        target_state = settings.linear_review_state
+    elif state.get("publish_error"):
+        # Was confident enough to publish but the publish call failed —
+        # flag it for a human to publish by hand rather than silently.
+        target_state = settings.linear_needs_work_state
+    else:
+        target_state = _target_state(verdict, confidence, settings.confidence_threshold)
+    title = state.get("seo_title") or state.get("title") or state["topic"]
+    description = _build_description(state)
+
+    if not settings.has_linear and not dry_run:
+        _fail(state, "Linear not configured; cannot sync.")
+        return {"status": "failed", "result": {"error": "linear_not_configured"}}
+
+    try:
+        client = LinearClient()
+    except LinearError as e:
         if dry_run:
             client = None  # dry-run can proceed without a live client
         else:
             _fail(state, str(e))
             return {"status": "failed", "result": {"error": str(e)}}
 
-    handle = slugify(state.get("seo_title") or state["title"])
     try:
         if client is None:
-            # dry-run without credentials: synthesize the payload preview
-            from blog_pipeline.tools.shopify import PublishResult
-
-            result = PublishResult(
-                article_id=None, handle=handle, url=None, dry_run=True,
+            result = IssueResult(
+                id=state.get("linear_issue_id"), identifier=None, url=None,
+                dry_run=True,
                 payload={
-                    "article": {
-                        "title": state.get("seo_title") or state["title"],
-                        "handle": handle,
-                        "bodyLength": len(state["body_html"]),
-                        "seo": {
-                            "title": state.get("seo_title"),
-                            "description": state.get("seo_description"),
-                        },
+                    "issue": {
+                        "title": title,
+                        "state": target_state,
+                        "descriptionLength": len(description),
                     }
                 },
             )
-        else:
-            result = client.create_article(
-                title=state.get("seo_title") or state["title"],
-                body_html=state["body_html"],
-                summary=state.get("seo_description"),
-                handle=handle,
-                seo_title=state.get("seo_title"),
-                seo_description=state.get("seo_description"),
-                image_file_id=state.get("featured_file_id"),
-                dry_run=dry_run,
+        elif state.get("linear_issue_id"):
+            result = client.update_issue(
+                state["linear_issue_id"], title=title, description=description,
+                state=target_state, labels=[BLOG_LABEL], dry_run=dry_run,
             )
-            client.close()
-    except ShopifyError as e:
+        else:
+            result = client.create_issue(
+                title=title, description=description, state=target_state,
+                labels=[BLOG_LABEL], dry_run=dry_run,
+            )
+        if client is not None and not dry_run and verdict == "block":
+            issues = report.get("brand_safety_issues") or []
+            note = "QA blocked this draft." + (" " + "; ".join(issues) if issues else "")
+            try:
+                client.add_comment(result.id, note)
+            except LinearError:
+                pass
+    except LinearError as e:
         _fail(state, str(e))
         return {"status": "failed", "result": {"error": str(e)}}
+    finally:
+        if client is not None:
+            client.close()
 
     if dry_run:
         if state.get("article_id"):
-            _update_article(state["article_id"], handle=handle)
-        return {
-            "status": "dry_run",
-            "result": {"dry_run": True, "payload": result.payload},
-        }
+            _update_article(state["article_id"], handle=slugify(title))
+        preview: dict = {"dry_run": True, "linear_payload": result.payload,
+                         "linear_state": target_state}
+        shopify_preview = (state.get("result") or {}).get("shopify_payload")
+        if shopify_preview is not None:
+            preview["shopify_payload"] = shopify_preview
+            preview["would_publish"] = True
+        return {"status": "dry_run", "result": preview}
 
-    published_at = datetime.now(timezone.utc)
+    published = bool(state.get("published"))
+    synced_at = datetime.now(timezone.utc)
     if state.get("article_id"):
         _update_article(
             state["article_id"],
-            status=ArticleStatus.published,
-            shopify_article_id=result.article_id,
-            handle=result.handle,
-            published_at=published_at,
+            status=ArticleStatus.published if published else ArticleStatus.synced,
+            linear_issue_id=result.id,
+            linear_identifier=result.identifier,
+            linear_url=result.url,
+            synced_at=synced_at,
         )
-        _mark_entry_published(state["article_id"])
+        _mark_entry_synced(state["article_id"], result, published=published)
     return {
-        "status": "published",
+        "status": "published" if published else "synced",
         "result": {
-            "shopify_article_id": result.article_id,
+            "linear_issue_id": result.id,
+            "linear_identifier": result.identifier,
             "url": result.url,
-            "handle": result.handle,
+            "linear_state": target_state,
+            "shopify_url": state.get("shopify_url"),
+            "shopify_article_id": state.get("shopify_article_id"),
+            "publish_error": state.get("publish_error"),
         },
     }
-
-
-def node_rejected(state: ArticleState) -> dict:
-    if state.get("article_id"):
-        _update_article(state["article_id"], status=ArticleStatus.rejected)
-    return {"status": "rejected", "result": {"rejected": True}}
-
-
-def node_blocked(state: ArticleState) -> dict:
-    reason = "QA blocked publication."
-    report = state.get("qa_report") or {}
-    issues = report.get("brand_safety_issues") or []
-    if issues:
-        reason += " " + "; ".join(issues)
-    _fail(state, reason)
-    return {"status": "blocked", "result": {"blocked": True, "reason": reason}}
 
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -332,36 +662,19 @@ def _fail(state: ArticleState, reason: str) -> None:
         )
 
 
-def _mark_entry_published(article_id: int) -> None:
+def _mark_entry_synced(
+    article_id: int, result: IssueResult, published: bool = False
+) -> None:
     with get_session() as s:
         entry = (
             s.query(CalendarEntry).filter(CalendarEntry.article_id == article_id).first()
         )
         if entry:
-            entry.status = EntryStatus.published
-
-
-# ── routing ──────────────────────────────────────────────────────
-def route_after_qa(state: ArticleState) -> str:
-    settings = get_settings()
-    report = state.get("qa_report") or {}
-    verdict = report.get("verdict", "review")
-    confidence = state.get("confidence", 0.0)
-
-    if verdict == "block":
-        return "blocked"
-    # Auto mode: publish straight through when QA is confident enough.
-    if (
-        settings.gate_mode == "auto"
-        and verdict == "pass"
-        and confidence >= settings.confidence_threshold
-    ):
-        return "publish"
-    return "gate"
-
-
-def route_after_gate(state: ArticleState) -> str:
-    return "publish" if state.get("status") == "approved" else "rejected"
+            entry.status = EntryStatus.published if published else EntryStatus.drafted
+            if not entry.linear_issue_id:
+                entry.linear_issue_id = result.id
+                entry.linear_identifier = result.identifier
+                entry.linear_url = result.url
 
 
 # ── graph assembly ───────────────────────────────────────────────
@@ -371,26 +684,26 @@ def build_article_graph(checkpointer=None):
     g.add_node("draft", node_draft)
     g.add_node("seo", node_seo)
     g.add_node("images", node_images)
+    g.add_node("revise", node_revise)
+    g.add_node("geo", node_geo)
     g.add_node("qa", node_qa)
-    g.add_node("gate", node_gate)
-    g.add_node("publish", node_publish)
-    g.add_node("rejected", node_rejected)
-    g.add_node("blocked", node_blocked)
+    g.add_node("publish", node_publish_shopify)
+    g.add_node("sync_linear", node_sync_linear)
 
     g.add_edge(START, "outline")
     g.add_edge("outline", "draft")
     g.add_edge("draft", "seo")
-    g.add_edge("seo", "images")
-    g.add_edge("images", "qa")
+    g.add_conditional_edges(
+        "seo", route_after_seo, {"revise": "revise", "images": "images"}
+    )
+    g.add_edge("revise", "seo")
+    g.add_edge("images", "geo")
+    g.add_edge("geo", "qa")
     g.add_conditional_edges(
         "qa", route_after_qa,
-        {"publish": "publish", "gate": "gate", "blocked": "blocked"},
+        {"publish": "publish", "sync_linear": "sync_linear"},
     )
-    g.add_conditional_edges(
-        "gate", route_after_gate, {"publish": "publish", "rejected": "rejected"}
-    )
-    g.add_edge("publish", END)
-    g.add_edge("rejected", END)
-    g.add_edge("blocked", END)
+    g.add_edge("publish", "sync_linear")
+    g.add_edge("sync_linear", END)
 
     return g.compile(checkpointer=checkpointer)

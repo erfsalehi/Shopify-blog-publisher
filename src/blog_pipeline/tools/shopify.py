@@ -44,7 +44,11 @@ class ShopifyClient:
         api_version: str | None = None,
     ) -> None:
         s = get_settings()
-        self.domain = (domain or s.shopify_store_domain).strip()
+        raw_domain = (domain or s.shopify_store_domain).strip()
+        # Tolerate a pasted https:// prefix, trailing slash, or path — the
+        # Admin API endpoint is built from a bare host.
+        raw_domain = raw_domain.split("://", 1)[-1].strip("/").split("/", 1)[0]
+        self.domain = raw_domain
         self.token = token or s.shopify_access_token
         self.api_version = api_version or s.shopify_api_version
         if not self.domain or not self.token:
@@ -110,21 +114,47 @@ class ShopifyClient:
         data = self.graphql(query, {"n": limit})
         return data["articles"]["nodes"]
 
-    def list_link_targets(self, limit: int = 50) -> list[dict]:
-        """Products + pages usable as internal-link anchors: {title, url}."""
+    def list_link_targets(self, limit: int = 100) -> list[dict]:
+        """Collections + pages usable as internal-link anchors: {title, url}.
+
+        Collections (category names like "Laminate Flooring") and service/local
+        pages ("Flooring in Langley", "Our Services") are what actually appear
+        as phrases in article prose — individual product SKUs almost never do,
+        so they're deliberately excluded. Junk targets (theme sitemap pages,
+        the home page, brand sub-collections, encoding-glitched titles) are
+        filtered out. Pages come first (highest-value local/service links),
+        then collections.
+        """
         query = """
         query($n: Int!) {
-          products(first: $n) { nodes { title handle } }
+          collections(first: $n) { nodes { title handle } }
           pages(first: $n) { nodes { title handle } }
         }
         """
         data = self.graphql(query, {"n": limit})
-        base = f"https://{self.domain}"
+        # Prefer the public storefront domain so links point at the live site
+        # (e.g. drflooring.ca) rather than the *.myshopify.com URL.
+        base = get_settings().store_link_base or f"https://{self.domain}"
+
+        def _ok(title: str, handle: str) -> bool:
+            t = (title or "").strip().lower()
+            if not t or "�" in title:  # blank or encoding-glitched
+                return False
+            if t.startswith(("html sitemap", "brands -")):  # theme junk / brand SKUs
+                return False
+            if handle in {"frontpage"} or handle.startswith("avada-sitemap"):
+                return False
+            return True
+
         targets: list[dict] = []
-        for p in data["products"]["nodes"]:
-            targets.append({"title": p["title"], "url": f"{base}/products/{p['handle']}"})
         for pg in data["pages"]["nodes"]:
-            targets.append({"title": pg["title"], "url": f"{base}/pages/{pg['handle']}"})
+            if _ok(pg["title"], pg["handle"]):
+                targets.append({"title": pg["title"], "url": f"{base}/pages/{pg['handle']}"})
+        for col in data["collections"]["nodes"]:
+            if _ok(col["title"], col["handle"]):
+                targets.append(
+                    {"title": col["title"], "url": f"{base}/collections/{col['handle']}"}
+                )
         return targets
 
     # ── image upload ─────────────────────────────────────────────
@@ -191,6 +221,7 @@ class ShopifyClient:
         image_file_id: str | None = None,
         blog_id: str | None = None,
         author: str = "Content Team",
+        published: bool = True,
         dry_run: bool = False,
     ) -> PublishResult:
         blog = blog_id or self.default_blog_id()
@@ -199,17 +230,29 @@ class ShopifyClient:
             "title": title,
             "body": body_html,
             "author": {"name": author},
-            "isPublished": True,
+            "isPublished": published,
         }
         if handle:
             article["handle"] = handle
         if summary:
             article["summary"] = summary
-        if seo_title or seo_description:
-            article["seo"] = {
-                "title": seo_title or title,
-                "description": seo_description or (summary or ""),
-            }
+        # ArticleCreateInput has no `seo` field (unlike products). Article meta
+        # title/description are set via the conventional `global.title_tag` /
+        # `global.description_tag` metafields, which themes read for <title>
+        # and <meta name="description">.
+        metafields: list[dict] = []
+        if seo_title:
+            metafields.append({
+                "namespace": "global", "key": "title_tag",
+                "type": "single_line_text_field", "value": seo_title,
+            })
+        if seo_description:
+            metafields.append({
+                "namespace": "global", "key": "description_tag",
+                "type": "single_line_text_field", "value": seo_description,
+            })
+        if metafields:
+            article["metafields"] = metafields
         if image_file_id:
             article["image"] = {"id": image_file_id}
 

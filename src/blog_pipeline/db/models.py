@@ -2,9 +2,13 @@
 
 Two clusters:
   * ContentCalendar + CalendarEntry — the rolling topic queue the weekly
-    calendar agent maintains.
+    calendar agent maintains. Each entry is mirrored to a Linear issue as
+    soon as it's queued (linear_issue_id), so the calendar is visible in
+    Linear before drafting ever starts.
   * Article — one row per drafting run, carrying outputs, QA score, cost,
-    LangSmith trace id, and Shopify publish result.
+    LangSmith trace id, and the Linear issue the finished draft was synced
+    to (there is no separate "publish" step — Linear is the handoff, a
+    human publishes from there).
 
 JSON columns hold list/dict fields (keywords, outline, images) so the same
 schema works on SQLite and Postgres without a migration.
@@ -38,19 +42,21 @@ class Base(DeclarativeBase):
 
 
 class ArticleStatus(str, enum.Enum):
+    """Pipeline execution outcome. `synced` articles wait in Linear for a
+    human; `published` ones auto-published live to Shopify (and their Linear
+    issue is moved to the published state as a record)."""
+
     draft = "draft"
-    pending_review = "pending_review"
-    approved = "approved"
-    published = "published"
+    synced = "synced"  # content written to Linear, awaiting human review
+    published = "published"  # auto-published live to Shopify
     failed = "failed"
-    rejected = "rejected"
 
 
 class EntryStatus(str, enum.Enum):
     queued = "queued"
     drafting = "drafting"
-    drafted = "drafted"
-    published = "published"
+    drafted = "drafted"  # article synced to Linear; awaiting human publish
+    published = "published"  # article auto-published live to Shopify
     skipped = "skipped"
 
 
@@ -92,6 +98,13 @@ class CalendarEntry(Base):
     difficulty: Mapped[float | None] = mapped_column(Float, nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # The Linear issue created for this slot when it was queued (Backlog
+    # state, due date = scheduled_date). The article graph updates this same
+    # issue in place rather than creating a second one when drafting begins.
+    linear_issue_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    linear_identifier: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    linear_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     article_id: Mapped[int | None] = mapped_column(
         ForeignKey("article.id"), nullable=True
     )
@@ -117,7 +130,7 @@ class Article(Base):
     seo_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
     seo_description: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     handle: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    # List of {role, url, alt, shopify_file_id} dicts.
+    # List of {role, url, alt} dicts.
     images: Mapped[list] = mapped_column(JSON, default=list)
 
     seo_score: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -129,7 +142,14 @@ class Article(Base):
     )
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    linear_issue_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    linear_identifier: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    linear_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Set when the article auto-published live to Shopify.
     shopify_article_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    shopify_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)

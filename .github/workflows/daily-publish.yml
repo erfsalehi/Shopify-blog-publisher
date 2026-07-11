@@ -1,8 +1,8 @@
-name: Daily Publish
+name: Daily Draft
 
-# Drafts and publishes every calendar entry due today. Days with nothing due
-# are a no-op, so this can run daily regardless of cadence. Requires a
-# persistent DATABASE_URL (Postgres) as above.
+# Drafts every calendar entry due today and syncs each one to Linear. Days
+# with nothing due are a no-op, so this can run daily regardless of cadence.
+# Requires a persistent DATABASE_URL (Postgres) as above.
 
 on:
   schedule:
@@ -10,12 +10,12 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Print payloads instead of publishing"
+        description: "Print payloads instead of syncing to Linear"
         type: boolean
         default: false
 
 jobs:
-  publish:
+  draft:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -24,17 +24,20 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -e .
-      - name: Run daily publish
+      - name: Run daily draft
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM: ${{ vars.LINEAR_TEAM }}
+          LINEAR_PROJECT: ${{ vars.LINEAR_PROJECT }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
           SHOPIFY_BLOG_ID: ${{ secrets.SHOPIFY_BLOG_ID }}
-          FAL_KEY: ${{ secrets.FAL_KEY }}
+          ENABLE_SHOPIFY_PUBLISH: ${{ vars.ENABLE_SHOPIFY_PUBLISH }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
-          GATE_MODE: ${{ vars.GATE_MODE }}
         run: |
           blog-pipeline init-db
           blog-pipeline run-daily ${{ inputs.dry_run && '--dry-run' || '' }}

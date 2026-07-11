@@ -1,8 +1,10 @@
-"""Drive the article graph: start runs, pause at the gate, resume on decision.
+"""Drive the article graph: create the Article row, run it to completion.
 
-Checkpoints persist to a dedicated SQLite file so a run interrupted at the
-human gate can be resumed by a later CLI invocation (approve/reject) — the
-thread_id stored on the Article row is the handle back into the checkpoint.
+Checkpoints persist to a dedicated SQLite file purely for mid-run crash
+recovery (LangGraph resumes a partially-run graph from its last checkpoint on
+the next `graph.invoke` with the same thread_id) — there's no human-approval
+pause to resume from anymore, since the graph always runs straight through to
+`sync_linear`.
 """
 
 from __future__ import annotations
@@ -11,9 +13,7 @@ import uuid
 from pathlib import Path
 
 from langgraph.checkpoint.sqlite import SqliteSaver
-from langgraph.types import Command
 
-from blog_pipeline.config import get_settings
 from blog_pipeline.db import Article, ArticleStatus, get_session
 from blog_pipeline.db.models import TopicSource
 from blog_pipeline.graphs.article_graph import build_article_graph
@@ -43,7 +43,9 @@ def create_article_row(
     keywords: list[str],
     source: TopicSource = TopicSource.manual,
     entry_id: int | None = None,
-) -> int:
+) -> tuple[int, str | None]:
+    """Create the Article row. Returns (article_id, linear_issue_id-of-entry)."""
+    linear_issue_id: str | None = None
     with get_session() as s:
         article = Article(
             topic=topic,
@@ -61,21 +63,8 @@ def create_article_row(
             if entry:
                 entry.article_id = article_id
                 entry.status = EntryStatus.drafting
-    return article_id
-
-
-def _summarize(state: dict, interrupted: bool, thread_id: str) -> dict:
-    if interrupted:
-        return {"status": "pending_review", "thread_id": thread_id,
-                "interrupt": state}
-    return {
-        "status": state.get("status"),
-        "thread_id": thread_id,
-        "result": state.get("result"),
-        "seo_score": state.get("seo_score"),
-        "confidence": state.get("confidence"),
-        "cost_usd": state.get("cost_usd"),
-    }
+                linear_issue_id = entry.linear_issue_id
+    return article_id, linear_issue_id
 
 
 def run_article(
@@ -88,14 +77,12 @@ def run_article(
     dry_run: bool = False,
     article_id: int | None = None,
 ) -> dict:
-    """Start (or continue) a full article run. Returns a summary dict.
-
-    If the run hits the human gate it returns status 'pending_review' with the
-    interrupt payload; call `resume_article` later to finish it.
-    """
+    """Run a full article: outline -> draft -> seo -> images -> qa -> sync to
+    Linear. Returns a summary dict with the final status and result."""
     keywords = keywords or []
+    linear_issue_id: str | None = None
     if article_id is None:
-        article_id = create_article_row(topic, keywords, source, entry_id)
+        article_id, linear_issue_id = create_article_row(topic, keywords, source, entry_id)
 
     thread_id = f"article-{article_id}-{uuid.uuid4().hex[:8]}"
     with get_session() as s:
@@ -108,6 +95,7 @@ def run_article(
         "topic": topic,
         "target_keywords": keywords,
         "competitor_headers": competitor_headers or [],
+        "linear_issue_id": linear_issue_id,
         "dry_run": dry_run,
         "cost_usd": 0.0,
     }
@@ -117,32 +105,14 @@ def run_article(
     try:
         graph = build_article_graph(checkpointer=cp)
         final = graph.invoke(initial, config=config)
-        snapshot = graph.get_state(config)
-        interrupted = bool(snapshot.next)
     finally:
         _close_checkpointer(cp)
-    return _summarize(final, interrupted, thread_id)
 
-
-def resume_article(article_id: int, action: str, note: str = "") -> dict:
-    """Resume a paused run at the human gate with approve/reject."""
-    with get_session() as s:
-        obj = s.get(Article, article_id)
-        if obj is None:
-            raise ValueError(f"Article {article_id} not found.")
-        thread_id = obj.thread_id
-    if not thread_id:
-        raise ValueError(f"Article {article_id} has no active run to resume.")
-
-    config = {"configurable": {"thread_id": thread_id}}
-    cp = _checkpointer()
-    try:
-        graph = build_article_graph(checkpointer=cp)
-        final = graph.invoke(
-            Command(resume={"action": action, "note": note}), config=config
-        )
-        snapshot = graph.get_state(config)
-        interrupted = bool(snapshot.next)
-    finally:
-        _close_checkpointer(cp)
-    return _summarize(final, interrupted, thread_id)
+    return {
+        "status": final.get("status"),
+        "thread_id": thread_id,
+        "result": final.get("result"),
+        "seo_score": final.get("seo_score"),
+        "confidence": final.get("confidence"),
+        "cost_usd": final.get("cost_usd"),
+    }

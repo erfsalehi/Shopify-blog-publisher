@@ -1,1 +1,1 @@
-"""External tool clients: Shopify, DataForSEO, competitor scraper."""
+"""External tool clients: Linear, Shopify, DataForSEO, competitor scraper."""
