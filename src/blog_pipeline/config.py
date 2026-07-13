@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+
+def _csv(value: str) -> list[str]:
+    return [v.strip() for v in value.split(",") if v.strip()]
 
 
 class Settings(BaseSettings):
@@ -47,9 +50,12 @@ class Settings(BaseSettings):
     # Models tried, in order, when a stage's primary model errors (transient
     # 429/503 over-capacity is common on the free tier). Reliable, generous-
     # quota models. The primary is always tried first regardless of this list.
-    llm_fallback_models: list[str] = Field(
-        default_factory=lambda: ["gemini-2.5-flash", "gemini-3.1-flash-lite"]
-    )
+    # Comma-separated string, not list[str]: pydantic-settings tries to
+    # JSON-decode list-typed env vars, which raises SettingsError on a plain
+    # empty string — and GitHub Actions passes an unset `vars.X` through as
+    # exactly that (not simply absent). A plain str field never hits that
+    # decode path, so it degrades to "" (-> empty list) instead of crashing.
+    llm_fallback_models: str = "gemini-2.5-flash,gemini-3.1-flash-lite"
 
     # ── Linear (content calendar + draft handoff) ───────────────────
     linear_api_key: str = ""
@@ -140,12 +146,15 @@ class Settings(BaseSettings):
 
     brand_voice_path: str = "prompts/brand_voice.md"
     # Topics matching these (case-insensitive substring) are blocked by QA.
-    banned_topics: list[str] = Field(default_factory=list)
+    # Comma-separated string — see llm_fallback_models above for why not
+    # list[str] (an unset GitHub Actions `vars.X` arrives as "", which
+    # pydantic-settings' list decoding rejects).
+    banned_topics: str = ""
 
     # ── Topic research inputs (calendar agent) ───────────────────
     niche: str = ""
-    seed_keywords: list[str] = Field(default_factory=list)
-    competitor_urls: list[str] = Field(default_factory=list)
+    seed_keywords: str = ""
+    competitor_urls: str = ""
     # Bias research toward local + commercial/informational intent (good for a
     # local business like a flooring retailer/installer). Set business_location
     # to a city/region/service area to fold location into keywords + topics.
@@ -200,7 +209,23 @@ class Settings(BaseSettings):
 
     @property
     def whatsapp_allowed_list(self) -> list[str]:
-        return [n.strip() for n in self.whatsapp_allowed_numbers.split(",") if n.strip()]
+        return _csv(self.whatsapp_allowed_numbers)
+
+    @property
+    def llm_fallback_models_list(self) -> list[str]:
+        return _csv(self.llm_fallback_models)
+
+    @property
+    def banned_topics_list(self) -> list[str]:
+        return _csv(self.banned_topics)
+
+    @property
+    def seed_keywords_list(self) -> list[str]:
+        return _csv(self.seed_keywords)
+
+    @property
+    def competitor_urls_list(self) -> list[str]:
+        return _csv(self.competitor_urls)
 
     def enable_langsmith(self) -> None:
         """Wire LangSmith env vars so LangChain auto-traces every call."""

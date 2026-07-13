@@ -65,7 +65,7 @@ def review_article(
     # Deterministic banned-topic hard block.
     banned_hits = [
         term
-        for term in settings.banned_topics
+        for term in settings.banned_topics_list
         if term and term.lower() in (title + " " + text).lower()
     ]
 

@@ -95,7 +95,7 @@ def structured_invoke(
     instance; re-raises the last error only if every model is exhausted.
     """
     settings = get_settings()
-    fb = settings.llm_fallback_models if fallbacks is None else fallbacks
+    fb = settings.llm_fallback_models_list if fallbacks is None else fallbacks
     chain = [model] + [m for m in fb if m != model]
 
     last_exc: Exception | None = None

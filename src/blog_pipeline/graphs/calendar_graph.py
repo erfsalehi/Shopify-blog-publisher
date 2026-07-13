@@ -104,8 +104,8 @@ def run_calendar(
     settings = get_settings()
     today = today or date.today()
     niche = niche or settings.niche
-    seed_keywords = seed_keywords or settings.seed_keywords
-    competitor_urls = competitor_urls or settings.competitor_urls
+    seed_keywords = seed_keywords or settings.seed_keywords_list
+    competitor_urls = competitor_urls or settings.competitor_urls_list
 
     cost = CostTracker()
     with get_session() as session:
