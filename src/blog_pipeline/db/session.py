@@ -21,8 +21,23 @@ _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
 
 
+def normalize_database_url(url: str) -> str:
+    """Hosting providers (Railway, Heroku, ...) inject DATABASE_URL as a bare
+    `postgres://` or `postgresql://` — that resolves to psycopg2 by default in
+    SQLAlchemy 2.0, which we don't install. Rewrite it to explicitly use the
+    psycopg (v3) driver so a provider-supplied URL works with no manual edit.
+    Any URL that already names a driver (e.g. `postgresql+psycopg://`,
+    `sqlite://`) passes through unchanged.
+    """
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://"):]
+    if url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://"):]
+    return url
+
+
 def _make_engine() -> Engine:
-    url = get_settings().database_url
+    url = normalize_database_url(get_settings().database_url)
     connect_args: dict = {}
     if url.startswith("sqlite"):
         # Ensure the sqlite file's directory exists (e.g. ./data).

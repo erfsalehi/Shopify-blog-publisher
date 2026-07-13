@@ -38,6 +38,11 @@ whatsapp = [
     "fastapi>=0.110",
     "uvicorn>=0.29",
 ]
+# Postgres driver for production deployment (DATABASE_URL=postgresql://...).
+# Not needed for the local SQLite default.
+postgres = [
+    "psycopg[binary]>=3.1",
+]
 
 [project.scripts]
 blog-pipeline = "blog_pipeline.cli:app"
