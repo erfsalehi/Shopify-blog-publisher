@@ -51,6 +51,28 @@ def init_db_cmd() -> None:
     console.print("[green]Database initialized.[/green]")
 
 
+@app.command("serve")
+def serve_cmd(
+    host: str = typer.Option("0.0.0.0", "--host"),
+    port: int = typer.Option(8000, "--port"),
+) -> None:
+    """Run the WhatsApp webhook server (trigger the pipeline by message).
+
+    Requires the [whatsapp] extra: pip install -e ".[whatsapp]".
+    Point your Meta app's webhook callback at https://<host>/webhook.
+    """
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]Missing deps.[/red] Install with: pip install -e \".[whatsapp]\"")
+        raise typer.Exit(1)
+    from blog_pipeline.webhook import create_app
+
+    _init_db()
+    console.print(f"[bold]WhatsApp webhook[/bold] on http://{host}:{port}/webhook")
+    uvicorn.run(create_app(), host=host, port=port)
+
+
 @app.command("run-article")
 def run_article_cmd(
     topic: str = typer.Option(..., "--topic", "-t", help="Article topic"),
@@ -214,6 +236,7 @@ def config_check_cmd() -> None:
     )
     table.add_row("DataForSEO", "✓" if s.has_dataforseo else "— (LLM-only research)")
     table.add_row("Slack", "✓" if s.has_slack else "— (logs to stdout)")
+    table.add_row("WhatsApp (Meta)", "✓" if s.has_whatsapp else "— (no trigger webhook)")
     table.add_row("LangSmith", "✓" if s.langsmith_api_key else "— (no tracing)")
     console.print(table)
 

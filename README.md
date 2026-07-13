@@ -168,6 +168,22 @@ They require `DATABASE_URL` pointed at **Postgres** — the SQLite default does
 not persist across ephemeral CI runners. Locally, use the CLI directly or
 Windows Task Scheduler / cron.
 
+## Trigger from WhatsApp (off-schedule)
+
+Beyond the crons, you can trigger a run on demand by messaging your WhatsApp
+number (Meta Cloud API). Message `draft: <topic>`, `daily`, `calendar`, or
+`status` and the result comes back in the chat.
+
+```bash
+pip install -e ".[whatsapp]"
+blog-pipeline serve          # FastAPI webhook on :8000/webhook
+```
+
+Point your Meta app's webhook at `https://<host>/webhook`. Full step-by-step
+(Meta app, tokens, signature verification, the 24-hour window) is in
+[docs/whatsapp-setup.md](docs/whatsapp-setup.md). Only allow-listed numbers can
+trigger it, and every webhook call is signature-verified.
+
 ## Testing
 
 ```bash

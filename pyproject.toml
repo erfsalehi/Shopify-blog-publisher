@@ -33,6 +33,11 @@ dev = [
     "pytest-mock>=3.14",
     "respx>=0.21",
 ]
+# WhatsApp trigger webhook (blog-pipeline serve).
+whatsapp = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
 
 [project.scripts]
 blog-pipeline = "blog_pipeline.cli:app"

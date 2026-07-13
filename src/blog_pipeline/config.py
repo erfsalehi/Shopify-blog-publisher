@@ -107,6 +107,20 @@ class Settings(BaseSettings):
     dataforseo_password: str = ""
     slack_webhook_url: str = ""
 
+    # ── WhatsApp (Meta Cloud API) — trigger the pipeline by message ──
+    # access token: temporary 24h token (dev) or a permanent System User token.
+    whatsapp_access_token: str = ""
+    # Phone Number ID of your WhatsApp sender (WhatsApp > API Setup in the app).
+    whatsapp_phone_number_id: str = ""
+    # A string you invent; Meta echoes it back during webhook verification.
+    whatsapp_verify_token: str = ""
+    # App secret (App Settings > Basic) — used to verify webhook signatures.
+    whatsapp_app_secret: str = ""
+    # E.164 numbers allowed to trigger the pipeline (yours), comma-separated.
+    # Others are ignored. Kept as a plain string so an empty value is valid.
+    whatsapp_allowed_numbers: str = ""
+    whatsapp_graph_version: str = "v21.0"
+
     # ── Tracing ──────────────────────────────────────────────────
     langsmith_api_key: str = ""
     langsmith_tracing: bool = False
@@ -179,6 +193,14 @@ class Settings(BaseSettings):
     @property
     def has_slack(self) -> bool:
         return bool(self.slack_webhook_url)
+
+    @property
+    def has_whatsapp(self) -> bool:
+        return bool(self.whatsapp_access_token and self.whatsapp_phone_number_id)
+
+    @property
+    def whatsapp_allowed_list(self) -> list[str]:
+        return [n.strip() for n in self.whatsapp_allowed_numbers.split(",") if n.strip()]
 
     def enable_langsmith(self) -> None:
         """Wire LangSmith env vars so LangChain auto-traces every call."""
