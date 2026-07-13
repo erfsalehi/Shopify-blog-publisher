@@ -56,6 +56,8 @@ class ArticleState(TypedDict, total=False):
     image_slots: list[dict]
     key_takeaways: list[str]
     faq: list[dict]
+    pull_quote: str
+    sources: list[str]
 
     seo_title: str
     seo_description: str
@@ -161,6 +163,8 @@ def node_draft(state: ArticleState) -> dict:
         "image_slots": [s.model_dump() for s in draft.image_slots],
         "key_takeaways": draft.key_takeaways,
         "faq": [f.model_dump() for f in draft.faq],
+        "pull_quote": draft.pull_quote,
+        "sources": draft.sources,
         "cost_usd": _add_cost(state, cost),
     }
 
@@ -192,6 +196,8 @@ def node_seo(state: ArticleState) -> dict:
         primary_keyword=primary,
         secondary_keywords=secondary,
         link_targets=link_targets,
+        pull_quote=state.get("pull_quote", ""),
+        sources=state.get("sources", []),
         cost=cost,
     )
     if state.get("article_id"):
@@ -222,17 +228,21 @@ def node_revise(state: ArticleState) -> dict:
     secondary = outline.get("secondary_keywords", [])
 
     cost = CostTracker()
-    new_html = revise_article(
+    new_html, new_quote, new_sources = revise_article(
         body_html=state["body_html"],
         primary_keyword=primary,
         secondary_keywords=secondary,
         metrics=state.get("seo_metrics", {}),
+        pull_quote=state.get("pull_quote", ""),
+        sources=state.get("sources", []),
         cost=cost,
     )
     if state.get("article_id"):
         _update_article(state["article_id"], draft_html=new_html)
     return {
         "body_html": new_html,
+        "pull_quote": new_quote,
+        "sources": new_sources,
         "revision_count": state.get("revision_count", 0) + 1,
         "cost_usd": _add_cost(state, cost),
     }
@@ -283,9 +293,10 @@ def node_images(state: ArticleState) -> dict:
 
 def node_geo(state: ArticleState) -> dict:
     """Enrichment before QA: append a "Shop with us" CTA (store promotion), then
-    add AI-SEO artifacts — a Key-takeaways box + FAQ section and JSON-LD
-    (Article + FAQPage) structured data so AI answer engines can parse and cite
-    the page. Runs after images and before QA (so QA reviews it all)."""
+    add AI-SEO artifacts — a Key-takeaways box, a pull-quote, a sources list,
+    an FAQ section, and JSON-LD (Article + FAQPage) structured data so AI
+    answer engines can parse and cite the page. Runs after images and before
+    QA (so QA reviews it all)."""
     from blog_pipeline.agents.promote import render_shop_cta
 
     settings = get_settings()
@@ -305,6 +316,8 @@ def node_geo(state: ArticleState) -> dict:
             description=state.get("seo_description") or state.get("meta_description", ""),
             takeaways=state.get("key_takeaways", []),
             faq=faq,
+            pull_quote=state.get("pull_quote", ""),
+            sources=state.get("sources", []),
         )
 
     if body == state["body_html"]:

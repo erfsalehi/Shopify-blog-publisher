@@ -16,7 +16,14 @@ from blog_pipeline.schemas import Outline
 SYSTEM = """You are an SEO content strategist. Produce a clear, comprehensive \
 article outline (H2 sections with H3 subpoints) that fully covers the topic and \
 naturally targets the given keywords. Prioritize reader usefulness and topical \
-completeness over keyword repetition."""
+completeness over keyword repetition.
+
+AI answer engines retrieve articles in independent ~150-400 word chunks (one \
+chunk per H2 section), so scope each H2 to what fits that band on its own — \
+self-contained, answerable without reading other sections. Size the number of \
+H2s to the target length accordingly (roughly one H2 per 150-400 words), and \
+split any topic that's too broad for one section into two narrower H2s rather \
+than one long one."""
 
 
 def generate_outline(

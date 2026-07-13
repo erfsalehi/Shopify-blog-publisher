@@ -100,9 +100,10 @@ With Shopify unconfigured, every article takes the Linear-only branch.
 - Structured output: title, meta description, body (HTML), alt text per image slot
 
 **4. SEO Optimization Agent**
-- Checks keyword density, readability (Flesch score)
+- Checks keyword density, readability (Flesch score), internal link coverage (from the Shopify catalog's collections/pages)
 - Generates `seo.title` and `seo.description` meta fields
-- (Internal linking to a product/page catalog is out of scope now that there's no fixed storefront target — see §9 Known simplifications)
+- Scores the GEO (Generative Engine Optimization) levers from Aggarwal et al., "GEO: Generative Engine Optimization" (KDD 2024): presence of a quotable pull-quote (+41% AI citation rate in the study), named authoritative sources (+30%), and the fraction of `<h2>` sections landing in the ~150-400 word chunk band AI retrieval systems split pages on
+- Below `SEO_MIN_SCORE`, one automatic revision pass targets the specific rubric weaknesses (including GEO ones) before the article moves on
 
 **5. Image Generation**
 - Generate featured + inline images via OpenRouter (`google/gemini-3.1-flash-lite-image` — token-billed, fractions of a cent/image)

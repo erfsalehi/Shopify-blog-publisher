@@ -249,14 +249,40 @@ mocked, so they run offline with no API keys.
 
 Beyond classic on-page SEO, the pipeline optimizes for **AI answer engines**
 (ChatGPT, Claude, Gemini, Google AI Overviews, Perplexity) so your content can
-be parsed and cited there too (`ENABLE_GEO=true`):
+be parsed and cited there too (`ENABLE_GEO=true`). This implements the
+findings of [Aggarwal et al., "GEO: Generative Engine Optimization"
+(KDD 2024)](https://arxiv.org/abs/2311.09735) — the study that measured what
+actually increases AI citation rates — not just general best practice:
 
+- **Chunking** — AI retrieval (RAG) splits a page into independent ~150-400
+  word chunks and retrieves whichever one best answers the query. So the
+  outline and draft agents scope every `<h2>` section to that band,
+  self-contained (no "as mentioned above"), opening with a 1-2 sentence
+  direct-answer "capsule summary" before elaborating. The SEO rubric scores
+  the fraction of sections that land in-band (`chunk_compliant_sections`),
+  so the auto-revise loop actively fixes sections that don't.
+- **Statistics** (study: **+32%** citation rate) — real, defensible,
+  well-established numbers stated specifically rather than vaguely. Never
+  fabricated — an invented statistic is explicitly barred.
+- **A quotable pull-quote** (study: **+41%**, the single biggest lever) — one
+  short, honest quote per article, rendered as a `<blockquote>`. Always
+  either first-party (the business's own expertise — "Our installers
+  find...") or a real, well-known standards body's guidance named plainly.
+  Never a fabricated named individual or invented study.
+- **Named sources** (study: **+30%**) — real industry standards
+  bodies/certifications the article actually cites (e.g. National Wood
+  Flooring Association, ANSI), listed visibly and echoed into JSON-LD
+  `citation`. Only organizations the model is confident are real.
 - **Answer-first drafting** — a direct answer up top, question-style headings,
   self-contained factual sentences that quote well out of context.
 - **A visible "Key takeaways" box + FAQ section** — the extractable Q&A those
   engines favor.
 - **JSON-LD structured data** (`Article` + `FAQPage` schema.org) embedded in the
   article body so crawlers read the page as data, not just prose.
+
+QA is told these are expected content, not unverifiable claims — it only
+flags a quote/source if it looks fabricated (a specific named individual, an
+invented organization), never a generic first-party or real-standards-body one.
 
 One thing the pipeline can't do per-article: **AI crawler access is a
 store-level setting.** For AI engines to ingest your site at all, your Shopify

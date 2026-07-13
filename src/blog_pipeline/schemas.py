@@ -54,6 +54,20 @@ class Draft(BaseModel):
         description="3-6 FAQ pairs covering common questions on the topic, for a "
         "visible FAQ section + FAQPage structured data",
     )
+    pull_quote: str = Field(
+        default="",
+        description="One short (1-2 sentence), quotable, authoritative insight — "
+        "either attributed to the publishing business's own expertise (first-party, "
+        "e.g. 'Our installers find that...') or naming a real, well-known industry "
+        "standards body. Never a fabricated named individual/study. Empty string if "
+        "nothing genuinely quotable fits.",
+    )
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Real, well-known authoritative organizations/standards named "
+        "in the article body (e.g. 'National Wood Flooring Association (NWFA)', "
+        "'ANSI'). Only include ones actually referenced in body_html. Empty if none.",
+    )
     image_slots: list[ImageSlot] = Field(
         default_factory=list, description="Featured + inline image requests"
     )
@@ -84,6 +98,16 @@ class RevisedDraft(BaseModel):
     body_html: str = Field(
         description="The revised article body as clean semantic HTML "
         "(<h2>/<h3>/<p>/<ul>/<ol>), no <html>/<head>/<body>/<h1>"
+    )
+    pull_quote: str = Field(
+        default="",
+        description="Same rules as the draft agent's pull_quote. Only set this "
+        "if you're adding/improving one; leave empty to keep the existing quote.",
+    )
+    sources: list[str] = Field(
+        default_factory=list,
+        description="Same rules as the draft agent's sources. Only set this if "
+        "you're adding real named sources; leave empty to keep the existing list.",
     )
 
 

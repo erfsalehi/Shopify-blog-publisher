@@ -61,7 +61,7 @@ def test_article_graph_dry_run(monkeypatch):
 
     monkeypatch.setattr(ag, "optimize_seo", _fake_optimize)
     # Short fake body scores below the pass mark; keep the revise pass a no-op.
-    monkeypatch.setattr(ag, "revise_article", lambda **kw: kw["body_html"])
+    monkeypatch.setattr(ag, "revise_article", lambda **kw: (kw["body_html"], kw.get("pull_quote", ""), kw.get("sources", [])))
 
     graph = ag.build_article_graph(checkpointer=None)
     state = {
@@ -119,7 +119,7 @@ def test_confident_pass_auto_publishes_to_shopify(monkeypatch):
 
     monkeypatch.setattr(ag, "optimize_seo", _fake_optimize)
     # Short fake body scores below the pass mark; keep the revise pass a no-op.
-    monkeypatch.setattr(ag, "revise_article", lambda **kw: kw["body_html"])
+    monkeypatch.setattr(ag, "revise_article", lambda **kw: (kw["body_html"], kw.get("pull_quote", ""), kw.get("sources", [])))
 
     # Stub the Shopify client so no network call happens.
     from blog_pipeline.tools.shopify import PublishResult

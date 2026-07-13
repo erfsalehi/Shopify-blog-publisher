@@ -56,6 +56,7 @@ class _MarkdownExtractor(HTMLParser):
         self._link_href = ""
         self._link_text: list[str] = []
         self._skip = 0  # inside <script>/<style> — JSON-LD etc., not prose
+        self._in_blockquote = False  # single-paragraph pull-quotes only
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag in ("script", "style"):
@@ -66,8 +67,12 @@ class _MarkdownExtractor(HTMLParser):
             self._out.append("\n\n## ")
         elif tag == "h3":
             self._out.append("\n\n### ")
+        elif tag == "blockquote":
+            self._out.append("\n\n> ")
+            self._in_blockquote = True
         elif tag == "p":
-            self._out.append("\n\n")
+            if not self._in_blockquote:
+                self._out.append("\n\n")
         elif tag == "ul":
             self._list_stack.append({"type": "ul", "n": 0})
         elif tag == "ol":
@@ -98,6 +103,9 @@ class _MarkdownExtractor(HTMLParser):
             return
         if tag in ("h2", "h3"):
             self._out.append("\n")
+        elif tag == "blockquote":
+            self._out.append("\n\n")
+            self._in_blockquote = False
         elif tag in ("ul", "ol"):
             if self._list_stack:
                 self._list_stack.pop()

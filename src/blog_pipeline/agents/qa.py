@@ -41,6 +41,13 @@ low scores for real problems.
 publish). Use 'pass' for a solid, complete, accurate article even if it could \
 be marginally improved.
 
+The article may include a short pull-quote (a first-party insight from the \
+publishing business, or a named real standards body's general guidance) and a \
+"Sources & standards referenced" list naming real organizations (e.g. \
+National Wood Flooring Association, ANSI). These are expected, not \
+unverifiable claims — flag them only if a quote is attributed to a specific \
+named individual/study that seems fabricated, or a listed source seems made up.
+
 Be strict about fabricated specifics and truncated/incomplete drafts, but \
 don't penalize general, defensible statements or first-party brand mentions."""
 

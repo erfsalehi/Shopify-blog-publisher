@@ -27,18 +27,48 @@ Rules:
   Never stop mid-section or mid-sentence. The body must end with a properly
   closed HTML tag (e.g. </p>).
 - Do NOT invent statistics, studies, quotes, or specific claims you can't stand
-  behind. Prefer general, defensible statements.
+  behind. Prefer general, defensible statements — except where the grounded
+  guidance below explicitly asks for real, verifiable specifics.
 - Propose 2-3 image slots: one 'featured' plus inline images at natural breaks.
   Each needs a vivid text-to-image prompt and concise SEO alt text.
 - Write a 150-160 character meta description.
 
-Write for AI answer engines (ChatGPT, Claude, Gemini, Google AI Overviews) as
-well as human readers — "answer-first" style:
-- Open with a direct, self-contained 2-3 sentence answer to the article's core
-  question before any preamble.
+GENERATIVE ENGINE OPTIMIZATION (GEO) — write so AI answer engines (ChatGPT,
+Claude, Gemini, Google AI Overviews, Perplexity) retrieve and cite this page,
+not just so it ranks in classic search. This follows the peer-reviewed
+findings of Aggarwal et al., "GEO: Generative Engine Optimization" (KDD 2024,
+Princeton/Georgia Tech/IIT Delhi/Allen Institute for AI), which measured what
+actually increases AI citation rates:
+
+1. Chunking — AI retrieval systems (RAG) don't read the whole page; they
+   split it into independent ~150-400 word chunks and retrieve whichever
+   chunk best answers the query. So EVERY <h2> section must:
+     - Be self-contained: understandable with NO context from other sections.
+       Never write "as mentioned above/below" or rely on an earlier section.
+     - Open with a 1-2 sentence direct-answer "capsule summary" of that
+       section's question, THEN elaborate.
+     - Land roughly 150-400 words — split an oversized section into two
+       H2s/H3s rather than writing one long section.
+2. Statistics (+32% citation rate in the study) — where you have a real,
+   defensible, well-established number (industry-standard measurements,
+   typical ranges, widely known figures), state it specifically instead of
+   vaguely. Never fabricate a specific statistic or attribute one to a study
+   that doesn't exist — an invented number is worse than none.
+3. Quotations (+41%, the single biggest lever) — include exactly one short,
+   genuinely quotable `pull_quote`: either the publishing business's own
+   expert insight (first-party, honest — "Our installers find...") or a real,
+   well-known standards body's guidance named plainly. Never a fabricated
+   named individual or invented study.
+4. Citing sources (+30%) — when you state an industry standard, certification,
+   or best practice, name the real authoritative body (e.g. National Wood
+   Flooring Association / NWFA, ANSI, ASTM, EPA) inline in the prose, and list
+   every one you named in `sources`. Only real organizations you're confident
+   exist — never invent one.
+
+Also, beyond the study's findings:
+- Open the article with a direct, self-contained 2-3 sentence answer to its
+  core question before any preamble.
 - Phrase H2 headings as the real questions people ask where natural.
-- Prefer clear, factual, self-contained sentences and short lists that can be
-  quoted in isolation without surrounding context.
 - Provide 3-5 key_takeaways: crisp, standalone factual sentences.
 - Provide 3-6 faq pairs of genuinely common questions with direct answers.
   (These become a visible FAQ section AND FAQPage structured data.)"""
