@@ -37,7 +37,19 @@ def normalize_database_url(url: str) -> str:
 
 
 def _make_engine() -> Engine:
-    url = normalize_database_url(get_settings().database_url)
+    raw_url = get_settings().database_url
+    if not raw_url.strip():
+        # A blank DATABASE_URL reaches here as "" rather than the class
+        # default whenever something upstream explicitly sets the env var
+        # empty — e.g. a GitHub Actions `${{ secrets.DATABASE_URL }}`
+        # referencing a secret that was never added to the repo. Surface
+        # that clearly instead of SQLAlchemy's opaque ArgumentError.
+        raise RuntimeError(
+            "DATABASE_URL is empty. Set it in .env (sqlite:///data/pipeline.db "
+            "for local dev) or, for GitHub Actions, add a DATABASE_URL repo "
+            "secret pointing at Postgres — see docs/railway-deploy.md."
+        )
+    url = normalize_database_url(raw_url)
     connect_args: dict = {}
     if url.startswith("sqlite"):
         # Ensure the sqlite file's directory exists (e.g. ./data).
