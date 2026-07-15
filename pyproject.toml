@@ -32,6 +32,10 @@ dev = [
     "pytest>=8.2",
     "pytest-mock>=3.14",
     "respx>=0.21",
+    # test_workflow_env.py parses .github/workflows to keep them in sync with
+    # Settings. Present transitively via langchain; pinned here so the guard
+    # doesn't silently depend on someone else's dependency.
+    "pyyaml>=6.0",
 ]
 # WhatsApp trigger webhook (blog-pipeline serve).
 whatsapp = [

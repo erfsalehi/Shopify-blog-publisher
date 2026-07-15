@@ -22,18 +22,31 @@ jobs:
         # (the sqlite default can't survive an ephemeral runner).
         run: pip install -e ".[postgres]"
       - name: Run calendar agent
+        # An unset secret/var arrives here as "" rather than absent; config.py
+        # maps blank to unset, so anything not configured falls back to its
+        # default in Settings instead of failing to parse.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
-          LINEAR_TEAM: ${{ vars.LINEAR_TEAM }}
-          LINEAR_PROJECT: ${{ vars.LINEAR_PROJECT }}
           DATAFORSEO_LOGIN: ${{ secrets.DATAFORSEO_LOGIN }}
           DATAFORSEO_PASSWORD: ${{ secrets.DATAFORSEO_PASSWORD }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LINEAR_TEAM: ${{ vars.LINEAR_TEAM }}
+          LINEAR_PROJECT: ${{ vars.LINEAR_PROJECT }}
+          # ── Topic research inputs (agents/topic_research.py, seed_research.py)
           NICHE: ${{ vars.NICHE }}
           SEED_KEYWORDS: ${{ vars.SEED_KEYWORDS }}
+          COMPETITOR_URLS: ${{ vars.COMPETITOR_URLS }}
+          # Both research agents fold business_location into their keywords
+          # when local_seo is on. Without it the queue skews national/generic
+          # — the job still succeeds, it just researches the wrong market.
+          LOCAL_SEO: ${{ vars.LOCAL_SEO }}
+          BUSINESS_LOCATION: ${{ vars.BUSINESS_LOCATION }}
+          # ── Queue shape (graphs/calendar_graph.py)
+          CADENCE: ${{ vars.CADENCE }}
+          COVERAGE_TARGET_WEEKS: ${{ vars.COVERAGE_TARGET_WEEKS }}
         run: |
           blog-pipeline init-db
           blog-pipeline run-calendar

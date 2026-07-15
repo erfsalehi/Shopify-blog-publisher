@@ -27,19 +27,46 @@ jobs:
         # (the sqlite default can't survive an ephemeral runner).
         run: pip install -e ".[postgres]"
       - name: Run daily draft
+        # An unset secret/var arrives here as "" rather than absent; config.py
+        # maps blank to unset, so anything not configured falls back to its
+        # default in Settings instead of failing to parse.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
-          LINEAR_TEAM: ${{ vars.LINEAR_TEAM }}
-          LINEAR_PROJECT: ${{ vars.LINEAR_PROJECT }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
           SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
           SHOPIFY_BLOG_ID: ${{ secrets.SHOPIFY_BLOG_ID }}
-          ENABLE_SHOPIFY_PUBLISH: ${{ vars.ENABLE_SHOPIFY_PUBLISH }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          # ── Linear routing (graphs/article_graph.py)
+          LINEAR_TEAM: ${{ vars.LINEAR_TEAM }}
+          LINEAR_PROJECT: ${{ vars.LINEAR_PROJECT }}
+          LINEAR_PUBLISHED_STATE: ${{ vars.LINEAR_PUBLISHED_STATE }}
+          LINEAR_REVIEW_STATE: ${{ vars.LINEAR_REVIEW_STATE }}
+          LINEAR_NEEDS_WORK_STATE: ${{ vars.LINEAR_NEEDS_WORK_STATE }}
+          LINEAR_BLOCKED_STATE: ${{ vars.LINEAR_BLOCKED_STATE }}
+          # ── Business context. Read by agents/qa.py (so first-party brand
+          # mentions aren't flagged off-brand), agents/geo.py and
+          # agents/promote.py. Unset means generic, unbranded copy that still
+          # passes QA — a silent quality loss, not a failure.
+          BUSINESS_NAME: ${{ vars.BUSINESS_NAME }}
+          BUSINESS_DESCRIPTION: ${{ vars.BUSINESS_DESCRIPTION }}
+          BUSINESS_LOCATION: ${{ vars.BUSINESS_LOCATION }}
+          PUBLIC_DOMAIN: ${{ vars.PUBLIC_DOMAIN }}
+          # ── Publishing switches
+          ENABLE_SHOPIFY_PUBLISH: ${{ vars.ENABLE_SHOPIFY_PUBLISH }}
+          SHOPIFY_PUBLISH_LIVE: ${{ vars.SHOPIFY_PUBLISH_LIVE }}
+          SHOP_PROMO: ${{ vars.SHOP_PROMO }}
+          # ── Content tunables
+          ENABLE_GEO: ${{ vars.ENABLE_GEO }}
+          ENABLE_IMAGES: ${{ vars.ENABLE_IMAGES }}
+          IMAGE_PLACEHOLDERS: ${{ vars.IMAGE_PLACEHOLDERS }}
+          BANNED_TOPICS: ${{ vars.BANNED_TOPICS }}
+          CONFIDENCE_THRESHOLD: ${{ vars.CONFIDENCE_THRESHOLD }}
+          WORD_COUNT_TARGET: ${{ vars.WORD_COUNT_TARGET }}
+          SEO_MIN_SCORE: ${{ vars.SEO_MIN_SCORE }}
         run: |
           blog-pipeline init-db
           blog-pipeline run-daily ${{ inputs.dry_run && '--dry-run' || '' }}
