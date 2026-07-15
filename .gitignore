@@ -32,3 +32,9 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Service-account keys. Never commit these — the repo is public, and a
+# leaked key is a live credential until it is revoked in Google Cloud.
+keys/
+*.json.key
+service-account*.json
