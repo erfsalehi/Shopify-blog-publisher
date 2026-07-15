@@ -197,9 +197,14 @@ def import_existing_cmd(
 
     s = get_settings()
     if not s.has_shopify:
-        console.print("[red]Shopify not configured — set SHOPIFY_STORE_DOMAIN "
-                      "and SHOPIFY_ACCESS_TOKEN.[/red]")
-        raise typer.Exit(1)
+        # Shopify is an optional integration, so an unconfigured store is a
+        # no-op rather than an error — a store-less run just dedupes against
+        # whatever the pipeline wrote itself. A configured-but-broken store
+        # still raises from the client, which is the case worth shouting about.
+        console.print("[yellow]Shopify not configured — nothing to import. "
+                      "Set SHOPIFY_STORE_DOMAIN and SHOPIFY_ACCESS_TOKEN to "
+                      "dedupe against your existing posts.[/yellow]")
+        return
 
     result = import_shopify_articles(limit=limit, dry_run=dry_run)
     table = Table("Metric", "Value")

@@ -35,6 +35,15 @@ jobs:
           LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
           LINEAR_TEAM: ${{ vars.LINEAR_TEAM }}
           LINEAR_PROJECT: ${{ vars.LINEAR_PROJECT }}
+          # ── Existing-post import (backfill.py), for dedup
+          # Read-only here: import-existing only lists posts. The store's back
+          # catalogue is invisible to dedup without this, so research
+          # re-proposes topics already published.
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          # Sets the URL imported rows are stored under — must be the public
+          # domain, since that's what Search Console reports pages as.
+          PUBLIC_DOMAIN: ${{ vars.PUBLIC_DOMAIN }}
           # ── Topic research inputs (agents/topic_research.py, seed_research.py)
           NICHE: ${{ vars.NICHE }}
           SEED_KEYWORDS: ${{ vars.SEED_KEYWORDS }}
@@ -49,4 +58,9 @@ jobs:
           COVERAGE_TARGET_WEEKS: ${{ vars.COVERAGE_TARGET_WEEKS }}
         run: |
           blog-pipeline init-db
+          # Before researching, not after: dedup compares against this table,
+          # so importing later would let this run's topics duplicate posts
+          # already on the store. Also catches anything published by hand in
+          # Shopify since the last refresh.
+          blog-pipeline import-existing
           blog-pipeline run-calendar
