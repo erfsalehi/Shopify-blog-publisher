@@ -58,6 +58,33 @@ def select_stale_articles(session, *, older_than_months: int, limit: int) -> lis
     )
 
 
+def select_decaying_articles(session, *, limit: int) -> list[Article]:
+    """Live posts whose impressions actually fell, worst first.
+
+    Strictly better than age when the data exists: a 2023 post that still
+    ranks should be left alone, while one that's quietly halved should jump
+    the queue. Returns [] when there aren't two Search Console windows to
+    compare — the caller falls back to age rather than guessing.
+    """
+    from blog_pipeline.performance import decaying_articles
+
+    decayed = decaying_articles(limit=limit)
+    if not decayed:
+        return []
+    ids = [d["article_id"] for d in decayed]
+    rows = {
+        a.id: a
+        for a in session.query(Article)
+        .filter(
+            Article.id.in_(ids),
+            Article.shopify_article_id.isnot(None),
+        )
+        .all()
+    }
+    # Preserve decay order, which the IN query does not.
+    return [rows[i] for i in ids if i in rows]
+
+
 def _sync_refresh_to_linear(
     client: LinearClient | None, *, title: str, url: str | None,
     changes: list[str], dry_run: bool,
@@ -104,9 +131,16 @@ def run_refresh(
     results: list[dict] = []
 
     with get_session() as session:
-        candidates = select_stale_articles(
-            session, older_than_months=older_than_months, limit=limit
-        )
+        # Measured decay when Search Console has two windows to compare;
+        # oldest-first otherwise. Age is only ever a stand-in for "has stopped
+        # working", and it's a poor one — a post can be old and still ranking.
+        candidates = select_decaying_articles(session, limit=limit)
+        strategy = "decay"
+        if not candidates:
+            strategy = "age"
+            candidates = select_stale_articles(
+                session, older_than_months=older_than_months, limit=limit
+            )
         # Detach what we need now: the Shopify/LLM calls below are slow, and
         # holding rows across them would pin the transaction open for minutes.
         targets = [
@@ -121,7 +155,8 @@ def run_refresh(
 
     if not targets:
         return {"considered": 0, "refreshed": 0, "skipped": 0, "failed": 0,
-                "cost_usd": 0.0, "dry_run": dry_run, "articles": []}
+                "cost_usd": 0.0, "dry_run": dry_run, "selected_by": strategy,
+                "articles": []}
 
     linear = None
     if settings.has_linear:
@@ -216,5 +251,6 @@ def run_refresh(
         "failed": failed,
         "cost_usd": round(cost.usd, 4),
         "dry_run": dry_run,
+        "selected_by": strategy,
         "articles": results,
     }

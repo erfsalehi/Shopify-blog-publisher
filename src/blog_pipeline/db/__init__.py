@@ -9,6 +9,7 @@ from blog_pipeline.db.models import (
     ContentCalendar,
     EntryStatus,
     RevisionReason,
+    SearchPerformance,
 )
 from blog_pipeline.db.session import get_session, init_db
 
@@ -21,6 +22,7 @@ __all__ = [
     "ContentCalendar",
     "EntryStatus",
     "RevisionReason",
+    "SearchPerformance",
     "get_session",
     "init_db",
 ]

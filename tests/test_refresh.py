@@ -171,6 +171,54 @@ def test_an_article_with_no_shopify_id_is_never_selected():
         assert select_stale_articles(s, older_than_months=12, limit=5) == []
 
 
+def test_falls_back_to_age_when_there_is_no_performance_data(shopify, agent):
+    """Search Console is optional and needs two windows before it can rank
+    anything. Refresh must still work meanwhile, not quietly select nothing."""
+    _make_article()
+    result = _run(dry_run=True)
+
+    assert result["selected_by"] == "age"
+    assert result["considered"] == 1
+
+
+def test_decay_ranking_wins_when_performance_data_exists(shopify, agent, monkeypatch):
+    """Age is a proxy for 'stopped working'; measured decay is the real
+    thing, so it takes precedence when available."""
+    from datetime import date, timedelta
+
+    from blog_pipeline.db import SearchPerformance
+
+    old_id = _make_article(published_at=OLD, gid="gid://shopify/Article/old")
+    newer_id = _make_article(
+        published_at=OLD + timedelta(days=200), gid="gid://shopify/Article/newer"
+    )
+    # The newer post is the one actually decaying — age ordering would miss it.
+    with get_session() as s:
+        for period_end, impressions in ((date(2026, 4, 1), 1000), (date(2026, 7, 1), 100)):
+            s.add(
+                SearchPerformance(
+                    article_id=newer_id, page="https://x.ca/newer",
+                    impressions=impressions, position=10.0, clicks=1,
+                    period_start=period_end - timedelta(days=90),
+                    period_end=period_end,
+                )
+            )
+        for period_end, impressions in ((date(2026, 4, 1), 500), (date(2026, 7, 1), 900)):
+            s.add(
+                SearchPerformance(
+                    article_id=old_id, page="https://x.ca/old",
+                    impressions=impressions, position=10.0, clicks=1,
+                    period_start=period_end - timedelta(days=90),
+                    period_end=period_end,
+                )
+            )
+
+    result = _run(dry_run=True, limit=5)
+
+    assert result["selected_by"] == "decay"
+    assert [a["article_id"] for a in result["articles"]] == [newer_id]
+
+
 def test_oldest_first(shopify, agent):
     init_db()
     older = datetime.now(timezone.utc) - timedelta(days=365 * 5)

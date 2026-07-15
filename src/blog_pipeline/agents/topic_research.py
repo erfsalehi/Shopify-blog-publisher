@@ -27,7 +27,41 @@ SERP/keyword data, and competitor content structures, propose ranked blog topic 
 candidates that (a) have search demand, (b) fit the niche, and (c) exploit a \
 content gap competitors miss. Prefer specific, long-tail, intent-driven topics \
 over broad head terms. Use the provided search volumes/difficulty where given; \
-leave them null when unknown rather than guessing precise numbers."""
+leave them null when unknown rather than guessing precise numbers.
+
+If you are given "striking distance" queries, weight them heavily. Those are \
+not market estimates — they are terms this exact site is already being shown \
+for and not winning. Google already considers the site relevant to them, so a \
+focused article has a far shorter path to page one than one chasing a term the \
+site has no history with. Prefer covering a striking-distance query properly \
+over a higher-volume term the site has never ranked for."""
+
+
+def _striking_distance_context() -> str:
+    """Queries the site already earns impressions for but doesn't win.
+
+    Degrades to "" on any failure — Search Console is optional, and the weekly
+    refresh must not hard-fail because performance data is missing or stale.
+    """
+    try:
+        from blog_pipeline.performance import striking_distance_queries
+
+        rows = striking_distance_queries(limit=25)
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    lines = [
+        f"- \"{r['query']}\": {r['impressions']} impressions, "
+        f"avg position {r['position']}, {r['clicks']} clicks"
+        for r in rows
+    ]
+    return (
+        "STRIKING DISTANCE — this site's own Google Search Console data. It is "
+        "already shown for these terms but sits off page one, so the "
+        "impressions are real demand it is currently failing to convert:\n"
+        + "\n".join(lines)
+    )
 
 
 def research_topics(
@@ -57,6 +91,14 @@ def research_topics(
             context_parts.append(
                 f"Top SERP results for '{seed_keywords[0]}':\n" + "\n".join(lines)
             )
+
+    # The site's own Search Console history, when there is any. This outranks
+    # every other signal here: DataForSEO describes the market, competitor
+    # headings describe rivals, but these are terms Google already shows *this*
+    # site for from positions nobody clicks.
+    striking = _striking_distance_context()
+    if striking:
+        context_parts.append(striking)
 
     if competitor_urls:
         headers = gather_competitor_headers(competitor_urls)

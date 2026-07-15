@@ -47,6 +47,13 @@ whatsapp = [
 postgres = [
     "psycopg[binary]>=3.1",
 ]
+# Google Search Console (sync-performance). Only the service-account token
+# exchange needs these — the API itself is plain REST over httpx. `requests`
+# comes along because that's the transport google-auth's Request wraps.
+gsc = [
+    "google-auth>=2.30",
+    "requests>=2.32",
+]
 
 [project.scripts]
 blog-pipeline = "blog_pipeline.cli:app"

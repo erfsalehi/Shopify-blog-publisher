@@ -215,6 +215,72 @@ def import_existing_cmd(
         console.print("[dim]Dry run — nothing written.[/dim]")
 
 
+@app.command("sync-performance")
+def sync_performance_cmd(
+    days: int = typer.Option(90, "--days", help="Window length to pull."),
+    list_sites: bool = typer.Option(
+        False, "--list-sites",
+        help="Show properties the service account can read, then exit.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch but don't store."),
+) -> None:
+    """Pull Search Console performance into the database.
+
+    Run it on a schedule: comparing two windows is what reveals decay, and one
+    window on its own can't show a trend.
+    """
+    from blog_pipeline.performance import sync_performance
+    from blog_pipeline.tools.search_console import (
+        SearchConsoleClient,
+        SearchConsoleError,
+    )
+
+    if list_sites:
+        # The setup diagnostic. An empty list means the key authenticates but
+        # was never granted access to the property — the usual first failure.
+        try:
+            sites = SearchConsoleClient().list_sites()
+        except SearchConsoleError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+        if not sites:
+            console.print(
+                "[yellow]The service account can't see any properties. Add its "
+                "client_email as a user in Search Console → Settings → Users "
+                "and permissions.[/yellow]"
+            )
+            return
+        table = Table("Property", "Permission")
+        for s in sites:
+            table.add_row(s.get("siteUrl", "?"), s.get("permissionLevel", "?"))
+        console.print(table)
+        console.print(f"[dim]Configured as: {get_settings().gsc_property}[/dim]")
+        return
+
+    try:
+        result = sync_performance(days=days, dry_run=dry_run)
+    except SearchConsoleError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    if not result.get("enabled"):
+        console.print(
+            "[yellow]Search Console not configured — set GSC_CREDENTIALS_JSON "
+            "(and GSC_SITE_URL if it isn't sc-domain:<your public domain>).[/yellow]"
+        )
+        return
+
+    table = Table("Metric", "Value")
+    for k, v in result.items():
+        table.add_row(k, str(v))
+    console.print(table)
+    if result["pages"] and not result["matched"]:
+        console.print(
+            "[yellow]⚠ No pages matched a known article. Run import-existing "
+            "first, and check PUBLIC_DOMAIN matches the property.[/yellow]"
+        )
+
+
 @app.command("run-refresh")
 def run_refresh_cmd(
     older_than_months: int = typer.Option(

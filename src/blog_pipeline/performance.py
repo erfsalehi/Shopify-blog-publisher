@@ -1,0 +1,241 @@
+"""Search Console sync, plus the two questions the data exists to answer.
+
+sync_performance() pulls a window of page- and query-level rows and stores
+them as an immutable snapshot. The two readers:
+
+  * striking_distance_queries() — terms already earning impressions from
+    positions 11-30. The site is being shown and not clicked; one better
+    article can move those onto page one. This is where a 1.67% CTR at 335k
+    impressions actually lives.
+  * decaying_articles() — live posts whose impressions fell between two
+    windows. Ranks refresh candidates by measured decay rather than by age,
+    which is a proxy for it at best.
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+from blog_pipeline.db import Article, SearchPerformance, get_session
+from blog_pipeline.db.models import ArticleStatus
+from blog_pipeline.tools.search_console import SearchConsoleClient, default_window
+
+
+def _normalize(url: str | None) -> str:
+    """Compare URLs ignoring scheme, www and trailing slash.
+
+    Search Console reports the canonical URL, which won't necessarily match
+    the string we stored character-for-character — and a join that silently
+    matches nothing looks exactly like a site with no traffic.
+    """
+    if not url:
+        return ""
+    u = str(url).strip().lower()
+    for prefix in ("https://", "http://"):
+        if u.startswith(prefix):
+            u = u[len(prefix):]
+    if u.startswith("www."):
+        u = u[4:]
+    return u.rstrip("/")
+
+
+def _build_rows(
+    pages: list[dict], queries: list[dict], by_url: dict[str, int],
+    start: date, end: date,
+) -> tuple[list[SearchPerformance], int]:
+    rows: list[SearchPerformance] = []
+    matched = 0
+    for row in pages:
+        url = (row.get("keys") or [None])[0]
+        article_id = by_url.get(_normalize(url))
+        if article_id:
+            matched += 1
+        rows.append(
+            SearchPerformance(
+                article_id=article_id, page=url, query=None,
+                clicks=int(row.get("clicks", 0)),
+                impressions=int(row.get("impressions", 0)),
+                ctr=float(row.get("ctr", 0.0)),
+                position=float(row.get("position", 0.0)),
+                period_start=start, period_end=end,
+            )
+        )
+    for row in queries:
+        rows.append(
+            SearchPerformance(
+                article_id=None, page=None,
+                query=(row.get("keys") or [None])[0],
+                clicks=int(row.get("clicks", 0)),
+                impressions=int(row.get("impressions", 0)),
+                ctr=float(row.get("ctr", 0.0)),
+                position=float(row.get("position", 0.0)),
+                period_start=start, period_end=end,
+            )
+        )
+    return rows, matched
+
+
+def sync_performance(
+    *, days: int = 90, compare: bool = True, dry_run: bool = False
+) -> dict:
+    """Pull the current window, and by default the preceding one too.
+
+    Fetching both in one run is what makes decay measurable immediately.
+    Syncing a single window weekly would instead leave two 90-day windows
+    overlapping by ~92%, whose difference is noise — you'd wait months for a
+    usable trend. Two adjacent, non-overlapping windows give it on the first
+    run.
+    """
+    client = SearchConsoleClient()
+    if not client.enabled:
+        return {"enabled": False, "pages": 0, "queries": 0, "matched": 0}
+
+    start, end = default_window(days)
+    windows = [(start, end)]
+    if compare:
+        windows.append((start - timedelta(days=days), start))
+
+    total_pages = total_queries = matched = 0
+    with get_session() as session:
+        by_url = {
+            _normalize(a.shopify_url): a.id
+            for a in session.query(Article)
+            .filter(Article.shopify_url.isnot(None))
+            .all()
+        }
+        for i, (w_start, w_end) in enumerate(windows):
+            pages = client.query(dimensions=["page"], start_date=w_start, end_date=w_end)
+            queries = client.query(
+                dimensions=["query"], start_date=w_start, end_date=w_end
+            )
+            rows, hit = _build_rows(pages, queries, by_url, w_start, w_end)
+            total_pages += len(pages)
+            total_queries += len(queries)
+            if i == 0:  # only the current window's match rate is interesting
+                matched = hit
+            if not dry_run:
+                # Replace any existing snapshot for this exact window, so
+                # re-running a sync doesn't double-count it.
+                session.query(SearchPerformance).filter(
+                    SearchPerformance.period_start == w_start,
+                    SearchPerformance.period_end == w_end,
+                ).delete(synchronize_session=False)
+                session.add_all(rows)
+
+    return {
+        "enabled": True,
+        "window": f"{start.isoformat()}..{end.isoformat()}",
+        "compared_to": (
+            f"{windows[1][0].isoformat()}..{windows[1][1].isoformat()}"
+            if compare else None
+        ),
+        "pages": total_pages,
+        "queries": total_queries,
+        "matched": matched,
+        "dry_run": dry_run,
+    }
+
+
+def striking_distance_queries(
+    *,
+    limit: int = 25,
+    min_impressions: int = 50,
+    position_band: tuple[float, float] = (8.0, 30.0),
+) -> list[dict]:
+    """Queries with real demand that the site nearly ranks for.
+
+    Position 8-30 is the band worth writing for: above ~8 you already win the
+    click, past ~30 a single article won't close the gap. Ordered by
+    impressions, because that's the traffic actually on the table.
+    """
+    low, high = position_band
+    with get_session() as session:
+        latest = (
+            session.query(SearchPerformance.period_end)
+            .filter(SearchPerformance.query.isnot(None))
+            .order_by(SearchPerformance.period_end.desc())
+            .first()
+        )
+        if not latest:
+            return []
+        rows = (
+            session.query(SearchPerformance)
+            .filter(
+                SearchPerformance.period_end == latest[0],
+                SearchPerformance.query.isnot(None),
+                SearchPerformance.impressions >= min_impressions,
+                SearchPerformance.position >= low,
+                SearchPerformance.position <= high,
+            )
+            .order_by(SearchPerformance.impressions.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "query": r.query,
+                "impressions": r.impressions,
+                "clicks": r.clicks,
+                "position": round(r.position, 1),
+                "ctr": round(r.ctr, 4),
+            }
+            for r in rows
+        ]
+
+
+def decaying_articles(*, limit: int = 10, min_impressions: int = 20) -> list[dict]:
+    """Live articles whose impressions dropped between the two most recent
+    windows, worst first.
+
+    Needs two syncs to say anything — with one window there's no trend, and
+    the honest answer is an empty list rather than a guess.
+    """
+    with get_session() as session:
+        windows = [
+            w[0]
+            for w in session.query(SearchPerformance.period_end)
+            .filter(SearchPerformance.page.isnot(None))
+            .distinct()
+            .order_by(SearchPerformance.period_end.desc())
+            .limit(2)
+            .all()
+        ]
+        if len(windows) < 2:
+            return []
+        current, previous = windows[0], windows[1]
+
+        def _by_article(period):
+            return {
+                r.article_id: r
+                for r in session.query(SearchPerformance)
+                .filter(
+                    SearchPerformance.period_end == period,
+                    SearchPerformance.article_id.isnot(None),
+                )
+                .all()
+            }
+
+        now, before = _by_article(current), _by_article(previous)
+        out = []
+        for article_id, row in now.items():
+            prior = before.get(article_id)
+            if prior is None or prior.impressions < min_impressions:
+                continue
+            delta = row.impressions - prior.impressions
+            if delta >= 0:
+                continue
+            article = session.get(Article, article_id)
+            if article is None or article.status is not ArticleStatus.published:
+                continue
+            out.append(
+                {
+                    "article_id": article_id,
+                    "title": article.title,
+                    "impressions_now": row.impressions,
+                    "impressions_before": prior.impressions,
+                    "change_pct": round(100 * delta / prior.impressions, 1),
+                    "position": round(row.position, 1),
+                }
+            )
+        out.sort(key=lambda r: r["change_pct"])
+        return out[:limit]

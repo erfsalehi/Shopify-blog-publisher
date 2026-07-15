@@ -179,6 +179,41 @@ class Article(Base):
     )
 
 
+class SearchPerformance(Base):
+    """One Search Console row for one measurement window.
+
+    Two shapes share the table, discriminated by which dimension is null:
+      * page set, query null  — how a URL performs overall. Ranks refresh
+        candidates by decay, which beats ranking them by age.
+      * query set, page null  — how a search term performs site-wide. Finds
+        striking-distance terms: real impressions, position 11-30, few clicks.
+
+    Rows are immutable snapshots keyed by window, not a running total, so
+    comparing two windows shows the trend — which is the entire point when a
+    site's impressions are down 20%.
+    """
+
+    __tablename__ = "search_performance"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Null for query-dimension rows, and for pages that match no known article
+    # (a product or collection page, say).
+    article_id: Mapped[int | None] = mapped_column(
+        ForeignKey("article.id"), index=True, nullable=True
+    )
+    page: Mapped[str | None] = mapped_column(String(1000), index=True, nullable=True)
+    query: Mapped[str | None] = mapped_column(String(500), index=True, nullable=True)
+
+    clicks: Mapped[int] = mapped_column(Integer, default=0)
+    impressions: Mapped[int] = mapped_column(Integer, default=0)
+    ctr: Mapped[float] = mapped_column(Float, default=0.0)
+    position: Mapped[float] = mapped_column(Float, default=0.0)
+
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class ArticleRevision(Base):
     """Snapshot of an article's live Shopify body, taken immediately before
     the refresh agent overwrites it.

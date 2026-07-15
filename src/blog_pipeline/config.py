@@ -184,6 +184,18 @@ class Settings(BaseSettings):
     dataforseo_password: str = ""
     slack_webhook_url: str = ""
 
+    # ── Google Search Console (real performance data) ────────────
+    # The service-account key JSON, pasted whole as one env var. A path would
+    # be friendlier locally but there's no filesystem to put it on in Actions,
+    # and it's a credential either way — so it lives in a secret like the rest.
+    gsc_credentials_json: str = ""
+    # The property exactly as Search Console names it. Domain properties are
+    # "sc-domain:drflooring.ca"; URL-prefix ones are "https://drflooring.ca/",
+    # trailing slash included. Blank derives the domain form from
+    # public_domain — see gsc_property. Wrong form is the usual first failure,
+    # so `sync-performance` lists what the account can actually see.
+    gsc_site_url: str = ""
+
     # ── WhatsApp (Meta Cloud API) — trigger the pipeline by message ──
     # access token: temporary 24h token (dev) or a permanent System User token.
     whatsapp_access_token: str = ""
@@ -267,6 +279,21 @@ class Settings(BaseSettings):
     @property
     def has_dataforseo(self) -> bool:
         return bool(self.dataforseo_login and self.dataforseo_password)
+
+    @property
+    def gsc_property(self) -> str:
+        """The Search Console property to query. Falls back to the domain form
+        of public_domain, which is what "Add property -> Domain" produces."""
+        if self.gsc_site_url:
+            return self.gsc_site_url
+        domain = self.public_domain.replace("https://", "").replace(
+            "http://", ""
+        ).strip("/")
+        return f"sc-domain:{domain}" if domain else ""
+
+    @property
+    def has_search_console(self) -> bool:
+        return bool(self.gsc_credentials_json and self.gsc_property)
 
     @property
     def has_slack(self) -> bool:

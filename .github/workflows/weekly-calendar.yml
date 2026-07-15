@@ -44,6 +44,11 @@ jobs:
           # Sets the URL imported rows are stored under — must be the public
           # domain, since that's what Search Console reports pages as.
           PUBLIC_DOMAIN: ${{ vars.PUBLIC_DOMAIN }}
+          # ── Search Console (performance.py) — striking-distance research
+          # input, and the decay signal refresh ranks candidates by. Optional:
+          # unset just means research falls back to market data alone.
+          GSC_CREDENTIALS_JSON: ${{ secrets.GSC_CREDENTIALS_JSON }}
+          GSC_SITE_URL: ${{ vars.GSC_SITE_URL }}
           # ── Topic research inputs (agents/topic_research.py, seed_research.py)
           NICHE: ${{ vars.NICHE }}
           SEED_KEYWORDS: ${{ vars.SEED_KEYWORDS }}
@@ -63,4 +68,8 @@ jobs:
           # already on the store. Also catches anything published by hand in
           # Shopify since the last refresh.
           blog-pipeline import-existing
+          # After import (pages join to articles by URL), before research
+          # (striking-distance queries are an input to it). No-ops when
+          # Search Console isn't configured.
+          blog-pipeline sync-performance
           blog-pipeline run-calendar
