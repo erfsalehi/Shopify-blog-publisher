@@ -1,0 +1,75 @@
+name: Refresh Stale Posts
+
+# Manual only — deliberately no `schedule:`. This edits live, indexed pages:
+# Shopify has no draft revision for a published post, so an --apply run is
+# public the moment it finishes. The previous body is snapshotted first
+# (rollback-refresh restores it), but a cron doing that unattended is a
+# different risk from a human choosing to.
+#
+# Defaults to a dry run: you must tick `apply` to write anything.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Write to live Shopify pages (unticked = report only)"
+        type: boolean
+        default: false
+      limit:
+        description: "How many posts to refresh"
+        type: string
+        default: "3"
+      older_than_months:
+        description: "Age floor, only used when there's no Search Console data"
+        type: string
+        default: "12"
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        # [postgres] pulls psycopg — DATABASE_URL here is always Postgres
+        # (the sqlite default can't survive an ephemeral runner).
+        # [gsc] pulls google-auth for the Search Console token exchange.
+        run: pip install -e ".[postgres,gsc]"
+      - name: Refresh
+        # An unset secret/var arrives here as "" rather than absent; config.py
+        # maps blank to unset, so anything not configured falls back to its
+        # default in Settings instead of failing to parse.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          LINEAR_API_KEY: ${{ secrets.LINEAR_API_KEY }}
+          LINEAR_TEAM: ${{ vars.LINEAR_TEAM }}
+          LINEAR_PROJECT: ${{ vars.LINEAR_PROJECT }}
+          LINEAR_REVIEW_STATE: ${{ vars.LINEAR_REVIEW_STATE }}
+          # Write access needed here, unlike the calendar's read-only import.
+          SHOPIFY_STORE_DOMAIN: ${{ secrets.SHOPIFY_STORE_DOMAIN }}
+          SHOPIFY_ACCESS_TOKEN: ${{ secrets.SHOPIFY_ACCESS_TOKEN }}
+          PUBLIC_DOMAIN: ${{ vars.PUBLIC_DOMAIN }}
+          # Ranks candidates by measured decay. Without it, selection falls
+          # back to oldest-first, which is a much weaker proxy.
+          GSC_CREDENTIALS_JSON: ${{ secrets.GSC_CREDENTIALS_JSON }}
+          GSC_SITE_URL: ${{ vars.GSC_SITE_URL }}
+          # The refresh agent writes in the business's own voice.
+          BUSINESS_NAME: ${{ vars.BUSINESS_NAME }}
+          BUSINESS_DESCRIPTION: ${{ vars.BUSINESS_DESCRIPTION }}
+          BUSINESS_LOCATION: ${{ vars.BUSINESS_LOCATION }}
+          LOCAL_SEO: ${{ vars.LOCAL_SEO }}
+          WORD_COUNT_TARGET: ${{ vars.WORD_COUNT_TARGET }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+        run: |
+          blog-pipeline init-db
+          # Refresh selects from Article rows, so the back catalogue has to be
+          # present, and decay ranking needs a current performance snapshot.
+          blog-pipeline import-existing
+          blog-pipeline sync-performance
+          blog-pipeline run-refresh \
+            --limit ${{ inputs.limit }} \
+            --older-than-months ${{ inputs.older_than_months }} \
+            ${{ inputs.apply && '--apply' || '' }}

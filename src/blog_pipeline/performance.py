@@ -75,8 +75,38 @@ def _build_rows(
     return rows, matched
 
 
+def _prune_old_windows(session, keep: int) -> int:
+    """Drop all but the `keep` most recent snapshots.
+
+    One sync of this site stores ~31k rows, and a weekly cron adds two fresh
+    windows every run — roughly 240MB a year, against a 500MB free tier, and
+    it never stops growing. The readers only ever look at the two most recent
+    windows, so older snapshots cost storage and buy nothing. Keeping four
+    leaves a spare pair in case a sync fails.
+    """
+    ends = [
+        e[0]
+        for e in session.query(SearchPerformance.period_end)
+        .distinct()
+        .order_by(SearchPerformance.period_end.desc())
+        .all()
+    ]
+    stale = ends[keep:]
+    if not stale:
+        return 0
+    return (
+        session.query(SearchPerformance)
+        .filter(SearchPerformance.period_end.in_(stale))
+        .delete(synchronize_session=False)
+    )
+
+
 def sync_performance(
-    *, days: int = 90, compare: bool = True, dry_run: bool = False
+    *,
+    days: int = 90,
+    compare: bool = True,
+    retain_windows: int = 4,
+    dry_run: bool = False,
 ) -> dict:
     """Pull the current window, and by default the preceding one too.
 
@@ -122,6 +152,11 @@ def sync_performance(
                 ).delete(synchronize_session=False)
                 session.add_all(rows)
 
+        pruned = 0
+        if not dry_run and retain_windows > 0:
+            session.flush()  # so this run's windows count as recent
+            pruned = _prune_old_windows(session, retain_windows)
+
     return {
         "enabled": True,
         "window": f"{start.isoformat()}..{end.isoformat()}",
@@ -132,6 +167,7 @@ def sync_performance(
         "pages": total_pages,
         "queries": total_queries,
         "matched": matched,
+        "pruned_rows": pruned,
         "dry_run": dry_run,
     }
 

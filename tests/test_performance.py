@@ -148,6 +148,43 @@ def test_resyncing_the_same_window_replaces_rather_than_doubles(gsc):
         assert s.query(SearchPerformance).count() == 1
 
 
+def test_old_windows_are_pruned(gsc, monkeypatch):
+    """One sync of the real site is ~31k rows and a weekly cron adds two
+    windows a run — ~240MB/year against a 500MB free tier. Only the two most
+    recent windows are ever read, so the rest is pure cost."""
+    for i, end in enumerate([date(2026, 1, 1), date(2026, 2, 1), date(2026, 3, 1)]):
+        _add_query(f"old-{i}", 100, 15.0, period_end=end)
+
+    gsc["client"] = _FakeGSC(queries=[_row(["current"])])
+    result = sync_performance(compare=False, retain_windows=2)
+
+    assert result["pruned_rows"] > 0
+    with get_session() as s:
+        remaining = {r.period_end for r in s.query(SearchPerformance).all()}
+    assert len(remaining) == 2
+    assert W2_END in remaining  # this run's window always survives
+
+
+def test_retention_keeps_enough_for_a_decay_comparison(gsc):
+    """Pruning must never eat the second window — that would silently break
+    decay detection, which reads exactly two."""
+    _article()
+    gsc["client"] = _FakeGSC(pages=[_row(["https://drflooring.ca/blogs/news/post-1"])])
+    sync_performance(days=90, retain_windows=4)
+
+    with get_session() as s:
+        assert len({r.period_end for r in s.query(SearchPerformance).all()}) == 2
+
+
+def test_pruning_can_be_disabled(gsc):
+    _add_query("ancient", 100, 15.0, period_end=date(2020, 1, 1))
+    gsc["client"] = _FakeGSC(queries=[_row(["current"])])
+    sync_performance(compare=False, retain_windows=0)
+
+    with get_session() as s:
+        assert len({r.period_end for r in s.query(SearchPerformance).all()}) == 2
+
+
 def test_dry_run_stores_nothing(gsc):
     gsc["client"] = _FakeGSC(queries=[_row(["x"])])
     assert sync_performance(compare=False, dry_run=True)["queries"] == 1
