@@ -18,6 +18,7 @@ Design notes:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any, TypedDict
 
@@ -369,6 +370,51 @@ def _target_state(verdict: str, confidence: float, threshold: float) -> str:
     return settings.linear_needs_work_state
 
 
+def _yes_no(value: object) -> str:
+    return "yes" if value else "no"
+
+
+# (metrics key, label, formatter, the band score_seo grades it against).
+# Mirrors the rubric in agents/seo.py — if the bands there move, move these.
+_SEO_METRIC_ROWS: list[tuple[str, str, Callable[[Any], str], str]] = [
+    ("word_count", "Word count", lambda v: f"{v:,}", "60-140% of target"),
+    ("kw_in_title", "Primary keyword in title", _yes_no, "yes"),
+    ("kw_in_intro", "Primary keyword in first 100 words", _yes_no, "yes"),
+    ("keyword_density", "Keyword density", lambda v: f"{float(v) * 100:.2f}%", "0.30-2.50%"),
+    ("secondary_coverage", "Secondary keywords covered", lambda v: f"{float(v) * 100:.0f}%", "100%"),
+    ("h2_count", "H2 sections", str, "2 or more"),
+    ("flesch_reading_ease", "Reading ease (Flesch)", str, "50 or higher"),
+    ("meta_description_length", "Meta description", lambda v: f"{v} chars", "120-160"),
+    ("internal_links", "Internal links", str, "2 or more"),
+    ("has_pull_quote", "Pull quote (GEO)", _yes_no, "yes"),
+    ("source_count", "Named sources (GEO)", str, "1 or more"),
+    ("chunk_compliant_sections", "Sections in the 150-400 word band (GEO)", str, "all of them"),
+]
+
+
+def _seo_metrics_table(metrics: dict) -> list[str]:
+    """Render score_seo's metrics dict as a table.
+
+    Every row is already computed and already decides whether the article
+    clears seo_min_score, but none of it reached a human — so a gated article
+    landed in Linear with a bare number and no indication of which lever
+    missed. A formatter that raises on an unexpected value would take the
+    whole issue down with it, so each row degrades to the raw repr instead.
+    """
+    rows = []
+    for key, label, fmt, target in _SEO_METRIC_ROWS:
+        if (value := metrics.get(key)) is None:
+            continue
+        try:
+            rendered = fmt(value)
+        except (TypeError, ValueError):
+            rendered = repr(value)
+        rows.append(f"| {label} | {rendered} | {target} |")
+    if not rows:
+        return []
+    return ["", "| Metric | Value | Target |", "| --- | --- | --- |", *rows]
+
+
 def _build_description(state: ArticleState) -> str:
     outline = state.get("outline") or {}
     primary = outline.get("primary_keyword") or (
@@ -381,7 +427,12 @@ def _build_description(state: ArticleState) -> str:
     if secondary:
         lines.append(f"**Secondary keywords:** {', '.join(secondary)}")
     if state.get("seo_score") is not None:
-        lines.append(f"**SEO score:** {state['seo_score']}/100")
+        # The gate is what makes the number mean anything to a reader deciding
+        # whether to rewrite or ship.
+        lines.append(
+            f"**SEO score:** {state['seo_score']}/100 "
+            f"(passes at {get_settings().seo_min_score})"
+        )
     if state.get("confidence") is not None:
         lines.append(f"**QA confidence:** {state['confidence']}")
     lines.append("\n---")
@@ -413,6 +464,7 @@ def _build_description(state: ArticleState) -> str:
     lines.append("\n---\n### SEO meta")
     lines.append(f"- **SEO title:** {state.get('seo_title') or state.get('title', '')}")
     lines.append(f"- **Meta description:** {state.get('seo_description', '')}")
+    lines.extend(_seo_metrics_table(state.get("seo_metrics") or {}))
 
     images = state.get("images") or []
     hosted = [i for i in images if i.get("url")]
