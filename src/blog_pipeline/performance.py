@@ -221,7 +221,14 @@ def striking_distance_queries(
 
 def decaying_articles(*, limit: int = 10, min_impressions: int = 20) -> list[dict]:
     """Live articles whose impressions dropped between the two most recent
-    windows, worst first.
+    windows, ranked by how much traffic was actually lost.
+
+    Ordered by absolute impressions lost, NOT by percentage. Percentage
+    flatters trivia: an article falling 25 -> 1 is a 96% collapse worth 24
+    impressions, while one falling 18,272 -> 5,497 is "only" -70% and worth
+    12,775. Ranking by percent put the former first and dropped the latter off
+    a top-3 entirely. Refresh spends an LLM call and edits a live page per
+    candidate, so it should spend them where the traffic is.
 
     Needs two syncs to say anything — with one window there's no trend, and
     the honest answer is an empty list rather than a guess.
@@ -269,9 +276,10 @@ def decaying_articles(*, limit: int = 10, min_impressions: int = 20) -> list[dic
                     "title": article.title,
                     "impressions_now": row.impressions,
                     "impressions_before": prior.impressions,
+                    "impressions_lost": -delta,
                     "change_pct": round(100 * delta / prior.impressions, 1),
                     "position": round(row.position, 1),
                 }
             )
-        out.sort(key=lambda r: r["change_pct"])
+        out.sort(key=lambda r: r["impressions_lost"], reverse=True)
         return out[:limit]

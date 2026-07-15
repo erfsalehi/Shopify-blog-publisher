@@ -286,8 +286,25 @@ def test_worst_decay_comes_first(gsc):
     a = _article(url="https://x.ca/a", title="A")
     b = _article(url="https://x.ca/b", title="B")
     _add_page(a, 1000, W1_END)
-    _add_page(a, 900, W2_END)   # -10%
+    _add_page(a, 900, W2_END)   # lost 100
     _add_page(b, 1000, W1_END)
-    _add_page(b, 200, W2_END)   # -80%
+    _add_page(b, 200, W2_END)   # lost 800
 
     assert [r["article_id"] for r in decaying_articles()] == [b, a]
+
+
+def test_ranked_by_traffic_lost_not_percentage(gsc):
+    """The real case this got wrong: ranking by percent put an article that
+    fell 235->1 (-99.6%, worth 234 impressions) above one that fell
+    18272->5497 (-70%, worth 12,775). Refresh burns an LLM call and edits a
+    live page per candidate — spend them where the traffic is."""
+    trivia = _article(url="https://x.ca/trivia", title="Trivia")
+    real = _article(url="https://x.ca/real", title="Real traffic")
+    _add_page(trivia, 235, W1_END)
+    _add_page(trivia, 1, W2_END)      # -99.6%, but only 234 impressions
+    _add_page(real, 18272, W1_END)
+    _add_page(real, 5497, W2_END)     # -70%, but 12,775 impressions
+
+    ranked = decaying_articles()
+    assert [r["article_id"] for r in ranked] == [real, trivia]
+    assert ranked[0]["impressions_lost"] == 12775
