@@ -10,8 +10,16 @@ absent rather than crashing.
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 GOOGLE_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -21,6 +29,53 @@ def _csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+# Fields where a blank value must NOT be read as "unset". Only database_url:
+# its class default is SQLite, and blank in practice means a GitHub Actions
+# `${{ secrets.DATABASE_URL }}` that was never populated — i.e. exactly the
+# ephemeral-runner case where silently falling back to SQLite loses the
+# calendar every run. db/session.py raises instead. Everywhere else the class
+# default is the right answer for a blank value.
+_BLANK_IS_MEANINGFUL = frozenset({"database_url"})
+
+
+class _BlankAsUnset:
+    """Treat a blank env var as absent so the field default applies.
+
+    GitHub Actions expands an unset `${{ vars.X }}` / `${{ secrets.X }}` to an
+    empty string rather than omitting the variable, so every optional setting
+    arrives as "" and the class default never gets a chance. That reads fine
+    for a str field but hard-fails anything typed — bool, int, float — with a
+    parse error naming a field the user never set.
+
+    Hooks prepare_field_value rather than filtering the source's output dict
+    because that method is also where complex (list/dict) fields get JSON
+    decoded: returning early keeps "" from ever reaching the decoder, which
+    would otherwise raise SettingsError before any filtering could run.
+
+    model_config's built-in `env_ignore_empty=True` covers most of this, but
+    it applies to every field at once and _BLANK_IS_MEANINGFUL needs an out.
+    """
+
+    def prepare_field_value(
+        self, field_name: str, field: FieldInfo, value: Any, value_is_complex: bool
+    ) -> Any:
+        if (
+            isinstance(value, str)
+            and not value.strip()
+            and field_name not in _BLANK_IS_MEANINGFUL
+        ):
+            return None  # __call__ skips None, so the default survives
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
+
+
+class _BlankAsUnsetEnvSource(_BlankAsUnset, EnvSettingsSource):
+    pass
+
+
+class _BlankAsUnsetDotEnvSource(_BlankAsUnset, DotEnvSettingsSource):
+    pass
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -28,6 +83,24 @@ class Settings(BaseSettings):
         extra="ignore",
         case_sensitive=False,
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Same precedence as the default (init > env > .env > secrets file),
+        with the two env sources swapped for blank-tolerant ones."""
+        return (
+            init_settings,
+            _BlankAsUnsetEnvSource(settings_cls),
+            _BlankAsUnsetDotEnvSource(settings_cls),
+            file_secret_settings,
+        )
 
     # ── LLM gateway (Google AI Studio, OpenAI-compatible endpoint) ──
     google_api_key: str = ""
@@ -50,11 +123,9 @@ class Settings(BaseSettings):
     # Models tried, in order, when a stage's primary model errors (transient
     # 429/503 over-capacity is common on the free tier). Reliable, generous-
     # quota models. The primary is always tried first regardless of this list.
-    # Comma-separated string, not list[str]: pydantic-settings tries to
-    # JSON-decode list-typed env vars, which raises SettingsError on a plain
-    # empty string — and GitHub Actions passes an unset `vars.X` through as
-    # exactly that (not simply absent). A plain str field never hits that
-    # decode path, so it degrades to "" (-> empty list) instead of crashing.
+    # Comma-separated string, not list[str]: pydantic-settings JSON-decodes
+    # list-typed env vars, so list[str] would require '["a", "b"]' in .env and
+    # in Actions vars rather than the plain a,b form used everywhere here.
     llm_fallback_models: str = "gemini-2.5-flash,gemini-3.1-flash-lite"
 
     # ── Linear (content calendar + draft handoff) ───────────────────
@@ -146,9 +217,7 @@ class Settings(BaseSettings):
 
     brand_voice_path: str = "prompts/brand_voice.md"
     # Topics matching these (case-insensitive substring) are blocked by QA.
-    # Comma-separated string — see llm_fallback_models above for why not
-    # list[str] (an unset GitHub Actions `vars.X` arrives as "", which
-    # pydantic-settings' list decoding rejects).
+    # Comma-separated string — see llm_fallback_models above for why not list[str].
     banned_topics: str = ""
 
     # ── Topic research inputs (calendar agent) ───────────────────
