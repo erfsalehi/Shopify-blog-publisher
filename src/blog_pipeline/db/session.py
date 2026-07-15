@@ -11,11 +11,21 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from blog_pipeline.config import get_settings
-from blog_pipeline.db.models import Base
+from blog_pipeline.db.models import (
+    ArticleStatus,
+    Base,
+    EntryStatus,
+    RevisionReason,
+    TopicSource,
+)
+
+# Every Python enum backed by a Postgres ENUM type. The type name is what
+# SQLAlchemy derives by default: the class name, lowercased.
+_ENUMS = (TopicSource, ArticleStatus, EntryStatus, RevisionReason)
 
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
@@ -90,5 +100,65 @@ def get_session() -> Iterator[Session]:
         session.close()
 
 
-def init_db() -> None:
-    Base.metadata.create_all(get_engine())
+def missing_enum_labels(present: set[str], enum_cls) -> list[str]:
+    """Labels the Python enum has that the database doesn't yet.
+
+    SQLAlchemy persists a PEP-435 enum by its .name, not its .value — so
+    TopicSource.auto_researched is stored as "auto_researched", never
+    "auto-researched".
+    """
+    return [m.name for m in enum_cls if m.name not in present]
+
+
+def _sync_enum_labels(engine: Engine) -> list[str]:
+    """Add enum labels present in Python but missing from Postgres.
+
+    create_all() creates a type the first time and then never touches it, so
+    a value added to a Python enum after the first init-db is absent from the
+    database forever, and every insert using it dies with
+    InvalidTextRepresentation. That's how `imported` broke the first refresh
+    run: the type had been created that morning, before TopicSource gained it.
+
+    No test can catch this — SQLite stores enums as plain text and enforces
+    nothing, so the suite is green either way. It only exists against real
+    Postgres, which is exactly where it hurts.
+
+    This is not a migration system, and shouldn't grow into one. Adding a
+    label is the single schema change that is always safe, always additive,
+    and idempotent; anything more (renames, drops, column changes) needs a
+    real tool and a human deciding.
+    """
+    if engine.dialect.name != "postgresql":
+        return []  # SQLite has no enum types to reconcile.
+
+    added: list[str] = []
+    # ALTER TYPE ... ADD VALUE cannot run inside a transaction that then uses
+    # the type, so take a dedicated autocommit connection.
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        for enum_cls in _ENUMS:
+            type_name = enum_cls.__name__.lower()
+            rows = conn.execute(
+                text(
+                    "SELECT e.enumlabel FROM pg_enum e "
+                    "JOIN pg_type t ON t.oid = e.enumtypid "
+                    "WHERE t.typname = :name"
+                ),
+                {"name": type_name},
+            ).fetchall()
+            if not rows:
+                continue  # Type doesn't exist; create_all builds it complete.
+            for label in missing_enum_labels({r[0] for r in rows}, enum_cls):
+                # Both identifiers come from our own source, never user input.
+                conn.execute(
+                    text(f"ALTER TYPE {type_name} ADD VALUE IF NOT EXISTS '{label}'")
+                )
+                added.append(f"{type_name}.{label}")
+    return added
+
+
+def init_db() -> list[str]:
+    """Create anything missing and reconcile enum labels. Returns the labels
+    added, so `init-db` can report a schema that had drifted."""
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    return _sync_enum_labels(engine)

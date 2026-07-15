@@ -46,9 +46,13 @@ console = Console()
 
 @app.command("init-db")
 def init_db_cmd() -> None:
-    """Create database tables."""
-    _init_db()
+    """Create database tables and reconcile enum labels."""
+    added = _init_db()
     console.print("[green]Database initialized.[/green]")
+    if added:
+        # Worth reporting: it means the schema had drifted from the code, and
+        # every insert using these labels was failing until now.
+        console.print(f"[yellow]Added missing enum labels: {', '.join(added)}[/yellow]")
 
 
 @app.command("serve")
