@@ -133,6 +133,92 @@ class ShopifyClient:
             cursor = info["endCursor"]
         return out[:limit]
 
+    def fetch_article(self, article_id: str) -> dict:
+        """Full body + metadata for one post — the refresh agent's input.
+
+        Deliberately not part of list_published: bodies are large, and pulling
+        70 of them just to dedupe on titles would be wasteful. Read live
+        rather than from our own draft_html, because imported posts never had
+        a body here and any post may have been edited in Shopify admin since.
+        """
+        data = self.graphql(
+            """
+            query($id: ID!) {
+              article(id: $id) {
+                id title handle body summary publishedAt
+              }
+            }
+            """,
+            {"id": _as_gid(article_id, "Article")},
+        )
+        article = data.get("article")
+        if not article:
+            raise ShopifyError(f"Article {article_id} not found in Shopify.")
+        return article
+
+    def update_article(
+        self,
+        article_id: str,
+        *,
+        body_html: str,
+        title: str | None = None,
+        summary: str | None = None,
+        seo_title: str | None = None,
+        seo_description: str | None = None,
+        dry_run: bool = False,
+    ) -> PublishResult:
+        """Overwrite a live post's body in place.
+
+        There is no hidden/staged variant of this: an already-published
+        Shopify article has no draft revision, so this edits public content
+        the moment it runs. Callers are expected to snapshot the previous body
+        first (see db.ArticleRevision) — this is not reversible from Shopify's
+        side. `isPublished` is deliberately never sent, so a refresh can't
+        accidentally unpublish a page that's already ranking.
+        """
+        article: dict[str, Any] = {"body": body_html}
+        if title:
+            article["title"] = title
+        if summary:
+            article["summary"] = summary
+        seo: dict[str, str] = {}
+        if seo_title:
+            seo["title"] = seo_title
+        if seo_description:
+            seo["description"] = seo_description
+        if seo:
+            article["seo"] = seo
+
+        gid = _as_gid(article_id, "Article")
+        if dry_run:
+            return PublishResult(
+                article_id=gid, handle=None, url=None, dry_run=True,
+                payload={"id": gid, "article": article},
+            )
+
+        data = self.graphql(
+            """
+            mutation($id: ID!, $article: ArticleUpdateInput!) {
+              articleUpdate(id: $id, article: $article) {
+                article { id handle blog { handle } }
+                userErrors { field message }
+              }
+            }
+            """,
+            {"id": gid, "article": article},
+        )["articleUpdate"]
+        self._check_user_errors(data, "articleUpdate")
+        node = data.get("article") or {}
+        handle = node.get("handle")
+        blog_handle = (node.get("blog") or {}).get("handle")
+        base = get_settings().store_link_base
+        url = (
+            f"{base}/blogs/{blog_handle}/{handle}"
+            if handle and blog_handle and base
+            else None
+        )
+        return PublishResult(article_id=node.get("id") or gid, handle=handle, url=url)
+
     def list_link_targets(self, limit: int = 100) -> list[dict]:
         """Collections + pages usable as internal-link anchors: {title, url}.
 

@@ -215,6 +215,69 @@ def import_existing_cmd(
         console.print("[dim]Dry run — nothing written.[/dim]")
 
 
+@app.command("run-refresh")
+def run_refresh_cmd(
+    older_than_months: int = typer.Option(
+        12, "--older-than-months", help="Only consider posts older than this."
+    ),
+    limit: int = typer.Option(5, "--limit", help="Max posts to refresh in one run."),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        help="Actually write to Shopify. Without this, reports only.",
+    ),
+) -> None:
+    """Refresh stale live posts, oldest first.
+
+    Writes to LIVE pages: Shopify has no draft revision for a published post,
+    so --apply edits public content immediately. The previous body is
+    snapshotted first — `rollback-refresh` restores it.
+    """
+    from blog_pipeline.graphs.refresh_graph import run_refresh
+
+    s = get_settings()
+    if not s.has_shopify:
+        console.print("[red]Shopify not configured — nothing to refresh.[/red]")
+        raise typer.Exit(1)
+
+    result = run_refresh(
+        older_than_months=older_than_months, limit=limit, dry_run=not apply
+    )
+    table = Table("Article", "Outcome", "Notes")
+    for a in result["articles"]:
+        notes = a.get("error") or "; ".join(a.get("changes") or [])
+        table.add_row(str(a["title"])[:45], a["outcome"], notes[:60] or "—")
+    console.print(table)
+    console.print(
+        f"considered={result['considered']} refreshed={result['refreshed']} "
+        f"skipped={result['skipped']} failed={result['failed']} "
+        f"cost=${result['cost_usd']}"
+    )
+    if result["dry_run"]:
+        console.print("[dim]Dry run — Shopify untouched. Re-run with --apply.[/dim]")
+
+
+@app.command("rollback-refresh")
+def rollback_refresh_cmd(
+    article_id: int = typer.Argument(..., help="Article id to restore."),
+    apply: bool = typer.Option(False, "--apply", help="Actually write to Shopify."),
+) -> None:
+    """Restore an article's pre-refresh body to Shopify."""
+    from blog_pipeline.backfill import rollback_refresh
+
+    try:
+        result = rollback_refresh(article_id, dry_run=not apply)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+    console.print(
+        f"Restored article {result['article_id']} from snapshot taken "
+        f"{result['restored_from']}."
+    )
+    if result["dry_run"]:
+        console.print("[dim]Dry run — Shopify untouched. Re-run with --apply.[/dim]")
+
+
 @app.command("status")
 def status_cmd() -> None:
     """Show pipeline health metrics."""

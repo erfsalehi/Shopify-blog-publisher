@@ -21,9 +21,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from blog_pipeline.config import get_settings
-from blog_pipeline.db import Article, get_session
-from blog_pipeline.db.models import ArticleStatus, TopicSource
-from blog_pipeline.tools.shopify import ShopifyClient
+from blog_pipeline.db import Article, ArticleRevision, get_session
+from blog_pipeline.db.models import ArticleStatus, RevisionReason, TopicSource
+from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
 
 def public_article_url(post: dict) -> str | None:
@@ -111,5 +111,72 @@ def import_shopify_articles(*, limit: int = 250, dry_run: bool = False) -> dict:
         "created": created,
         "updated": updated,
         "unchanged": unchanged,
+        "dry_run": dry_run,
+    }
+
+
+def rollback_refresh(article_id: int, *, dry_run: bool = False) -> dict:
+    """Restore an article's most recent pre-refresh snapshot to Shopify.
+
+    The refresh agent edits live pages in place, so this is the undo. Restoring
+    also records a `rollback` revision of what was live at the time — undoing a
+    rollback has to be possible too, or this is just a differently-shaped way
+    to lose content.
+    """
+    with get_session() as session:
+        snapshot = (
+            session.query(ArticleRevision)
+            .filter(
+                ArticleRevision.article_id == article_id,
+                ArticleRevision.reason == RevisionReason.pre_refresh,
+            )
+            .order_by(ArticleRevision.created_at.desc())
+            .first()
+        )
+        if snapshot is None:
+            raise ValueError(
+                f"No pre-refresh snapshot for article {article_id} — nothing to "
+                "roll back to."
+            )
+        row = session.get(Article, article_id)
+        if row is None or not row.shopify_article_id:
+            raise ValueError(f"Article {article_id} has no Shopify post to restore.")
+        body, title = snapshot.body_html or "", snapshot.title
+        shopify_article_id = row.shopify_article_id
+        taken_at = snapshot.created_at
+
+    if not body.strip():
+        raise ValueError(f"Snapshot for article {article_id} is empty; refusing.")
+
+    client = ShopifyClient()
+    try:
+        current = client.fetch_article(shopify_article_id)
+        result = client.update_article(
+            shopify_article_id, body_html=body, title=title, dry_run=dry_run
+        )
+        if not dry_run:
+            with get_session() as session:
+                session.add(
+                    ArticleRevision(
+                        article_id=article_id,
+                        body_html=current.get("body") or "",
+                        title=current.get("title"),
+                        reason=RevisionReason.rollback,
+                    )
+                )
+                row = session.get(Article, article_id)
+                if row:
+                    row.draft_html = body
+                    if title:
+                        row.title = title
+    except ShopifyError:
+        raise
+    finally:
+        client.close()
+
+    return {
+        "article_id": article_id,
+        "restored_from": taken_at.isoformat() if taken_at else None,
+        "url": result.url,
         "dry_run": dry_run,
     }

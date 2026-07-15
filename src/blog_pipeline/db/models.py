@@ -60,6 +60,11 @@ class EntryStatus(str, enum.Enum):
     skipped = "skipped"
 
 
+class RevisionReason(str, enum.Enum):
+    pre_refresh = "pre-refresh"
+    rollback = "rollback"
+
+
 class TopicSource(str, enum.Enum):
     manual = "manual"
     auto_researched = "auto-researched"
@@ -169,3 +174,36 @@ class Article(Base):
     )
 
     entry: Mapped["CalendarEntry | None"] = relationship(back_populates="article")
+    revisions: Mapped[list["ArticleRevision"]] = relationship(
+        back_populates="article", cascade="all, delete-orphan"
+    )
+
+
+class ArticleRevision(Base):
+    """Snapshot of an article's live Shopify body, taken immediately before
+    the refresh agent overwrites it.
+
+    Shopify has no draft-revision concept for an already-published post, so a
+    refresh edits public content in place and this snapshot is the only undo.
+    A table rather than a `previous_body_html` column because refreshes
+    repeat: a column would let the second refresh destroy the original the
+    first one was protecting.
+    """
+
+    __tablename__ = "article_revision"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(
+        ForeignKey("article.id"), index=True, nullable=False
+    )
+    # The body as it existed on Shopify, fetched live rather than read from
+    # our own draft_html — for imported posts we never had the body, and for
+    # any post a human may have edited it in admin since we wrote it.
+    body_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    reason: Mapped[RevisionReason] = mapped_column(
+        Enum(RevisionReason), default=RevisionReason.pre_refresh, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    article: Mapped["Article"] = relationship(back_populates="revisions")

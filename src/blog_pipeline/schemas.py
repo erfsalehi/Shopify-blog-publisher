@@ -111,6 +111,39 @@ class RevisedDraft(BaseModel):
     )
 
 
+class RefreshedArticle(BaseModel):
+    body_html: str = Field(
+        description="The refreshed article body as clean semantic HTML "
+        "(<h2>/<h3>/<p>/<ul>/<ol>), no <html>/<head>/<body>/<h1>. Return the "
+        "COMPLETE article, not a fragment or a diff."
+    )
+    change_summary: list[str] = Field(
+        default_factory=list,
+        description="3-8 short bullets naming what actually changed and why, "
+        "specific enough for a reviewer to spot-check (e.g. 'Split the "
+        "installation section into prep and laying'). Not vague claims like "
+        "'improved SEO'.",
+    )
+    seo_title: str = Field(
+        default="",
+        description="An improved title, ONLY if the current one is genuinely "
+        "weak. Empty means keep the existing title — renaming a page that "
+        "already ranks is a real cost, so leave it alone unless it's clearly "
+        "better.",
+    )
+    meta_description: str = Field(
+        default="",
+        description="An improved 150-160 char meta description, or empty to "
+        "keep the existing one.",
+    )
+    skipped: bool = Field(
+        default=False,
+        description="True if this article genuinely needs no refresh. Prefer "
+        "this over inventing busywork edits — an honest no-op is a valid, "
+        "useful answer.",
+    )
+
+
 class QAReport(BaseModel):
     confidence: float = Field(description="Overall publish confidence 0.0-1.0")
     unverifiable_claims: list[str] = Field(default_factory=list)
