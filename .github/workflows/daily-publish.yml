@@ -23,7 +23,9 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install
-        run: pip install -e .
+        # [postgres] pulls psycopg — DATABASE_URL here is always Postgres
+        # (the sqlite default can't survive an ephemeral runner).
+        run: pip install -e ".[postgres]"
       - name: Run daily draft
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
