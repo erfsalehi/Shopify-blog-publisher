@@ -180,6 +180,36 @@ def add_topic_cmd(
     console.print(f"[green]Queued[/green] '{topic}' for {sched}.")
 
 
+@app.command("import-existing")
+def import_existing_cmd(
+    limit: int = typer.Option(250, "--limit", help="Max posts to pull."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would be imported, write nothing."
+    ),
+) -> None:
+    """Import the store's existing Shopify posts so dedup can see them.
+
+    Both duplicate checks compare only against this database, so a blog that
+    predates the pipeline is invisible: research re-proposes topics you
+    published years ago. Idempotent — safe to re-run.
+    """
+    from blog_pipeline.backfill import import_shopify_articles
+
+    s = get_settings()
+    if not s.has_shopify:
+        console.print("[red]Shopify not configured — set SHOPIFY_STORE_DOMAIN "
+                      "and SHOPIFY_ACCESS_TOKEN.[/red]")
+        raise typer.Exit(1)
+
+    result = import_shopify_articles(limit=limit, dry_run=dry_run)
+    table = Table("Metric", "Value")
+    for k, v in result.items():
+        table.add_row(k, str(v))
+    console.print(table)
+    if dry_run:
+        console.print("[dim]Dry run — nothing written.[/dim]")
+
+
 @app.command("status")
 def status_cmd() -> None:
     """Show pipeline health metrics."""

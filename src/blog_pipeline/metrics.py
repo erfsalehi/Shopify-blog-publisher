@@ -12,14 +12,23 @@ from datetime import date
 from blog_pipeline.calendar import coverage_weeks
 from blog_pipeline.config import get_settings
 from blog_pipeline.db import Article, CalendarEntry, ContentCalendar, get_session
-from blog_pipeline.db.models import ArticleStatus, EntryStatus
+from blog_pipeline.db.models import ArticleStatus, EntryStatus, TopicSource
 
 
 def gather_metrics(today: date | None = None) -> dict:
     today = today or date.today()
     settings = get_settings()
     with get_session() as session:
-        articles = session.query(Article).all()
+        # These numbers answer "how is the pipeline doing", so the imported
+        # back catalogue is excluded: those posts are live but the pipeline
+        # never wrote them, and counting them would inflate
+        # articles_published and dilute error_rate. Dedup wants them; this
+        # does not.
+        articles = (
+            session.query(Article)
+            .filter(Article.topic_source != TopicSource.imported)
+            .all()
+        )
         synced = [a for a in articles if a.status == ArticleStatus.synced]
         published = [a for a in articles if a.status == ArticleStatus.published]
         failed = [a for a in articles if a.status == ArticleStatus.failed]

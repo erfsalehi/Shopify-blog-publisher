@@ -331,8 +331,13 @@ def node_geo(state: ArticleState) -> dict:
 def node_qa(state: ArticleState) -> dict:
     existing_titles: list[str] = []
     with get_session() as s:
+        # Everything actually on the site or queued for it: drafts awaiting a
+        # human (synced), auto-published posts, and the pre-pipeline back
+        # catalogue imported from Shopify. Checking only `synced` let QA pass
+        # an article that duplicates one already live.
         query = s.query(Article.title).filter(
-            Article.status == ArticleStatus.synced, Article.title.isnot(None)
+            Article.status.in_([ArticleStatus.synced, ArticleStatus.published]),
+            Article.title.isnot(None),
         )
         if state.get("article_id"):
             query = query.filter(Article.id != state["article_id"])

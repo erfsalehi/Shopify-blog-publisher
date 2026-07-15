@@ -103,16 +103,35 @@ class ShopifyClient:
         return nodes[0]["id"]
 
     # ── reads for dedup / internal linking ───────────────────────
-    def list_published(self, limit: int = 100) -> list[dict]:
+    def list_published(self, limit: int = 250) -> list[dict]:
+        """Published articles as {id, title, handle, publishedAt}.
+
+        Paginates rather than taking the first page: a store with more posts
+        than one page would otherwise import a silent subset, and a dedup
+        corpus that's quietly missing entries is worse than none — it reads
+        as "no duplicate found".
+        """
         query = """
-        query($n: Int!) {
-          articles(first: $n, query: "published_status:published") {
-            nodes { id title handle }
+        query($n: Int!, $after: String) {
+          articles(first: $n, after: $after, query: "published_status:published") {
+            nodes { id title handle publishedAt blog { handle } }
+            pageInfo { hasNextPage endCursor }
           }
         }
         """
-        data = self.graphql(query, {"n": limit})
-        return data["articles"]["nodes"]
+        out: list[dict] = []
+        cursor: str | None = None
+        while len(out) < limit:
+            data = self.graphql(
+                query, {"n": min(250, limit - len(out)), "after": cursor}
+            )["articles"]
+            nodes = data["nodes"]
+            out.extend(nodes)
+            info = data["pageInfo"]
+            if not nodes or not info["hasNextPage"]:
+                break
+            cursor = info["endCursor"]
+        return out[:limit]
 
     def list_link_targets(self, limit: int = 100) -> list[dict]:
         """Collections + pages usable as internal-link anchors: {title, url}.

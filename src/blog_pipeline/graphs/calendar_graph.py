@@ -77,7 +77,19 @@ def _get_or_create_calendar(session) -> ContentCalendar:
 
 
 def _existing_topics(session, months_back: int = 6) -> list[str]:
-    """Topics to dedupe against: recent calendar entries + synced articles."""
+    """Topics to dedupe against: recent calendar entries + every article we
+    know exists.
+
+    "Exists" spans three kinds of row, and missing any of them means research
+    re-proposes something already covered:
+      * synced   — drafted, waiting on a human in Linear
+      * published — auto-published live to Shopify
+      * imported  — the store's pre-pipeline back catalogue (see backfill.py)
+
+    The article side is deliberately not date-limited the way calendar entries
+    are: a post from four years ago is still on the site, so re-proposing it
+    would still be a duplicate.
+    """
     cutoff = datetime.now(timezone.utc) - timedelta(days=30 * months_back)
     entries = (
         session.query(CalendarEntry)
@@ -85,10 +97,14 @@ def _existing_topics(session, months_back: int = 6) -> list[str]:
         .all()
     )
     topics = [e.topic for e in entries]
-    from blog_pipeline.db.models import Article
+    from blog_pipeline.db.models import Article, ArticleStatus
 
-    synced = session.query(Article).filter(Article.status == "synced").all()
-    topics.extend(a.topic for a in synced)
+    live = (
+        session.query(Article)
+        .filter(Article.status.in_([ArticleStatus.synced, ArticleStatus.published]))
+        .all()
+    )
+    topics.extend(a.topic for a in live)
     return topics
 
 

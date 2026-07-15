@@ -63,6 +63,11 @@ class EntryStatus(str, enum.Enum):
 class TopicSource(str, enum.Enum):
     manual = "manual"
     auto_researched = "auto-researched"
+    # Pre-existing Shopify posts pulled in by `import-existing`. They carry
+    # status=published (they are live) but were never drafted here, so they
+    # have no seo_score/cost — metrics.py excludes them to keep the pipeline's
+    # own numbers honest, while dedup deliberately includes them.
+    imported = "imported"
 
 
 class ContentCalendar(Base):
