@@ -181,13 +181,27 @@ class ShopifyClient:
             article["title"] = title
         if summary:
             article["summary"] = summary
-        seo: dict[str, str] = {}
+        # ArticleUpdateInput has no `seo` field — same as ArticleCreateInput
+        # (verified by introspection; the schema exposes only blogId/handle/
+        # body/summary/isPublished/publishDate/templateSuffix/metafields/tags/
+        # image/title/author/redirectNewHandle). Sending one makes Shopify
+        # reject the whole variable, so the entire update fails rather than
+        # just the SEO part. Meta title/description are the conventional
+        # `global.title_tag` / `global.description_tag` metafields, which
+        # themes read for <title> and <meta name="description">.
+        metafields: list[dict] = []
         if seo_title:
-            seo["title"] = seo_title
+            metafields.append({
+                "namespace": "global", "key": "title_tag",
+                "type": "single_line_text_field", "value": seo_title,
+            })
         if seo_description:
-            seo["description"] = seo_description
-        if seo:
-            article["seo"] = seo
+            metafields.append({
+                "namespace": "global", "key": "description_tag",
+                "type": "single_line_text_field", "value": seo_description,
+            })
+        if metafields:
+            article["metafields"] = metafields
 
         gid = _as_gid(article_id, "Article")
         if dry_run:

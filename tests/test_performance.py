@@ -383,3 +383,60 @@ def test_top_pages_include_non_article_urls(gsc):
     rows = top_pages()
     assert rows[0]["page"].endswith("/collections/vinyl")
     assert rows[0]["is_article"] is False
+
+
+# ── overlapping windows ─────────────────────────────────────────
+
+
+def _add_page_window(article_id, impressions, start, end):
+    with get_session() as s:
+        s.add(
+            SearchPerformance(
+                article_id=article_id, page=f"https://x.ca/{article_id}",
+                impressions=impressions, position=10.0, clicks=1,
+                period_start=start, period_end=end,
+            )
+        )
+
+
+def test_decay_ignores_an_overlapping_window(gsc):
+    """The real incident: sync-performance ran Monday and again Thursday, so
+    the DB held two 90-day windows 1 day apart sharing 89 days of data.
+    Comparing those ranks a day of noise as decay — it picked a random article
+    over one that had lost 12,775 impressions.
+    """
+    article_id = _article()
+    # Genuine prior window.
+    _add_page_window(article_id, 1000, date(2026, 1, 14), date(2026, 4, 14))
+    # Current, and a near-duplicate of it from a sync a day earlier.
+    _add_page_window(article_id, 400, date(2026, 4, 13), date(2026, 7, 12))
+    _add_page_window(article_id, 400, date(2026, 4, 14), date(2026, 7, 13))
+
+    rows = decaying_articles()
+
+    # Must compare 07-13 against 04-14 (1000 -> 400), not against 07-12 (0).
+    assert len(rows) == 1
+    assert rows[0]["impressions_before"] == 1000
+    assert rows[0]["impressions_lost"] == 600
+
+
+def test_no_non_overlapping_window_means_no_trend(gsc):
+    """Two overlapping snapshots and nothing else is not a trend. Reporting
+    their difference would be worse than reporting nothing."""
+    article_id = _article()
+    _add_page_window(article_id, 500, date(2026, 4, 13), date(2026, 7, 12))
+    _add_page_window(article_id, 400, date(2026, 4, 14), date(2026, 7, 13))
+
+    assert decaying_articles() == []
+
+
+def test_adjacent_windows_are_comparable(gsc):
+    """Touching but not overlapping — one ends exactly where the other starts.
+    This is what a single sync produces and it must count."""
+    article_id = _article()
+    _add_page_window(article_id, 1000, date(2026, 1, 14), date(2026, 4, 14))
+    _add_page_window(article_id, 250, date(2026, 4, 14), date(2026, 7, 13))
+
+    rows = decaying_articles()
+    assert len(rows) == 1
+    assert rows[0]["impressions_lost"] == 750

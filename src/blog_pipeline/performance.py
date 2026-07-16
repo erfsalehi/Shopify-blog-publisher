@@ -277,17 +277,36 @@ def _path_of(url: str | None) -> str:
 
 
 def _two_windows(session, dimension_col) -> tuple[date | None, date | None]:
-    """The two most recent period_ends carrying rows for this dimension."""
-    ends = [
-        w[0]
-        for w in session.query(SearchPerformance.period_end)
+    """The most recent snapshot, and the most recent one that does NOT overlap
+    it — i.e. the newest window ending on or before the current one starts.
+
+    Taking simply "the two most recent" is wrong the moment sync-performance
+    runs on two different days: each run stores a 90-day window ending 3 days
+    back, so a Monday and a Thursday run leave windows 3 days apart that share
+    87 days of data. Their difference is a few days of noise, but it reads as
+    decay and ranks like it — that is how a refresh run came to pick a random
+    article over one that had lost 12,775 impressions.
+
+    Returns (current_end, previous_end); previous is None when no
+    non-overlapping window exists, which callers treat as "no trend yet".
+    """
+    windows = [
+        (w[0], w[1])
+        for w in session.query(
+            SearchPerformance.period_start, SearchPerformance.period_end
+        )
         .filter(dimension_col.isnot(None))
         .distinct()
         .order_by(SearchPerformance.period_end.desc())
-        .limit(2)
         .all()
     ]
-    return (ends[0] if ends else None, ends[1] if len(ends) > 1 else None)
+    if not windows:
+        return (None, None)
+    current_start, current_end = windows[0]
+    for start, end in windows[1:]:
+        if end <= current_start:
+            return (current_end, end)
+    return (current_end, None)
 
 
 def site_summary() -> dict:
@@ -415,8 +434,8 @@ def striking_distance_queries(
 
 
 def decaying_articles(*, limit: int = 10, min_impressions: int = 20) -> list[dict]:
-    """Live articles whose impressions dropped between the two most recent
-    windows, ranked by how much traffic was actually lost.
+    """Live articles whose impressions dropped between the current window and
+    the last non-overlapping one, ranked by how much traffic was actually lost.
 
     Ordered by absolute impressions lost, NOT by percentage. Percentage
     flatters trivia: an article falling 25 -> 1 is a 96% collapse worth 24
@@ -429,18 +448,13 @@ def decaying_articles(*, limit: int = 10, min_impressions: int = 20) -> list[dic
     the honest answer is an empty list rather than a guess.
     """
     with get_session() as session:
-        windows = [
-            w[0]
-            for w in session.query(SearchPerformance.period_end)
-            .filter(SearchPerformance.page.isnot(None))
-            .distinct()
-            .order_by(SearchPerformance.period_end.desc())
-            .limit(2)
-            .all()
-        ]
-        if len(windows) < 2:
+        # Via _two_windows so the comparison can't be against an overlapping
+        # snapshot — see its docstring. This used to pick "the two most recent"
+        # itself, which silently compared windows a day apart once a second
+        # sync ran, and ranked a few days of noise as decay.
+        current, previous = _two_windows(session, SearchPerformance.page)
+        if current is None or previous is None:
             return []
-        current, previous = windows[0], windows[1]
 
         def _by_article(period):
             return {
