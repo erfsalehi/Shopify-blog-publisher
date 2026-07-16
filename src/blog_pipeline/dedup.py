@@ -17,7 +17,29 @@ from functools import lru_cache
 from blog_pipeline.utils import keyword_overlap
 
 EXACT_THRESHOLD = 0.6
-SEMANTIC_THRESHOLD = 0.82
+
+# Measured on the real corpus (71 flooring articles vs 15 researched topics),
+# not picked by feel — bge-small's cosine range is compressed, and inside one
+# niche every pair looks alike, so intuition is a bad guide here:
+#
+#   genuinely unrelated (baseboards vs linoleum)   ~0.71
+#   new topics, best match against the catalogue   0.781 - 0.815
+#   near-miss (underlayment guide vs store guide)   0.840
+#   real duplicates (SPC guide vs SPC guide)       0.870 - 0.961
+#
+# 0.82 sat *inside* the new-topic band and cost a real article: "How to Choose
+# the Best Flooring Underlayment for Langley Homes" was rejected against
+# "...How to Choose the Ideal Flooring Store in Langley" on shared phrasing
+# alone — while being the site's biggest opportunity (3,901 impressions,
+# position 9.1, zero clicks). "Engineered Hardwood vs. Solid Hardwood" survived
+# at 0.815 by 0.005.
+#
+# 0.855 sits in the empty band between 0.840 and 0.870, with ~0.015 either
+# side. That margin is thin, so it errs toward writing a near-duplicate rather
+# than silently killing a good topic: a duplicate is visible in Linear and
+# costs one draft, whereas a wrongly-rejected topic is a line in a log nobody
+# reads. Re-measure if the model or the niche changes.
+SEMANTIC_THRESHOLD = 0.855
 
 
 @dataclass
