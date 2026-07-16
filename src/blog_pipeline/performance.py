@@ -16,8 +16,9 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
-from blog_pipeline.db import Article, SearchPerformance, get_session
+from blog_pipeline.db import AiReferral, Article, SearchPerformance, get_session
 from blog_pipeline.db.models import ArticleStatus
+from blog_pipeline.tools.analytics import AnalyticsClient, is_ai_source
 from blog_pipeline.tools.search_console import SearchConsoleClient, default_window
 
 
@@ -170,6 +171,109 @@ def sync_performance(
         "pruned_rows": pruned,
         "dry_run": dry_run,
     }
+
+
+def sync_ai_referrals(*, days: int = 90, dry_run: bool = False) -> dict:
+    """Store sessions that arrived from an AI assistant.
+
+    GA4 reports the landing page as a path ("/blogs/news/x"), while articles
+    carry an absolute URL — _normalize strips the scheme and host from both, so
+    the path is compared against the article URL's tail rather than failing to
+    match every row.
+    """
+    client = AnalyticsClient()
+    if not client.enabled:
+        return {"enabled": False, "ai_sessions": 0, "sources": 0}
+
+    start, end = default_window(days)
+    rows = client.run_report(
+        dimensions=["sessionSource", "landingPagePlusQueryString"],
+        metrics=["sessions", "activeUsers"],
+        start_date=start,
+        end_date=end,
+    )
+
+    ai_rows = [r for r in rows if is_ai_source((r["dimensions"] or [None])[0])]
+    total_sessions = 0
+    with get_session() as session:
+        by_path = {
+            _path_of(a.shopify_url): a.id
+            for a in session.query(Article)
+            .filter(Article.shopify_url.isnot(None))
+            .all()
+        }
+        records = []
+        for row in ai_rows:
+            source = row["dimensions"][0]
+            landing = row["dimensions"][1] if len(row["dimensions"]) > 1 else None
+            sessions = int(row["metrics"][0] or 0)
+            users = int(row["metrics"][1] or 0) if len(row["metrics"]) > 1 else 0
+            total_sessions += sessions
+            records.append(
+                AiReferral(
+                    article_id=by_path.get(_path_of(landing)),
+                    source=source,
+                    landing_page=landing,
+                    sessions=sessions,
+                    users=users,
+                    period_start=start,
+                    period_end=end,
+                )
+            )
+        if not dry_run:
+            session.query(AiReferral).filter(
+                AiReferral.period_start == start, AiReferral.period_end == end
+            ).delete(synchronize_session=False)
+            session.add_all(records)
+
+    return {
+        "enabled": True,
+        "window": f"{start.isoformat()}..{end.isoformat()}",
+        "rows_scanned": len(rows),
+        "ai_rows": len(ai_rows),
+        "ai_sessions": total_sessions,
+        "sources": len({r["dimensions"][0] for r in ai_rows}),
+        "dry_run": dry_run,
+    }
+
+
+def ai_referral_summary(*, limit: int = 10) -> dict:
+    """AI sessions in the latest window, by source and by landing page."""
+    with get_session() as session:
+        latest = (
+            session.query(AiReferral.period_end)
+            .order_by(AiReferral.period_end.desc())
+            .first()
+        )
+        if not latest:
+            return {"available": False}
+        rows = (
+            session.query(AiReferral)
+            .filter(AiReferral.period_end == latest[0])
+            .all()
+        )
+        by_source: dict[str, int] = {}
+        by_page: dict[str, int] = {}
+        for r in rows:
+            by_source[r.source] = by_source.get(r.source, 0) + r.sessions
+            if r.landing_page:
+                by_page[r.landing_page] = by_page.get(r.landing_page, 0) + r.sessions
+        return {
+            "available": True,
+            "total_sessions": sum(by_source.values()),
+            "sources": sorted(by_source.items(), key=lambda kv: -kv[1])[:limit],
+            "pages": sorted(by_page.items(), key=lambda kv: -kv[1])[:limit],
+        }
+
+
+def _path_of(url: str | None) -> str:
+    """The path part of a URL, normalized. GA4 reports landing pages as paths
+    while articles store absolute URLs; this makes the two comparable."""
+    normalized = _normalize(url)
+    if not normalized:
+        return ""
+    slash = normalized.find("/")
+    return normalized[slash:] if slash != -1 else "/"
 
 
 def _two_windows(session, dimension_col) -> tuple[date | None, date | None]:

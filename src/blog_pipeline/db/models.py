@@ -214,6 +214,37 @@ class SearchPerformance(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class AiReferral(Base):
+    """Sessions arriving from an AI assistant, per source per landing page.
+
+    The only direct evidence that being cited by ChatGPT et al. is worth
+    anything. Search Console cannot see this at all — it covers Google Search
+    only — so without GA4 the pipeline's whole GEO effort (pull quotes, FAQ
+    blocks, JSON-LD, chunk-sized sections) is unmeasured.
+
+    Counts clicks, not citations. Being quoted to someone who never clicks is
+    real value and invisible here; probing the assistants directly is the only
+    way to see that, and it's a weather vane rather than an instrument.
+    """
+
+    __tablename__ = "ai_referral"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int | None] = mapped_column(
+        ForeignKey("article.id"), index=True, nullable=True
+    )
+    # GA4 sessionSource, e.g. "chatgpt.com" or "perplexity.ai".
+    source: Mapped[str] = mapped_column(String(200), index=True, nullable=False)
+    landing_page: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
+    sessions: Mapped[int] = mapped_column(Integer, default=0)
+    users: Mapped[int] = mapped_column(Integer, default=0)
+
+    period_start: Mapped[date] = mapped_column(Date, nullable=False)
+    period_end: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class ArticleRevision(Base):
     """Snapshot of an article's live Shopify body, taken immediately before
     the refresh agent overwrites it.

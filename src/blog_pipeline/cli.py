@@ -219,6 +219,71 @@ def import_existing_cmd(
         console.print("[dim]Dry run — nothing written.[/dim]")
 
 
+@app.command("sync-analytics")
+def sync_analytics_cmd(
+    days: int = typer.Option(90, "--days", help="Window length to pull."),
+    list_properties: bool = typer.Option(
+        False, "--list-properties",
+        help="Show GA4 properties the service account can read, then exit.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Fetch but don't store."),
+) -> None:
+    """Pull AI-assistant referral sessions from Google Analytics 4.
+
+    The only direct evidence that ChatGPT and friends citing you is worth
+    anything — Search Console can't see it, since it covers Google Search only.
+    """
+    from blog_pipeline.performance import sync_ai_referrals
+    from blog_pipeline.tools.analytics import AnalyticsClient, AnalyticsError
+
+    if list_properties:
+        try:
+            props = AnalyticsClient().list_properties()
+        except AnalyticsError as e:
+            console.print(f"[red]{e}[/red]")
+            raise typer.Exit(1)
+        if not props:
+            console.print(
+                "[yellow]The service account can't see any GA4 properties. Add "
+                "its client_email under GA4 Admin → Property access "
+                "management.[/yellow]"
+            )
+            return
+        table = Table("Property ID", "Name", "Account")
+        for p in props:
+            table.add_row(p["property_id"], str(p["display_name"]), str(p["account"]))
+        console.print(table)
+        console.print(
+            f"[dim]Configured as: {get_settings().ga4_property_id or '(unset)'} — "
+            "GA4_PROPERTY_ID wants the numeric id above.[/dim]"
+        )
+        return
+
+    try:
+        result = sync_ai_referrals(days=days, dry_run=dry_run)
+    except AnalyticsError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
+
+    if not result.get("enabled"):
+        console.print(
+            "[yellow]GA4 not configured — set GA4_PROPERTY_ID (numeric, from "
+            "Admin → Property Settings). Credentials fall back to "
+            "GSC_CREDENTIALS_JSON.[/yellow]"
+        )
+        return
+
+    table = Table("Metric", "Value")
+    for k, v in result.items():
+        table.add_row(k, str(v))
+    console.print(table)
+    if result["rows_scanned"] and not result["ai_rows"]:
+        console.print(
+            "[dim]No AI referrals in this window. That's a real finding, not an "
+            "error — it means no one arrived here from an AI assistant.[/dim]"
+        )
+
+
 @app.command("report")
 def report_cmd(
     top: int = typer.Option(8, "--top", help="Rows per section."),
@@ -230,6 +295,7 @@ def report_cmd(
     """
     from blog_pipeline.metrics import gather_metrics
     from blog_pipeline.performance import (
+        ai_referral_summary,
         decaying_articles,
         site_summary,
         striking_distance_queries,
@@ -285,6 +351,26 @@ def report_cmd(
             console.print(t)
             console.print("[dim]Shown for these but not winning the click — "
                           "research weights them heavily.[/dim]")
+
+    ai = ai_referral_summary(limit=top)
+    if not ai.get("available"):
+        console.print(
+            "[dim]No AI referral data — run sync-analytics to see whether "
+            "ChatGPT and friends send you anyone.[/dim]"
+        )
+    else:
+        t = Table("AI referrals (last 90d)", "Sessions")
+        for source, sessions in ai["sources"]:
+            t.add_row(source, f"{sessions:,}")
+        t.add_row("[bold]Total[/bold]", f"[bold]{ai['total_sessions']:,}[/bold]")
+        console.print(t)
+        if ai["pages"]:
+            t = Table("Landing page (from AI)", "Sessions")
+            for page, sessions in ai["pages"]:
+                t.add_row(str(page)[:52], f"{sessions:,}")
+            console.print(t)
+        console.print("[dim]Clicks only. A citation nobody clicks is real "
+                      "value and invisible here.[/dim]")
 
     m = gather_metrics()
     t = Table("Pipeline", "Value")

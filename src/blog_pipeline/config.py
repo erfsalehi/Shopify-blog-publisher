@@ -196,6 +196,16 @@ class Settings(BaseSettings):
     # so `sync-performance` lists what the account can actually see.
     gsc_site_url: str = ""
 
+    # ── Google Analytics 4 (did an AI answer send anyone here?) ──
+    # The NUMERIC property id from Admin → Property Settings (e.g. 493820114),
+    # NOT the G-XXXXXXX measurement id used by the gtag/GTM snippet. The Data
+    # API only accepts the numeric one, and confusing the two is the usual
+    # first failure — sync-analytics --list-properties prints the right value.
+    ga4_property_id: str = ""
+    # Defaults to the Search Console key: one service account can be granted
+    # both, and usually is. Set this only to use a separate account.
+    ga4_credentials_json: str = ""
+
     # ── WhatsApp (Meta Cloud API) — trigger the pipeline by message ──
     # access token: temporary 24h token (dev) or a permanent System User token.
     whatsapp_access_token: str = ""
@@ -294,6 +304,16 @@ class Settings(BaseSettings):
     @property
     def has_search_console(self) -> bool:
         return bool(self.gsc_credentials_json and self.gsc_property)
+
+    @property
+    def ga4_credentials(self) -> str:
+        """The GA4 service-account key, falling back to the Search Console one
+        — the same account is normally granted both."""
+        return self.ga4_credentials_json or self.gsc_credentials_json
+
+    @property
+    def has_analytics(self) -> bool:
+        return bool(self.ga4_credentials and self.ga4_property_id)
 
     @property
     def has_slack(self) -> bool:

@@ -49,6 +49,11 @@ jobs:
           # unset just means research falls back to market data alone.
           GSC_CREDENTIALS_JSON: ${{ secrets.GSC_CREDENTIALS_JSON }}
           GSC_SITE_URL: ${{ vars.GSC_SITE_URL }}
+          # ── GA4 — whether AI assistants send anyone here. Search Console
+          # can't see this: it covers Google Search only. Credentials fall back
+          # to the Search Console key, so usually only the property id is set.
+          GA4_PROPERTY_ID: ${{ vars.GA4_PROPERTY_ID }}
+          GA4_CREDENTIALS_JSON: ${{ secrets.GA4_CREDENTIALS_JSON }}
           # ── Topic research inputs (agents/topic_research.py, seed_research.py)
           NICHE: ${{ vars.NICHE }}
           SEED_KEYWORDS: ${{ vars.SEED_KEYWORDS }}
@@ -72,4 +77,7 @@ jobs:
           # (striking-distance queries are an input to it). No-ops when
           # Search Console isn't configured.
           blog-pipeline sync-performance
+          # AI referral sessions. No-ops when GA4 isn't configured. Not an
+          # input to research — it's the record of whether the GEO work pays.
+          blog-pipeline sync-analytics
           blog-pipeline run-calendar

@@ -114,3 +114,83 @@ looks exactly like a site with no traffic.
 - The weekly workflow runs `sync-performance` automatically, after
   `import-existing` (pages join to articles by URL) and before `run-calendar`
   (striking-distance queries feed research).
+
+---
+
+# Also: Google Analytics 4 (AI referrals)
+
+Search Console covers Google Search and nothing else. It cannot tell you
+whether ChatGPT cites you — and it can't isolate Google's *own* AI Overviews
+either, since those are folded into ordinary Search rows with no filter. Any
+tool claiming to break out AI Overview data from GSC is guessing.
+
+GA4 referrals are the one place a click from an AI assistant is directly
+observable: ChatGPT tags its outbound links `utm_source=chatgpt.com`, and
+Perplexity/Claude/Copilot arrive as ordinary referrers. That's what
+`sync-analytics` collects, and what the AI section of `report` shows.
+
+**The honest limit:** this counts clicks. Being cited to someone who reads the
+answer and never clicks is real value and completely invisible here. Nothing
+short of probing the assistants directly can see that, and probing tells you
+about one model on one day.
+
+## 1. Enable two more APIs
+
+Same Cloud project as the Search Console setup
+(**APIs & Services → Library**):
+
+- **Google Analytics Data API** — reads the numbers.
+- **Google Analytics Admin API** — only needed for `--list-properties`.
+
+## 2. Grant the same service account
+
+You don't need a new key. `blog-pipeline@<project>.iam.gserviceaccount.com`
+can hold both grants, and `GA4_CREDENTIALS_JSON` falls back to
+`GSC_CREDENTIALS_JSON` when unset.
+
+In **GA4 → Admin → Property access management → +** → paste the service
+account's `client_email` → role **Viewer**.
+
+Being an owner of the property in your own browser grants the robot nothing —
+same trap as Search Console.
+
+## 3. Find the property id
+
+```bash
+blog-pipeline sync-analytics --list-properties
+```
+
+This prints the **numeric** id (e.g. `493820114`) — the thing the Data API
+wants. It is **not** the `G-XXXXXXX` measurement id from your GTM/gtag
+snippet; that one is for the browser tag and the API rejects it. Mixing them up
+is the usual first failure, so the 400/404 message says so explicitly.
+
+```bash
+gh variable set GA4_PROPERTY_ID --body "493820114"
+```
+
+It's a Variable, not a Secret — a property id isn't a credential.
+
+## 4. Pull it
+
+```bash
+blog-pipeline sync-analytics
+blog-pipeline report
+```
+
+`rows_scanned` vs `ai_rows` is the number to read: the first is every traffic
+source in the window, the second is how many were AI assistants. **`ai_rows: 0`
+is a legitimate finding, not a failure** — for most sites today the honest
+answer is that AI sends approximately nobody, and knowing that is worth more
+than a dashboard implying otherwise.
+
+## What counts as AI
+
+An explicit list (`AI_SOURCES` in `tools/analytics.py`): chatgpt.com,
+chat.openai.com, perplexity.ai, claude.ai, gemini.google.com,
+copilot.microsoft.com, you.com, poe.com, phind.com, grok.com, meta.ai.
+
+`google.com` and `bing.com` are deliberately **excluded**. Both serve ordinary
+search and AI answers under the same referrer, so counting them would quietly
+credit AI for organic traffic. Under-reporting beats a flattering number you
+can't defend.
