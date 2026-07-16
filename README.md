@@ -2,21 +2,23 @@
 
 An agentic pipeline that researches blog topics, maintains a rolling content
 calendar in Linear, and drafts SEO-optimized articles — then **auto-publishes
-confident ones live to Shopify** while routing anything uncertain to Linear
-for a human to review and publish by hand. Built on LangGraph, routing all
-LLM calls through Google AI Studio's free-tier Gemini API and tracing to
-LangSmith.
+confident ones to Shopify** while routing anything uncertain to Linear for a
+human to review. It also **measures what actually happened** (Google Search
+Console + GA4) and **rewrites its own decaying posts** on that evidence. Built
+on LangGraph, routing all LLM calls through Google AI Studio's free-tier
+Gemini API and tracing to LangSmith.
 
 Implements the full PRD (`PRD Topic Research to Publish Pipeline.md`).
 
 **Docs index:** [Linear setup](#linear-setup) · [Shopify setup](#shopify-setup-optional--enables-auto-publish)
+· [Performance data](docs/search-console.md) · [Refreshing old posts](#refreshing-old-posts)
 · [AI SEO / GEO](#ai-seo-geo) · [WhatsApp trigger](docs/whatsapp-setup.md)
 · [Railway deploy](docs/railway-deploy.md) · [robots.txt for AI crawlers](docs/robots.txt.liquid)
 · [llms.txt](docs/llms.txt)
 
 ## Architecture
 
-Two graphs plus a CLI that cron drives:
+Two graphs, a refresh pass, and a CLI that cron drives:
 
 - **Calendar graph** (weekly): check coverage → topic research → dedupe
   (exact + semantic) → assign publish dates per cadence → persist → **create
@@ -34,6 +36,19 @@ Two graphs plus a CLI that cron drives:
   A publish failure is non-fatal — the article still syncs to Linear as
   `Needs Adjustments` with the error noted, so no work is lost. Leave Shopify
   unconfigured to run fully Linear-only (nothing auto-publishes).
+
+- **Refresh pass** (weekly, `run-refresh`): pick the live posts that are
+  actually losing traffic → rewrite each with its own agent → write back to
+  Shopify **in place** → record what changed in Linear. See
+  [Refreshing old posts](#refreshing-old-posts). This is the only path that
+  edits public content without a human in the loop, so it's the most heavily
+  guarded — snapshot before write, refuse-on-asset-loss, dry-run by default.
+
+The store's **existing** posts matter to all three: `import-existing` pulls
+every live Shopify article into the database, which is what lets dedup see
+articles that predate the pipeline (otherwise research happily re-proposes
+topics you published years ago), and gives the refresh pass something to
+select from. It's idempotent and runs at the head of the weekly cron.
 
 Model routing (via Google AI Studio's OpenAI-compatible endpoint):
 
@@ -94,8 +109,13 @@ blog-pipeline config-check    # shows which integrations are live
   LLM-only research), `SLACK_WEBHOOK_URL` (per-article + digest notifications
   — logs to stdout instead), `WHATSAPP_*` (trigger runs on demand — see
   [docs/whatsapp-setup.md](docs/whatsapp-setup.md)), `LANGSMITH_API_KEY`
-  (tracing). `SEED_KEYWORDS` is also optional — leave it unset and
-  `run-calendar` auto-researches seed keywords from `NICHE`.
+  (tracing), `GSC_CREDENTIALS_JSON` + `GSC_SITE_URL` (real Search Console
+  performance — research falls back to market data and refresh to age-ranking
+  without it), `GA4_PROPERTY_ID` (AI-referral tracking; credentials fall back
+  to the Search Console key) — both in
+  [docs/search-console.md](docs/search-console.md). `SEED_KEYWORDS` is also
+  optional — leave it unset and `run-calendar` auto-researches seed keywords
+  from `NICHE`.
 - **Recommended for a real business:** `BUSINESS_NAME` + `BUSINESS_DESCRIPTION`
   (so QA treats your own brand mentions as first-party, not a red flag, and
   drafting writes in your voice), `BUSINESS_LOCATION` (folds a service area
@@ -157,10 +177,20 @@ controlled by `SHOPIFY_PUBLISH_LIVE`:**
   but **unpublished** (a hidden draft you review in Shopify admin and click
   Publish on yourself). Good default while you're still validating output
   quality: nothing goes public without a final human look, but you skip the
-  copy-paste-into-Shopify step for articles that already cleared QA.
+  copy-paste-into-Shopify step for articles that already cleared QA. Also the
+  right setting whenever `ENABLE_IMAGES=false`, since drafts then carry literal
+  `[IMAGE - ...]` placeholder text that must not reach the public.
 
 Lower `CONFIDENCE_THRESHOLD` to publish more aggressively, raise it to route
 more to Linear for review first.
+
+> **`SHOPIFY_PUBLISH_LIVE` governs new articles only — not refreshes.**
+> Shopify has no draft revision for an already-published post, so `run-refresh`
+> has nothing to stage: editing a live article changes what the public sees, at
+> once. There's no flag to change that, which is why the refresh path is
+> guarded differently — see [Refreshing old posts](#refreshing-old-posts).
+> The asymmetry is usually what you want: a refresh only inherits images that
+> are already on the page, while a new draft needs a human to place them.
 
 ### Store promotion
 
@@ -169,6 +199,85 @@ told the publishing business *sells* what the article discusses, so it weaves
 in a soft, genuine mention or two — never a hard sell — and every article gets
 a closing "Shop with us" call-to-action linking to `PUBLIC_DOMAIN`. Set
 `SHOP_PROMO=false` to turn this off and keep articles purely editorial.
+
+## Performance data (Search Console + GA4)
+
+Optional, and the only source here that describes **your** site rather than the
+market — DataForSEO says what people search; this says what you get shown for,
+from what position, and whether that's rising or falling. Full setup (service
+account, the grant everyone forgets, the property-id trap) is in
+[docs/search-console.md](docs/search-console.md).
+
+```bash
+pip install -e ".[gsc]"
+blog-pipeline sync-performance --list-sites   # diagnose access
+blog-pipeline sync-performance                # Search Console -> DB
+blog-pipeline sync-analytics                  # GA4 AI referrals -> DB
+blog-pipeline report                          # read it back
+```
+
+Two things consume it:
+
+- **Striking-distance queries** feed topic research — terms you already earn
+  impressions for from positions 8–30. Google already considers you relevant to
+  those, so they're a far shorter path to page one than a high-volume term with
+  no history. Weighted heavily in the research prompt.
+- **Decay ranking** drives `run-refresh` (below), replacing "oldest first".
+
+`sync-performance` pulls the current window **and the preceding one** in a
+single run — decay needs two windows to mean anything, and syncing one window
+weekly would leave consecutive snapshots overlapping ~92%, whose difference is
+noise. It keeps the four most recent snapshots and prunes the rest (one sync of
+a mid-size site is ~30k rows; unpruned that's ~240MB/year).
+
+**AI citation tracking** (`sync-analytics`) is the one place a click from an AI
+assistant is directly observable — ChatGPT tags outbound links
+`utm_source=chatgpt.com`, and Perplexity/Claude/Copilot arrive as ordinary
+referrers. Search Console cannot see any of this, and can't isolate Google's
+own AI Overviews either. Two deliberate limits worth knowing:
+
+- **It counts clicks.** Being cited to someone who never clicks is real value
+  and invisible here.
+- **`google.com`/`bing.com` are excluded** from `AI_SOURCES` — both serve
+  ordinary search and AI answers under one referrer, so counting them would
+  quietly credit AI for organic traffic. Under-reporting beats a flattering
+  number you can't defend. `ai_rows: 0` is a legitimate finding, not an error.
+
+Everything degrades gracefully: unset, research falls back to market data and
+refresh falls back to age.
+
+## Refreshing old posts
+
+```bash
+blog-pipeline run-refresh                      # dry run — reports, writes nothing
+blog-pipeline run-refresh --limit 1 --apply    # rewrites ONE live post
+blog-pipeline rollback-refresh --article-id 42 # restore the previous body
+```
+
+Picks the live posts **losing the most traffic**, rewrites each, and writes it
+back in place. Distinct from the SEO revise loop, which can't do this job: that
+one is driven by the rubric and no-ops on a four-year-old article that scores
+fine — right keyword density, wrong decade. Staleness isn't a rubric failure.
+
+Candidates are ranked by **absolute impressions lost**, not percentage.
+Percentage flatters trivia: a post falling 25→1 is a 96% collapse worth 24
+impressions, while 18,272→5,497 is "only" −70% and worth 12,775. Falls back to
+oldest-first when there's no Search Console data.
+
+Refreshed posts get the same GEO treatment new ones do (takeaways, pull-quote,
+FAQ, JSON-LD) — old articles predate that work, so they're exactly the ones
+missing it, and being already-ranking, the ones most worth having cited.
+
+**This is the only path that edits public content unattended**, so:
+
+- `dry_run` is the default everywhere up the stack; applying is opt-in.
+- The previous body is snapshotted to `ArticleRevision` **before** the write,
+  in its own committed transaction — the only undo Shopify offers for a
+  published post.
+- A refresh that **drops an image or a link is refused**, not published. The
+  prompt asks the model to preserve them; this makes it true. A dropped figure
+  would be a broken public page nobody notices.
+- Every run opens a Linear issue recording what changed.
 
 ## Usage
 
@@ -189,9 +298,17 @@ blog-pipeline run-calendar --niche "outdoor gear" --seeds "hiking boots,trail ru
 # Daily: draft everything scheduled for today and sync each to Linear:
 blog-pipeline run-daily
 
+# Pull the store's existing posts in, so dedup can see them (idempotent):
+blog-pipeline import-existing
+
+# Weekly: rewrite the worst-decaying live post (dry run unless --apply):
+blog-pipeline run-refresh --limit 1
+
 # Inspect:
 blog-pipeline calendar           # upcoming queue (with Linear issue ids)
 blog-pipeline status             # health metrics dashboard
+blog-pipeline report             # what's actually working: decay, striking
+                                 # distance, AI referrals, pipeline health
 ```
 
 **Confident articles** (with Shopify configured) publish live automatically —
@@ -204,15 +321,49 @@ pipeline never touches an article again after it reaches its terminal state.
 
 ## Scheduling in production
 
-`.github/workflows/` contains weekly (calendar) and daily (draft) crons.
-They require `DATABASE_URL` pointed at **Postgres** — the SQLite default does
-not persist across ephemeral CI runners. Locally, use the CLI directly or
-Windows Task Scheduler / cron.
+`.github/workflows/` holds three crons. A worked example — 2 new posts a week
+plus 1 refresh, with `CADENCE="2x/week: Tue/Thu"`:
 
-Don't have a Postgres instance handy? [docs/railway-deploy.md](docs/railway-deploy.md)
-covers provisioning one on Railway (needed anyway if you deploy the WhatsApp
-webhook below) and pointing both the crons and the webhook at it, via a
-Railway **TCP Proxy** connection string for the GitHub Actions secret.
+| When (UTC) | Workflow | Does |
+|---|---|---|
+| Mon 06:00 | `weekly-calendar.yml` | import → sync performance → top up the topic queue |
+| Tue 14:00 | `daily-publish.yml` | drafts the entry due today → Shopify |
+| Wed 15:00 | `refresh.yml` | rewrites 1 decaying post, **live** |
+| Thu 14:00 | `daily-publish.yml` | drafts the entry due today → Shopify |
+
+`daily-publish` runs every day and no-ops when nothing is due, so the cadence —
+not the cron — decides how much you publish. `refresh.yml` also accepts a
+manual dispatch, which **defaults to a dry run**: the cron is doing the job, a
+person clicking Run is usually looking first.
+
+Config lives in GitHub **Variables** (non-secret: `CADENCE`, `LINEAR_TEAM`,
+`NICHE`, `BUSINESS_*`, `GA4_PROPERTY_ID`, …) and **Secrets** (`DATABASE_URL`,
+`GOOGLE_API_KEY`, `GSC_CREDENTIALS_JSON`, …). Getting that split wrong is
+silent — a `${{ vars.X }}` reading a secret just yields `""` forever — so
+`tests/test_workflow_env.py` checks every key against `Settings` and every
+reference against its own name.
+
+Install extras matter per workflow: `[postgres]` everywhere (psycopg), plus
+`[gsc]` wherever `sync-performance`/`sync-analytics` run. A workflow calling
+those without the extra dies on an ImportError, so that's also asserted in
+`tests/test_workflow_env.py` rather than discovered in a failed run.
+
+All three need `DATABASE_URL` pointed at **Postgres** — the SQLite default does
+not survive an ephemeral CI runner. Any managed Postgres works; the crons only
+need a publicly reachable connection string:
+
+- **Supabase / Neon** — free tier, no card, ~5 minutes. On Supabase use the
+  **Session pooler** string (port 5432): the direct connection is IPv6-only
+  unless you pay for the IPv4 add-on, and GitHub's runners have no IPv6 route.
+- **Railway** — see [docs/railway-deploy.md](docs/railway-deploy.md). Worth it
+  if you're also deploying the WhatsApp webhook (which needs a host anyway);
+  otherwise it's a paid app service for a database you can get free. Needs the
+  **TCP Proxy** connection string, not the internal one.
+
+`normalize_database_url()` rewrites a bare `postgres://`/`postgresql://` to the
+psycopg driver, so any provider's string pastes in unedited.
+
+Locally, use the CLI directly or Windows Task Scheduler / cron.
 
 ## Trigger from WhatsApp (off-schedule)
 
@@ -242,8 +393,23 @@ pytest
 ```
 
 Unit tests cover the deterministic logic (dedup, cadence scheduling, SEO
-rubric, Linear payload construction, QA confidence routing) with LLM/HTTP
-mocked, so they run offline with no API keys.
+rubric, Linear payload construction, QA confidence routing, Search Console /
+GA4 joins, refresh safety) with LLM/HTTP mocked, so they run offline with no
+API keys.
+
+Three areas are tested structurally, because a green suite is not evidence for
+them — nothing in the code imports a workflow file, and SQLite doesn't enforce
+what Postgres does:
+
+- **Workflow drift** (`test_workflow_env.py`) — every env key exists on
+  `Settings`, every `${{ vars.X }}` matches its key, every workflow installs
+  the extras its commands need, and optional enrichment can never abort a job.
+- **Enum labels** (`test_enum_sync.py`) — `create_all()` builds a Postgres enum
+  once and never alters it, so a value added later is missing forever and every
+  insert using it fails. SQLite stores enums as text and enforces nothing, so
+  the bug is invisible locally by construction. `init-db` reconciles labels.
+- **The dedup threshold** (`test_dedup_threshold.py`) — measured against the
+  real corpus rather than asserted as a constant. See below.
 
 ## AI SEO (GEO)
 
@@ -322,7 +488,14 @@ Off by default (`ENABLE_IMAGES=false`). Two modes:
   some articles get several links and others none. With Shopify unconfigured
   it's skipped.
 - **Semantic dedup** uses local `fastembed` ONNX embeddings (no extra API
-  key); the model downloads on first `run-calendar`.
+  key); the model downloads on first `run-calendar`. `SEMANTIC_THRESHOLD` is
+  **corpus-specific and must be measured, not guessed** — bge-small's cosine
+  range is compressed, and inside a single niche everything looks related
+  (genuinely unrelated flooring topics still score ~0.71). On the reference
+  corpus, new topics peak at 0.815 and real duplicates start at 0.870; the
+  threshold sits at 0.855, in the gap. A value chosen by intuition lands inside
+  the new-topic band and silently kills good articles — which is exactly what
+  0.82 did. Re-measure if the model or the niche changes.
 - **`llms.txt`** is generated but not auto-hosted — Shopify has no built-in
   route for it (unlike `robots.txt.liquid`, which Shopify does support
   natively). See the note above.
