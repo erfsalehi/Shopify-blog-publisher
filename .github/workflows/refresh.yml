@@ -1,14 +1,24 @@
 name: Refresh Stale Posts
 
-# Manual only — deliberately no `schedule:`. This edits live, indexed pages:
-# Shopify has no draft revision for a published post, so an --apply run is
-# public the moment it finishes. The previous body is snapshotted first
-# (rollback-refresh restores it), but a cron doing that unattended is a
-# different risk from a human choosing to.
+# Rewrites one decaying post a week, live.
 #
-# Defaults to a dry run: you must tick `apply` to write anything.
+# This edits public, indexed pages: Shopify has no draft revision for a
+# published post, so a scheduled --apply run goes public unattended. That is a
+# deliberate choice, not an oversight — refreshes only ever inherit the images
+# already on the page, so unlike a new draft (which carries [IMAGE - ...]
+# placeholder text) there is nothing for a human to fix first.
+#
+# Three things make it survivable:
+#   * the previous body is snapshotted before the write — rollback-refresh
+#   * a refresh that drops an image or link is refused, not published
+#   * every run opens a Linear issue recording what changed
+#
+# Manual runs still default to a DRY RUN. Only the schedule applies by default:
+# a person clicking Run is usually experimenting, a cron is doing the job.
 
 on:
+  schedule:
+    - cron: "0 15 * * 3" # Wednesdays 15:00 UTC — between the Tue/Thu posts
   workflow_dispatch:
     inputs:
       apply:
@@ -18,7 +28,7 @@ on:
       limit:
         description: "How many posts to refresh"
         type: string
-        default: "3"
+        default: "1"
       older_than_months:
         description: "Age floor, only used when there's no Search Console data"
         type: string
@@ -73,7 +83,13 @@ jobs:
           # with slightly stale data rather than not running at all.
           blog-pipeline sync-performance \
             || echo "::warning::sync-performance failed — ranking on the last stored snapshot"
+          # Every input needs an explicit fallback: on a `schedule` trigger the
+          # inputs context is empty, so `--limit ${{ inputs.limit }}` would
+          # expand to a bare `--limit` and swallow the next flag as its value.
+          #
+          # `--apply` on a schedule, never by default on a manual run — the
+          # cron IS the job, a person clicking Run is usually looking first.
           blog-pipeline run-refresh \
-            --limit ${{ inputs.limit }} \
-            --older-than-months ${{ inputs.older_than_months }} \
-            ${{ inputs.apply && '--apply' || '' }}
+            --limit ${{ inputs.limit || '1' }} \
+            --older-than-months ${{ inputs.older_than_months || '12' }} \
+            ${{ (github.event_name == 'schedule' || inputs.apply) && '--apply' || '' }}
