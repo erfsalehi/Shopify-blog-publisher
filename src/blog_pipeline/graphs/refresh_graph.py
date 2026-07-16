@@ -32,6 +32,20 @@ from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
 REFRESH_LABEL = "Blog"
 
+# Don't re-refresh an article for this long after the last one.
+#
+# Not a politeness setting — without it the weekly cron rewrites the SAME post
+# every week forever. Selection ranks on SearchPerformance snapshots, and a
+# refresh changes nothing those rows are built from: the article stays #1 by
+# impressions lost until Search Console's own 90-day windows roll past the
+# decay. Each run would snapshot and overwrite a live page to chase a number it
+# cannot move.
+#
+# 90 days because that's the window sync-performance compares. A refresh's
+# effect is not merely slow to appear before then — it is unmeasurable, so
+# re-refreshing sooner is guaranteed churn rather than a judgement call.
+REFRESH_COOLDOWN_DAYS = 90
+
 
 _IMG_SRC = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.I)
 _A_HREF = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.I)
@@ -62,24 +76,42 @@ def _business_context() -> str:
     return " ".join(bits)
 
 
+def recently_refreshed_ids(session, *, days: int = REFRESH_COOLDOWN_DAYS) -> set[int]:
+    """Articles refreshed within the cooldown — see REFRESH_COOLDOWN_DAYS.
+
+    Reads ArticleRevision rather than a column on Article: the snapshot is
+    written on every refresh and is the only durable record of when one
+    happened.
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+    return {
+        row[0]
+        for row in session.query(ArticleRevision.article_id)
+        .filter(
+            ArticleRevision.reason == RevisionReason.pre_refresh,
+            ArticleRevision.created_at >= since,
+        )
+        .distinct()
+        .all()
+    }
+
+
 def select_stale_articles(session, *, older_than_months: int, limit: int) -> list[Article]:
     """Live posts, oldest first, older than the cutoff.
 
     Requires shopify_article_id: there's nothing to write back to without one.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=30 * older_than_months)
-    return (
-        session.query(Article)
-        .filter(
-            Article.status == ArticleStatus.published,
-            Article.shopify_article_id.isnot(None),
-            Article.published_at.isnot(None),
-            Article.published_at < cutoff,
-        )
-        .order_by(Article.published_at.asc())
-        .limit(limit)
-        .all()
+    cooling = recently_refreshed_ids(session)
+    query = session.query(Article).filter(
+        Article.status == ArticleStatus.published,
+        Article.shopify_article_id.isnot(None),
+        Article.published_at.isnot(None),
+        Article.published_at < cutoff,
     )
+    if cooling:
+        query = query.filter(Article.id.notin_(cooling))
+    return query.order_by(Article.published_at.asc()).limit(limit).all()
 
 
 def select_decaying_articles(session, *, limit: int) -> list[Article]:
@@ -89,13 +121,24 @@ def select_decaying_articles(session, *, limit: int) -> list[Article]:
     ranks should be left alone, while one that's quietly halved should jump
     the queue. Returns [] when there aren't two Search Console windows to
     compare — the caller falls back to age rather than guessing.
+
+    Articles inside the refresh cooldown are skipped, and the next-worst take
+    their place. A post stays top of the decay ranking until Search Console's
+    windows move, so without this the same one is picked every week — and
+    asking for `limit` rows before filtering would return nothing at all once
+    the top of the list was cooling.
     """
     from blog_pipeline.performance import decaying_articles
 
-    decayed = decaying_articles(limit=limit)
+    cooling = recently_refreshed_ids(session)
+    # Over-fetch by the cooldown set so `limit` survivors remain after
+    # filtering; +5 covers rows whose article was deleted or never published.
+    decayed = decaying_articles(limit=limit + len(cooling) + 5)
     if not decayed:
         return []
-    ids = [d["article_id"] for d in decayed]
+    ids = [d["article_id"] for d in decayed if d["article_id"] not in cooling]
+    if not ids:
+        return []
     rows = {
         a.id: a
         for a in session.query(Article)
@@ -106,7 +149,7 @@ def select_decaying_articles(session, *, limit: int) -> list[Article]:
         .all()
     }
     # Preserve decay order, which the IN query does not.
-    return [rows[i] for i in ids if i in rows]
+    return [rows[i] for i in ids if i in rows][:limit]
 
 
 def _sync_refresh_to_linear(

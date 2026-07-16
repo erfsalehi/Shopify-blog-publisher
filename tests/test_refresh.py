@@ -370,3 +370,64 @@ def test_a_refresh_that_drops_an_image_is_not_published(shopify, monkeypatch):
     assert result["refreshed"] == 0
     assert shopify.updates == []  # the live page is untouched
     assert "keep-me.jpg" in result["articles"][0]["error"]
+
+
+# ── cooldown ────────────────────────────────────────────────────
+
+
+def _mark_refreshed(article_id, *, days_ago):
+    """Record a past refresh the way run_refresh does."""
+    with get_session() as s:
+        s.add(
+            ArticleRevision(
+                article_id=article_id,
+                body_html="<p>the body before that refresh</p>",
+                reason=RevisionReason.pre_refresh,
+                created_at=datetime.now(timezone.utc) - timedelta(days=days_ago),
+            )
+        )
+
+
+def test_a_just_refreshed_article_is_not_picked_again(shopify, agent):
+    """The weekly cron's failure mode: selection ranks on Search Console
+    snapshots, which a refresh doesn't change, so the same post stays #1 and
+    would be rewritten every single week."""
+    article_id = _make_article()
+    _mark_refreshed(article_id, days_ago=7)
+
+    result = _run(dry_run=True)
+
+    assert result["considered"] == 0
+
+
+def test_an_article_past_the_cooldown_is_eligible_again(shopify, agent):
+    article_id = _make_article()
+    _mark_refreshed(article_id, days_ago=120)
+
+    result = _run(dry_run=True)
+
+    assert [a["article_id"] for a in result["articles"]] == [article_id]
+
+
+def test_cooling_articles_yield_to_the_next_worst(shopify, agent):
+    """Filtering must not just shrink the batch — the point is to refresh
+    something useful, not to do less work."""
+    cooling = _make_article(gid="gid://shopify/Article/cooling")
+    eligible = _make_article(
+        published_at=OLD + timedelta(days=1), gid="gid://shopify/Article/eligible"
+    )
+    _mark_refreshed(cooling, days_ago=3)
+
+    result = _run(dry_run=True, limit=1)
+
+    assert [a["article_id"] for a in result["articles"]] == [eligible]
+
+
+def test_a_dry_run_does_not_start_the_cooldown(shopify, agent):
+    """Only a real write snapshots, so a dry run must leave the article
+    eligible — otherwise looking at a proposal would postpone doing it."""
+    article_id = _make_article()
+    _run(dry_run=True)
+
+    result = _run(dry_run=True)
+    assert [a["article_id"] for a in result["articles"]] == [article_id]
