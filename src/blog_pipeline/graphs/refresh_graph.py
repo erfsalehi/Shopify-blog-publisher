@@ -17,6 +17,7 @@ so the next article proceeds and the failure is reported at the end.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timedelta, timezone
 
 from blog_pipeline.agents.geo import apply_geo
@@ -30,6 +31,27 @@ from blog_pipeline.tools.linear import LinearClient, LinearError
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
 REFRESH_LABEL = "Blog"
+
+
+_IMG_SRC = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.I)
+_A_HREF = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.I)
+
+
+def lost_assets(original: str, refreshed: str) -> list[str]:
+    """Image sources and link targets the refresh dropped.
+
+    The prompt tells the model to preserve every <figure>/<img> and <a href>,
+    but nothing made it true — and a refresh goes live unreviewed, so a
+    silently dropped image is a broken public page and a dropped internal link
+    is an SEO regression. Both are invisible until someone looks at the post.
+
+    Compares URLs, not markup: rewording an anchor or reformatting a figure is
+    fine, losing the destination is not. Only reports losses — apply_geo
+    legitimately adds links afterwards.
+    """
+    before = set(_IMG_SRC.findall(original)) | set(_A_HREF.findall(original))
+    after = set(_IMG_SRC.findall(refreshed)) | set(_A_HREF.findall(refreshed))
+    return sorted(before - after)
 
 
 def _business_context() -> str:
@@ -190,6 +212,18 @@ def run_refresh(
                     skipped += 1
                     results.append({**entry, "outcome": "skipped"})
                     continue
+
+                # Refuse to publish a body that lost an image or a link. This
+                # write goes live with no human in the loop, so a degraded page
+                # would simply be the page from here on. Better to fail this
+                # one article loudly and leave the good version up.
+                lost = lost_assets(body, result.body_html)
+                if lost:
+                    raise ShopifyError(
+                        "Refusing to publish: the refresh dropped "
+                        f"{len(lost)} asset(s) the original had — {', '.join(lost[:3])}"
+                        f"{'…' if len(lost) > 3 else ''}"
+                    )
 
                 # Render the citation levers into the body — the same treatment
                 # new articles get. Old posts predate all of it, so they're

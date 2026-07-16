@@ -307,3 +307,66 @@ def test_rollback_dry_run_does_not_write(shopify, agent):
     rollback_refresh(article_id, dry_run=True)
 
     assert len(shopify.updates) == before
+
+
+# ── asset preservation ──────────────────────────────────────────
+# A refresh overwrites a live page with no human in the loop, so a dropped
+# image is a broken public page and a dropped link is an SEO regression. The
+# prompt asks the model to preserve both; these make it true.
+
+
+def test_lost_assets_spots_a_dropped_image():
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p>x</p><figure><img src="https://cdn/a.jpg"></figure>'
+    after = "<p>x</p>"
+    assert lost_assets(before, after) == ["https://cdn/a.jpg"]
+
+
+def test_lost_assets_spots_a_dropped_internal_link():
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p>See <a href="https://drflooring.ca/vinyl">vinyl</a>.</p>'
+    after = "<p>See vinyl.</p>"
+    assert lost_assets(before, after) == ["https://drflooring.ca/vinyl"]
+
+
+def test_rewording_an_anchor_is_not_a_loss():
+    """Only the destination matters — the model may reword freely."""
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p><a href="https://drflooring.ca/vinyl">vinyl flooring</a></p>'
+    after = '<p><a href="https://drflooring.ca/vinyl">our vinyl range</a></p>'
+    assert lost_assets(before, after) == []
+
+
+def test_added_links_are_not_a_loss():
+    """apply_geo appends sources after this check; additions are fine."""
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p><a href="https://a.ca/x">x</a></p>'
+    after = '<p><a href="https://a.ca/x">x</a><a href="https://b.ca/y">y</a></p>'
+    assert lost_assets(before, after) == []
+
+
+def test_a_refresh_that_drops_an_image_is_not_published(shopify, monkeypatch):
+    """The whole point: fail one article loudly rather than replace a working
+    live page with a degraded one."""
+    from blog_pipeline.schemas import RefreshedArticle
+
+    shopify.bodies["gid://shopify/Article/1"] = (
+        '<p>body</p><figure><img src="https://cdn/keep-me.jpg"></figure>'
+    )
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article",
+        lambda **kw: RefreshedArticle(
+            body_html="<p>rewritten, image gone</p>", change_summary=["oops"]
+        ),
+    )
+    _make_article()
+    result = _run(dry_run=False)
+
+    assert result["failed"] == 1
+    assert result["refreshed"] == 0
+    assert shopify.updates == []  # the live page is untouched
+    assert "keep-me.jpg" in result["articles"][0]["error"]
