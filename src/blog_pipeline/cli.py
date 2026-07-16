@@ -30,6 +30,7 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from blog_pipeline.config import get_settings
@@ -42,6 +43,17 @@ from blog_pipeline.db.models import (
 
 app = typer.Typer(add_completion=False, help="Blog Topic Research → Linear pipeline")
 console = Console()
+
+
+def _error(e: object) -> str:
+    """An exception as red console markup, with its own text escaped.
+
+    rich reads square brackets as style tags, so an error saying
+    "install -e '.[gsc]'" printed as "install -e '.'" — the message ate the
+    one thing it was there to tell you. Any error text naming an extra, a
+    list, or a dict hits this.
+    """
+    return f"[red]{escape(str(e))}[/red]"
 
 
 @app.command("init-db")
@@ -240,7 +252,7 @@ def sync_analytics_cmd(
         try:
             props = AnalyticsClient().list_properties()
         except AnalyticsError as e:
-            console.print(f"[red]{e}[/red]")
+            console.print(_error(e))
             raise typer.Exit(1)
         if not props:
             console.print(
@@ -262,7 +274,7 @@ def sync_analytics_cmd(
     try:
         result = sync_ai_referrals(days=days, dry_run=dry_run)
     except AnalyticsError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(_error(e))
         raise typer.Exit(1)
 
     if not result.get("enabled"):
@@ -405,7 +417,7 @@ def sync_performance_cmd(
         try:
             sites = SearchConsoleClient().list_sites()
         except SearchConsoleError as e:
-            console.print(f"[red]{e}[/red]")
+            console.print(_error(e))
             raise typer.Exit(1)
         if not sites:
             console.print(
@@ -424,7 +436,7 @@ def sync_performance_cmd(
     try:
         result = sync_performance(days=days, dry_run=dry_run)
     except SearchConsoleError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(_error(e))
         raise typer.Exit(1)
 
     if not result.get("enabled"):
@@ -498,7 +510,7 @@ def rollback_refresh_cmd(
     try:
         result = rollback_refresh(article_id, dry_run=not apply)
     except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(_error(e))
         raise typer.Exit(1)
     console.print(
         f"Restored article {result['article_id']} from snapshot taken "

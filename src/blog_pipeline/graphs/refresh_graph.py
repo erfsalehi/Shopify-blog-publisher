@@ -19,11 +19,13 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from blog_pipeline.agents.geo import apply_geo
 from blog_pipeline.agents.refresh import refresh_article
 from blog_pipeline.config import get_settings
 from blog_pipeline.db import Article, ArticleRevision, get_session
 from blog_pipeline.db.models import ArticleStatus, RevisionReason
 from blog_pipeline.llm import CostTracker
+from blog_pipeline.schemas import FAQItem
 from blog_pipeline.tools.linear import LinearClient, LinearError
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
@@ -148,6 +150,7 @@ def run_refresh(
                 "id": a.id,
                 "title": a.title or a.topic,
                 "shopify_article_id": a.shopify_article_id,
+                "shopify_url": a.shopify_url,
                 "published_at": a.published_at,
             }
             for a in candidates
@@ -188,6 +191,20 @@ def run_refresh(
                     results.append({**entry, "outcome": "skipped"})
                     continue
 
+                # Render the citation levers into the body — the same treatment
+                # new articles get. Old posts predate all of it, so they're
+                # precisely the ones missing the takeaways box, pull-quote, FAQ
+                # section and JSON-LD that answer engines quote from.
+                body_out = apply_geo(
+                    body_html=result.body_html,
+                    title=result.seo_title or live.get("title") or target["title"],
+                    description=result.meta_description or "",
+                    takeaways=result.key_takeaways,
+                    faq=[FAQItem.model_validate(f) for f in result.faq],
+                    pull_quote=result.pull_quote,
+                    url=target.get("shopify_url"),
+                )
+
                 if not dry_run:
                     # Snapshot BEFORE the overwrite, in its own committed
                     # transaction: if the Shopify write or anything after it
@@ -204,7 +221,7 @@ def run_refresh(
 
                 published = shopify.update_article(
                     target["shopify_article_id"],
-                    body_html=result.body_html,
+                    body_html=body_out,
                     title=result.seo_title or None,
                     seo_title=result.seo_title or None,
                     seo_description=result.meta_description or None,
@@ -215,7 +232,7 @@ def run_refresh(
                     with get_session() as session:
                         row = session.get(Article, target["id"])
                         if row:
-                            row.draft_html = result.body_html
+                            row.draft_html = body_out
                             if result.seo_title:
                                 row.title = result.seo_title
                                 row.seo_title = result.seo_title

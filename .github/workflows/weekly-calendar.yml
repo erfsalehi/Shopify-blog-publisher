@@ -20,7 +20,8 @@ jobs:
       - name: Install
         # [postgres] pulls psycopg — DATABASE_URL here is always Postgres
         # (the sqlite default can't survive an ephemeral runner).
-        run: pip install -e ".[postgres]"
+        # [gsc] pulls google-auth for sync-performance / sync-analytics.
+        run: pip install -e ".[postgres,gsc]"
       - name: Run calendar agent
         # An unset secret/var arrives here as "" rather than absent; config.py
         # maps blank to unset, so anything not configured falls back to its
@@ -73,11 +74,18 @@ jobs:
           # already on the store. Also catches anything published by hand in
           # Shopify since the last refresh.
           blog-pipeline import-existing
-          # After import (pages join to articles by URL), before research
-          # (striking-distance queries are an input to it). No-ops when
-          # Search Console isn't configured.
-          blog-pipeline sync-performance
-          # AI referral sessions. No-ops when GA4 isn't configured. Not an
-          # input to research — it's the record of whether the GEO work pays.
-          blog-pipeline sync-analytics
+          # Both syncs ENRICH research; they don't gate it. `bash -e` would
+          # abort the job on a Google outage, quota trip, or expired key and
+          # skip run-calendar entirely — turning "we have no performance data
+          # this week" into "we published nothing this week". Warn and carry on
+          # instead; research already degrades to market data on its own.
+          #
+          # sync-performance goes after import (pages join to articles by URL)
+          # and before research (striking-distance queries feed it).
+          blog-pipeline sync-performance \
+            || echo "::warning::sync-performance failed — researching without performance data"
+          # AI referrals aren't a research input at all; they're the record of
+          # whether the GEO work pays.
+          blog-pipeline sync-analytics \
+            || echo "::warning::sync-analytics failed — no AI referral data this run"
           blog-pipeline run-calendar

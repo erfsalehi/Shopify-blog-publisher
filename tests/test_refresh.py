@@ -111,7 +111,39 @@ def test_apply_writes_the_refreshed_body(shopify, agent):
 
     assert result["refreshed"] == 1
     assert len(shopify.updates) == 1
-    assert shopify.updates[0][1] == "<p>refreshed body</p>"
+    # Contains rather than equals: the body is passed through apply_geo on the
+    # way out, which may wrap it with a takeaways box, pull-quote, FAQ section
+    # and JSON-LD. The agent's prose must survive that intact.
+    assert "<p>refreshed body</p>" in shopify.updates[0][1]
+
+
+def test_the_citation_levers_are_rendered_into_the_written_body(shopify, agent, monkeypatch):
+    """A refreshed post must get the same GEO treatment a new one does.
+
+    Old posts predate that work entirely, so they're exactly the articles
+    missing the FAQ block and pull-quote that answer engines quote — and the
+    ones this pipeline most wants cited.
+    """
+    from blog_pipeline.schemas import RefreshedArticle
+
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article",
+        lambda **kw: RefreshedArticle(
+            body_html="<p>refreshed body</p>",
+            change_summary=["deepened it"],
+            key_takeaways=["Linoleum is not waterproof."],
+            faq=[{"question": "Is linoleum waterproof?", "answer": "No — it is water-resistant."}],
+            pull_quote="Our installers seal every seam.",
+        ),
+    )
+    _make_article()
+    _run(dry_run=False)
+
+    written = shopify.updates[0][1]
+    assert "Is linoleum waterproof?" in written          # visible FAQ
+    assert "Our installers seal every seam." in written  # pull-quote
+    assert "Linoleum is not waterproof." in written      # takeaways box
+    assert "application/ld+json" in written              # structured data
 
 
 def test_the_previous_body_is_snapshotted_before_the_overwrite(shopify, agent):

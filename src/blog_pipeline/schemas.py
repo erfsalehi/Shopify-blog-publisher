@@ -136,6 +136,28 @@ class RefreshedArticle(BaseModel):
         description="An improved 150-160 char meta description, or empty to "
         "keep the existing one.",
     )
+    # ── GEO fields, mirroring Draft ──────────────────────────────
+    # New articles get these; refreshed ones couldn't produce them at all,
+    # because the schema had no room for them. Old posts are exactly the ones
+    # predating this work, so they're where the levers are missing.
+    key_takeaways: list[str] = Field(
+        default_factory=list,
+        description="3-5 self-contained, answer-first takeaway sentences drawn "
+        "from the article. Each must stand alone out of context — an answer "
+        "engine may quote one with nothing around it. Empty to add none.",
+    )
+    faq: list[FAQItem] = Field(
+        default_factory=list,
+        description="3-6 question/answer pairs a reader of this topic actually "
+        "asks, answered from the article's own substance. Real questions only, "
+        "not keyword restatements. Empty to add none.",
+    )
+    pull_quote: str = Field(
+        default="",
+        description="One genuinely quotable, honest sentence — first-party "
+        "('Our installers find...') or naming a real standards body. The single "
+        "biggest citation lever, but ONLY if honest: empty beats invented.",
+    )
     skipped: bool = Field(
         default=False,
         description="True if this article genuinely needs no refresh. Prefer "

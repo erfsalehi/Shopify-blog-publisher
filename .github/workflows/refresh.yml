@@ -68,7 +68,11 @@ jobs:
           # Refresh selects from Article rows, so the back catalogue has to be
           # present, and decay ranking needs a current performance snapshot.
           blog-pipeline import-existing
-          blog-pipeline sync-performance
+          # Refreshes the decay ranking. A failure here isn't fatal — the last
+          # sync's windows are still in the database, so selection carries on
+          # with slightly stale data rather than not running at all.
+          blog-pipeline sync-performance \
+            || echo "::warning::sync-performance failed — ranking on the last stored snapshot"
           blog-pipeline run-refresh \
             --limit ${{ inputs.limit }} \
             --older-than-months ${{ inputs.older_than_months }} \

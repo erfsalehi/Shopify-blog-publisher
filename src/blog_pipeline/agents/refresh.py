@@ -22,6 +22,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from blog_pipeline.config import get_settings
 from blog_pipeline.llm import CostTracker, structured_invoke
 from blog_pipeline.schemas import RefreshedArticle
+from blog_pipeline.utils import word_count
 
 SYSTEM = """You are a content editor refreshing an article that is already \
 published and may already rank in Google. Your edits go live immediately.
@@ -54,6 +55,30 @@ each <h2> should stand alone and open with a direct answer.
 trade-offs, common mistakes.
 - Readability: shorter sentences, plainer words, less throat-clearing.
 
+DEPTH. You are given the article's word count and a target. An article far \
+under target is usually losing to competitors who answer the question more \
+completely, and "tidied the prose" will not win that back. Where you can add \
+real substance the reader wants — the trade-off nobody mentions, the mistake \
+people make, the step-by-step, the honest comparison — add it. This is the \
+one place to be ambitious.
+
+But depth means answering more, not saying the same thing at greater length. \
+Never pad, never restate, never write a paragraph to hit a number. If you \
+genuinely have nothing more of substance, a short honest article beats a long \
+padded one — say so in change_summary rather than filling space.
+
+CITATION LEVERS (key_takeaways, faq, pull_quote). These are separate fields, \
+not body HTML — the caller renders them. They are how AI answer engines and \
+featured snippets quote a page, and an older article almost certainly has \
+none. Fill them from what the article actually says:
+- key_takeaways: each must survive being quoted alone, with no context.
+- faq: questions real readers ask, answered from the article's substance. Not \
+keyword restatements dressed as questions.
+- pull_quote: honest and first-party, or naming a real standards body. This is \
+the biggest single lever, and also the easiest to fake. An empty pull_quote is \
+infinitely better than an invented authority or a fabricated statistic. If \
+nothing genuine fits, leave it empty.
+
 If none of that applies, set skipped=true and return the body unchanged. An \
 honest no-op is a good answer; busywork on a ranking page is not."""
 
@@ -85,10 +110,25 @@ def refresh_article(
     when the model judges it doesn't need the work."""
     settings = get_settings()
 
+    # Give the model the actual gap, not just the target. "546 words vs 1500"
+    # is actionable; "aim for ~1500" against an unstated current length reads
+    # as boilerplate and gets ignored — which is how a 546-word post came back
+    # at 527 with the prose merely tidied.
+    current_words = word_count(body_html)
+    target = settings.word_count_target
+    length_note = f"Current length: ~{current_words} words. Target: ~{target}."
+    if current_words < 0.6 * target:
+        length_note += (
+            f" This is well short — roughly {target - current_words} words of "
+            "genuine substance are missing. Thin content is a likely reason it "
+            "lost ground. Add real depth where the topic supports it, but do "
+            "not pad to reach the number."
+        )
+
     human = [
         f"Title: {title}",
         _age_hint(published_at),
-        f"Target length: roughly {settings.word_count_target} words.",
+        length_note,
     ]
     if business_context:
         human.append(f"Publisher context: {business_context}")
