@@ -172,6 +172,97 @@ def sync_performance(
     }
 
 
+def _two_windows(session, dimension_col) -> tuple[date | None, date | None]:
+    """The two most recent period_ends carrying rows for this dimension."""
+    ends = [
+        w[0]
+        for w in session.query(SearchPerformance.period_end)
+        .filter(dimension_col.isnot(None))
+        .distinct()
+        .order_by(SearchPerformance.period_end.desc())
+        .limit(2)
+        .all()
+    ]
+    return (ends[0] if ends else None, ends[1] if len(ends) > 1 else None)
+
+
+def site_summary() -> dict:
+    """Site-wide totals for the current window, and the change from the one
+    before it.
+
+    Clicks and impressions are summed from page rows; averaging a CTR column
+    across pages would weight a 3-impression page the same as a 3,000-one, so
+    it's recomputed from the totals instead.
+    """
+    with get_session() as session:
+        current, previous = _two_windows(session, SearchPerformance.page)
+        if current is None:
+            return {"available": False}
+
+        def _totals(period):
+            rows = (
+                session.query(SearchPerformance)
+                .filter(
+                    SearchPerformance.period_end == period,
+                    SearchPerformance.page.isnot(None),
+                )
+                .all()
+            )
+            clicks = sum(r.clicks for r in rows)
+            impressions = sum(r.impressions for r in rows)
+            # Position weighted by impressions: an unweighted mean is dominated
+            # by the long tail of pages nobody sees.
+            weighted = sum(r.position * r.impressions for r in rows)
+            return {
+                "clicks": clicks,
+                "impressions": impressions,
+                "ctr": (clicks / impressions) if impressions else 0.0,
+                "position": (weighted / impressions) if impressions else 0.0,
+                "pages": len(rows),
+            }
+
+        now = _totals(current)
+        out = {"available": True, "window_end": current, **now}
+        if previous is not None:
+            before = _totals(previous)
+            out["previous"] = before
+            for key in ("clicks", "impressions"):
+                prior = before[key]
+                out[f"{key}_change_pct"] = (
+                    round(100 * (now[key] - prior) / prior, 1) if prior else None
+                )
+        return out
+
+
+def top_pages(*, limit: int = 10) -> list[dict]:
+    """Highest-impression pages in the latest window, article or not."""
+    with get_session() as session:
+        current, _ = _two_windows(session, SearchPerformance.page)
+        if current is None:
+            return []
+        rows = (
+            session.query(SearchPerformance)
+            .filter(
+                SearchPerformance.period_end == current,
+                SearchPerformance.page.isnot(None),
+            )
+            .order_by(SearchPerformance.impressions.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "page": r.page,
+                "impressions": r.impressions,
+                "clicks": r.clicks,
+                "ctr": round(r.ctr, 4),
+                "position": round(r.position, 1),
+                "is_article": r.article_id is not None,
+            }
+            for r in rows
+        ]
+
+
 def striking_distance_queries(
     *,
     limit: int = 25,

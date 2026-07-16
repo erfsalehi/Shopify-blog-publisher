@@ -14,8 +14,10 @@ from blog_pipeline.db.models import ArticleStatus, TopicSource
 from blog_pipeline.performance import (
     _normalize,
     decaying_articles,
+    site_summary,
     striking_distance_queries,
     sync_performance,
+    top_pages,
 )
 
 W1_END = date(2026, 4, 1)
@@ -308,3 +310,76 @@ def test_ranked_by_traffic_lost_not_percentage(gsc):
     ranked = decaying_articles()
     assert [r["article_id"] for r in ranked] == [real, trivia]
     assert ranked[0]["impressions_lost"] == 12775
+
+
+# ── report ──────────────────────────────────────────────────────
+
+
+def _add_page_row(article_id, impressions, clicks, position, period_end, page=None):
+    with get_session() as s:
+        s.add(
+            SearchPerformance(
+                article_id=article_id,
+                page=page or f"https://x.ca/{article_id or 'other'}",
+                impressions=impressions, clicks=clicks, position=position,
+                ctr=(clicks / impressions) if impressions else 0.0,
+                period_start=period_end - timedelta(days=90), period_end=period_end,
+            )
+        )
+
+
+def test_summary_is_unavailable_before_any_sync(gsc):
+    assert site_summary()["available"] is False
+
+
+def test_summary_totals_and_trend(gsc):
+    a = _article()
+    _add_page_row(a, 1000, 10, 10.0, W1_END)
+    _add_page_row(a, 800, 8, 12.0, W2_END)
+
+    s = site_summary()
+    assert s["impressions"] == 800 and s["clicks"] == 8
+    assert s["impressions_change_pct"] == -20.0
+    assert s["clicks_change_pct"] == -20.0
+
+
+def test_ctr_is_recomputed_from_totals_not_averaged(gsc):
+    """Averaging each page's CTR would let a 2-impression page count as much
+    as a 2,000-impression one and badly misreport the site."""
+    a = _article(url="https://x.ca/a", title="A")
+    b = _article(url="https://x.ca/b", title="B")
+    _add_page_row(a, 2, 1, 5.0, W2_END)        # 50% CTR, negligible traffic
+    _add_page_row(b, 1998, 19, 20.0, W2_END)   # ~1% CTR, all the traffic
+
+    s = site_summary()
+    assert s["impressions"] == 2000 and s["clicks"] == 20
+    assert s["ctr"] == 0.01  # not the ~25.5% a naive mean would give
+
+
+def test_position_is_impression_weighted(gsc):
+    """An unweighted mean is dominated by the long tail of pages nobody sees."""
+    a = _article(url="https://x.ca/a", title="A")
+    b = _article(url="https://x.ca/b", title="B")
+    _add_page_row(a, 9900, 1, 10.0, W2_END)
+    _add_page_row(b, 100, 1, 90.0, W2_END)
+
+    # Naive mean would be 50.0; weighted is ~10.8.
+    assert round(site_summary()["position"], 1) == 10.8
+
+
+def test_summary_without_a_previous_window_reports_no_trend(gsc):
+    a = _article()
+    _add_page_row(a, 500, 5, 10.0, W2_END)
+
+    s = site_summary()
+    assert s["available"] is True
+    assert "previous" not in s
+
+
+def test_top_pages_include_non_article_urls(gsc):
+    """Product and collection pages carry real traffic and belong in the
+    report even though refresh can't touch them."""
+    _add_page_row(None, 5000, 10, 5.0, W2_END, page="https://x.ca/collections/vinyl")
+    rows = top_pages()
+    assert rows[0]["page"].endswith("/collections/vinyl")
+    assert rows[0]["is_article"] is False

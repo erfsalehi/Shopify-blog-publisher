@@ -219,6 +219,80 @@ def import_existing_cmd(
         console.print("[dim]Dry run — nothing written.[/dim]")
 
 
+@app.command("report")
+def report_cmd(
+    top: int = typer.Option(8, "--top", help="Rows per section."),
+) -> None:
+    """How the blog is actually performing in search.
+
+    Reads whatever `sync-performance` last stored — run that first, or the
+    search sections will be empty.
+    """
+    from blog_pipeline.metrics import gather_metrics
+    from blog_pipeline.performance import (
+        decaying_articles,
+        site_summary,
+        striking_distance_queries,
+        top_pages,
+    )
+
+    def _delta(pct: float | None) -> str:
+        if pct is None:
+            return "—"
+        return f"[green]+{pct}%[/green]" if pct >= 0 else f"[red]{pct}%[/red]"
+
+    summary = site_summary()
+    if not summary.get("available"):
+        console.print(
+            "[yellow]No Search Console data yet — run sync-performance.[/yellow]"
+        )
+    else:
+        t = Table("Search (last 90d)", "Value", "vs previous 90d")
+        t.add_row("Impressions", f"{summary['impressions']:,}",
+                  _delta(summary.get("impressions_change_pct")))
+        t.add_row("Clicks", f"{summary['clicks']:,}",
+                  _delta(summary.get("clicks_change_pct")))
+        t.add_row("CTR", f"{summary['ctr'] * 100:.2f}%", "")
+        t.add_row("Avg position", f"{summary['position']:.1f}", "")
+        t.add_row("Pages with impressions", f"{summary['pages']:,}", "")
+        console.print(t)
+
+        rows = top_pages(limit=top)
+        if rows:
+            t = Table("Top pages", "Impr", "Clicks", "CTR", "Pos")
+            for r in rows:
+                label = r["page"].replace("https://", "")[:48]
+                t.add_row(label, f"{r['impressions']:,}", str(r["clicks"]),
+                          f"{r['ctr'] * 100:.1f}%", str(r["position"]))
+            console.print(t)
+
+        rows = decaying_articles(limit=top)
+        if rows:
+            t = Table("Losing traffic", "Lost", "Change", "Pos")
+            for r in rows:
+                t.add_row(str(r["title"])[:48], f"-{r['impressions_lost']:,}",
+                          f"{r['change_pct']}%", str(r["position"]))
+            console.print(t)
+            console.print("[dim]Ranked by impressions lost. `run-refresh` "
+                          "targets these first.[/dim]")
+
+        rows = striking_distance_queries(limit=top)
+        if rows:
+            t = Table("Striking distance", "Impr", "Clicks", "Pos")
+            for r in rows:
+                t.add_row(r["query"][:48], f"{r['impressions']:,}",
+                          str(r["clicks"]), str(r["position"]))
+            console.print(t)
+            console.print("[dim]Shown for these but not winning the click — "
+                          "research weights them heavily.[/dim]")
+
+    m = gather_metrics()
+    t = Table("Pipeline", "Value")
+    for k, v in m.items():
+        t.add_row(k, str(v))
+    console.print(t)
+
+
 @app.command("sync-performance")
 def sync_performance_cmd(
     days: int = typer.Option(90, "--days", help="Window length to pull."),
