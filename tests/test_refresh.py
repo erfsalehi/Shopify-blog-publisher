@@ -431,3 +431,79 @@ def test_a_dry_run_does_not_start_the_cooldown(shopify, agent):
 
     result = _run(dry_run=True)
     assert [a["article_id"] for a in result["articles"]] == [article_id]
+
+
+# ── asset-drop retry ────────────────────────────────────────────
+
+_BODY_WITH_ASSETS = (
+    '<p>intro</p><figure><img src="https://img.example/ingredients.png"></figure>'
+    '<p>see <a href="https://drflooring.ca/product-category/vinyl/">vinyl</a></p>'
+)
+
+
+def test_a_dropped_asset_gets_one_named_retry_then_publishes(shopify, agent, monkeypatch):
+    """The guard alone turns 'model dropped an image' into 'this article fails
+    every week forever' — the same rewrite tends to drop the same asset. One
+    retry with the URLs named usually lands."""
+    calls = []
+
+    def fake_agent(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return RefreshedArticle(  # drops both assets
+                body_html="<p>rewritten, assets gone</p>", change_summary=["x"]
+            )
+        return RefreshedArticle(body_html=_BODY_WITH_ASSETS, change_summary=["kept"])
+
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article", fake_agent
+    )
+    shopify.bodies["gid://shopify/Article/1"] = _BODY_WITH_ASSETS
+    _make_article()
+
+    result = _run(dry_run=False)
+
+    assert result["refreshed"] == 1 and result["failed"] == 0
+    assert len(calls) == 2
+    # The retry names the specific dropped URLs.
+    assert set(calls[1]["must_keep"]) == {
+        "https://img.example/ingredients.png",
+        "https://drflooring.ca/product-category/vinyl/",
+    }
+    assert "must_keep" not in calls[0]
+    assert len(shopify.updates) == 1
+
+
+def test_a_retry_that_still_drops_assets_is_refused(shopify, agent, monkeypatch):
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article",
+        lambda **kw: RefreshedArticle(body_html="<p>no assets</p>", change_summary=["x"]),
+    )
+    shopify.bodies["gid://shopify/Article/1"] = _BODY_WITH_ASSETS
+    _make_article()
+
+    result = _run(dry_run=False)
+
+    assert result["failed"] == 1
+    assert shopify.updates == []
+    assert "retry" in result["articles"][0]["error"]
+
+
+def test_no_retry_when_nothing_was_dropped(shopify, agent, monkeypatch):
+    """The retry costs an LLM call — it must only fire on an actual loss."""
+    calls = []
+
+    def fake_agent(**kw):
+        calls.append(kw)
+        return RefreshedArticle(body_html=_BODY_WITH_ASSETS, change_summary=["ok"])
+
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article", fake_agent
+    )
+    shopify.bodies["gid://shopify/Article/1"] = _BODY_WITH_ASSETS
+    _make_article()
+
+    result = _run(dry_run=False)
+
+    assert result["refreshed"] == 1
+    assert len(calls) == 1

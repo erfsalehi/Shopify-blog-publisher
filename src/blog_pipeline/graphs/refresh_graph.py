@@ -258,13 +258,32 @@ def run_refresh(
 
                 # Refuse to publish a body that lost an image or a link. This
                 # write goes live with no human in the loop, so a degraded page
-                # would simply be the page from here on. Better to fail this
-                # one article loudly and leave the good version up.
+                # would simply be the page from here on. One retry first, with
+                # the dropped URLs named: the standing preserve-everything rule
+                # already failed, but pointing at the specific offenders
+                # usually lands — and without a recovery path the guard turns
+                # into "this article fails every week forever", since the same
+                # rewrite tends to drop the same asset.
                 lost = lost_assets(body, result.body_html)
+                if lost:
+                    result = refresh_article(
+                        title=live.get("title") or target["title"],
+                        body_html=body,
+                        published_at=target["published_at"],
+                        business_context=_business_context(),
+                        must_keep=lost,
+                        cost=cost,
+                    )
+                    if result.skipped:
+                        skipped += 1
+                        results.append({**entry, "outcome": "skipped"})
+                        continue
+                    lost = lost_assets(body, result.body_html)
                 if lost:
                     raise ShopifyError(
                         "Refusing to publish: the refresh dropped "
-                        f"{len(lost)} asset(s) the original had — {', '.join(lost[:3])}"
+                        f"{len(lost)} asset(s) the original had, and a retry "
+                        f"with them named still did — {', '.join(lost[:3])}"
                         f"{'…' if len(lost) > 3 else ''}"
                     )
 

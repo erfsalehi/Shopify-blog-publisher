@@ -104,10 +104,17 @@ def refresh_article(
     body_html: str,
     published_at: datetime | None = None,
     business_context: str = "",
+    must_keep: list[str] | None = None,
     cost: CostTracker | None = None,
 ) -> RefreshedArticle:
     """Refresh one live post. Returns the article unchanged with skipped=True
-    when the model judges it doesn't need the work."""
+    when the model judges it doesn't need the work.
+
+    `must_keep` is the retry path for the caller's asset guard: URLs the
+    previous attempt dropped despite the standing preserve-everything rule.
+    Naming the specific offenders works where the general instruction didn't —
+    the model can see exactly which <img>/<a href> it lost.
+    """
     settings = get_settings()
 
     # Give the model the actual gap, not just the target. "546 words vs 1500"
@@ -132,6 +139,14 @@ def refresh_article(
     ]
     if business_context:
         human.append(f"Publisher context: {business_context}")
+    if must_keep:
+        human.append(
+            "HARD REQUIREMENT — a previous attempt at this refresh dropped the "
+            "following asset URLs, which is a publishing-blocking regression. "
+            "Every one of these must appear in your output, byte-for-byte, in "
+            "its original <img src> or <a href>:\n"
+            + "\n".join(f"- {u}" for u in must_keep)
+        )
     human.append("Current article HTML:\n" + body_html)
 
     result: RefreshedArticle = structured_invoke(
