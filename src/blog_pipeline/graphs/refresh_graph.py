@@ -49,6 +49,7 @@ REFRESH_COOLDOWN_DAYS = 90
 
 _IMG_SRC = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.I)
 _A_HREF = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.I)
+_IMAGE_MARKER = re.compile(r'\[\s*IMAGE\s*[-—]', re.I)
 
 
 def lost_assets(original: str, refreshed: str) -> list[str]:
@@ -66,6 +67,20 @@ def lost_assets(original: str, refreshed: str) -> list[str]:
     before = set(_IMG_SRC.findall(original)) | set(_A_HREF.findall(original))
     after = set(_IMG_SRC.findall(refreshed)) | set(_A_HREF.findall(refreshed))
     return sorted(before - after)
+
+
+def has_stray_image_marker(html: str) -> bool:
+    """True if a `[IMAGE - ...]` placeholder leaked into the refreshed body.
+
+    New articles are hidden drafts, so a human replaces that marker with a
+    real image before anyone sees it. A refresh has no such review — the body
+    goes live the moment update_article runs — so the same marker here would
+    be bracketed placeholder text on a public page. The prompt tells the model
+    image ideas belong in image_suggestions, never in body_html, but a prompted
+    constraint is not a guarantee (lost_assets exists for the identical
+    reason: the model was already told to preserve every asset).
+    """
+    return bool(_IMAGE_MARKER.search(html))
 
 
 def _business_context() -> str:
@@ -154,7 +169,7 @@ def select_decaying_articles(session, *, limit: int) -> list[Article]:
 
 def _sync_refresh_to_linear(
     client: LinearClient | None, *, title: str, url: str | None,
-    changes: list[str], dry_run: bool,
+    changes: list[str], image_suggestions: list[dict] | None, dry_run: bool,
 ) -> str | None:
     """Record what the refresh did. Best-effort: the Shopify write has already
     happened by now, so a Linear outage must not make it look like it didn't."""
@@ -167,6 +182,21 @@ def _sync_refresh_to_linear(
         lines.append(f"\n**Live URL:** {url}")
     lines.append("\n### What changed")
     lines.extend(f"- {c}" for c in changes or ["(no summary returned)"])
+    if image_suggestions:
+        # Never inserted into the live body — see has_stray_image_marker.
+        # These are optional ideas surfaced only here, for a human to act on
+        # (or not) whenever they're next in Shopify admin for this post.
+        lines.append(
+            "\n### Image suggestions (optional — the live page is unaffected)\n"
+            "The refresh spotted new/expanded content that could use a visual. "
+            "Nothing was added automatically. Generate and insert manually in "
+            "Shopify admin if you agree."
+        )
+        for img in image_suggestions:
+            lines.append(
+                f"- **{img.get('role')}** ({img.get('placement_hint')}): "
+                f"{img.get('prompt')} _(alt: {img.get('alt')})_"
+            )
     lines.append(
         "\n### If this refresh is wrong\n"
         "The previous body is snapshotted in the database — "
@@ -256,22 +286,27 @@ def run_refresh(
                     results.append({**entry, "outcome": "skipped"})
                     continue
 
-                # Refuse to publish a body that lost an image or a link. This
-                # write goes live with no human in the loop, so a degraded page
-                # would simply be the page from here on. One retry first, with
-                # the dropped URLs named: the standing preserve-everything rule
-                # already failed, but pointing at the specific offenders
-                # usually lands — and without a recovery path the guard turns
-                # into "this article fails every week forever", since the same
-                # rewrite tends to drop the same asset.
+                # Refuse to publish a body that (a) lost an image/link the
+                # original had, or (b) leaked a bracketed [IMAGE - ...]
+                # placeholder into the live HTML. This write goes live with no
+                # human in the loop, so either defect would simply be the page
+                # from here on. One retry first, naming the specific failure:
+                # the standing rules ("preserve every asset", "suggestions
+                # go in image_suggestions, never body_html") already didn't
+                # work, but pointing at the exact offense usually lands — and
+                # without a recovery path the guard turns into "this article
+                # fails every week forever", since the same rewrite tends to
+                # repeat the same mistake.
                 lost = lost_assets(body, result.body_html)
-                if lost:
+                leaked_marker = has_stray_image_marker(result.body_html)
+                if lost or leaked_marker:
                     result = refresh_article(
                         title=live.get("title") or target["title"],
                         body_html=body,
                         published_at=target["published_at"],
                         business_context=_business_context(),
                         must_keep=lost,
+                        forbid_image_markers=leaked_marker,
                         cost=cost,
                     )
                     if result.skipped:
@@ -279,12 +314,22 @@ def run_refresh(
                         results.append({**entry, "outcome": "skipped"})
                         continue
                     lost = lost_assets(body, result.body_html)
-                if lost:
+                    leaked_marker = has_stray_image_marker(result.body_html)
+                if lost or leaked_marker:
+                    reasons = []
+                    if lost:
+                        reasons.append(
+                            f"dropped {len(lost)} asset(s) the original had — "
+                            f"{', '.join(lost[:3])}{'…' if len(lost) > 3 else ''}"
+                        )
+                    if leaked_marker:
+                        reasons.append(
+                            "left a bracketed [IMAGE - ...] placeholder in the "
+                            "live body"
+                        )
                     raise ShopifyError(
-                        "Refusing to publish: the refresh dropped "
-                        f"{len(lost)} asset(s) the original had, and a retry "
-                        f"with them named still did — {', '.join(lost[:3])}"
-                        f"{'…' if len(lost) > 3 else ''}"
+                        "Refusing to publish, even after a named retry: "
+                        + "; ".join(reasons)
                     )
 
                 # Render the citation levers into the body — the same treatment
@@ -335,16 +380,23 @@ def run_refresh(
                             if result.meta_description:
                                 row.seo_description = result.meta_description
 
+                image_suggestions = [s.model_dump() for s in result.image_suggestions]
                 _sync_refresh_to_linear(
                     linear,
                     title=target["title"],
                     url=published.url,
                     changes=result.change_summary,
+                    image_suggestions=image_suggestions,
                     dry_run=dry_run,
                 )
                 refreshed += 1
                 results.append(
-                    {**entry, "outcome": "refreshed", "changes": result.change_summary}
+                    {
+                        **entry,
+                        "outcome": "refreshed",
+                        "changes": result.change_summary,
+                        "image_suggestions": image_suggestions,
+                    }
                 )
             except Exception as e:
                 # One bad article must not abort the batch: its snapshot is

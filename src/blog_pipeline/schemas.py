@@ -158,6 +158,17 @@ class RefreshedArticle(BaseModel):
         "('Our installers find...') or naming a real standards body. The single "
         "biggest citation lever, but ONLY if honest: empty beats invented.",
     )
+    image_suggestions: list[ImageSlot] = Field(
+        default_factory=list,
+        description="Optional: image prompts for genuinely new visual "
+        "opportunities the refresh created (a newly-expanded section, a new "
+        "comparison or step list). NEVER for a section that already looks "
+        "fine unillustrated — most refreshes should return an empty list. "
+        "These are suggestions for a human to act on later, NOT instructions "
+        "for this edit: never write an [IMAGE - ...] marker or any image "
+        "placeholder into body_html itself. This page is live; placeholder "
+        "text in body_html would be public the moment this is applied.",
+    )
     skipped: bool = Field(
         default=False,
         description="True if this article genuinely needs no refresh. Prefer "

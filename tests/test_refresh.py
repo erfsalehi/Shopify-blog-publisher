@@ -507,3 +507,150 @@ def test_no_retry_when_nothing_was_dropped(shopify, agent, monkeypatch):
 
     assert result["refreshed"] == 1
     assert len(calls) == 1
+
+
+# ── image suggestions in the Linear record ──────────────────────
+
+
+class _FakeLinearCapture:
+    def __init__(self):
+        self.calls = []
+        self.closed = False
+
+    def create_issue(self, **kw):
+        from blog_pipeline.tools.linear import IssueResult
+
+        self.calls.append(kw)
+        return IssueResult(id="iss1", identifier="CON-1", url="https://linear.app/x")
+
+    def close(self):
+        self.closed = True
+
+
+def test_image_suggestions_are_rendered_into_the_linear_issue():
+    from blog_pipeline.graphs.refresh_graph import _sync_refresh_to_linear
+
+    client = _FakeLinearCapture()
+    _sync_refresh_to_linear(
+        client,
+        title="Linoleum Flooring",
+        url="https://drflooring.ca/blogs/news/linoleum",
+        changes=["Expanded the durability section"],
+        image_suggestions=[
+            {
+                "role": "inline",
+                "placement_hint": "Types of Linoleum Flooring",
+                "prompt": "A close-up comparison of sheet, tile, and click-lock linoleum samples",
+                "alt": "Three linoleum flooring formats side by side",
+            }
+        ],
+        dry_run=False,
+    )
+
+    assert len(client.calls) == 1
+    description = client.calls[0]["description"]
+    assert "Image suggestions" in description
+    assert "Types of Linoleum Flooring" in description
+    assert "close-up comparison of sheet, tile" in description
+    assert "alt: Three linoleum flooring formats side by side" in description
+
+
+def test_no_image_suggestions_section_when_there_are_none():
+    from blog_pipeline.graphs.refresh_graph import _sync_refresh_to_linear
+
+    client = _FakeLinearCapture()
+    _sync_refresh_to_linear(
+        client, title="t", url=None, changes=["x"], image_suggestions=[], dry_run=False,
+    )
+
+    assert "Image suggestions" not in client.calls[0]["description"]
+
+
+def test_image_suggestions_never_reach_the_live_body(shopify, agent, monkeypatch):
+    """The whole reason these are a separate field: this page publishes with
+    no human review, so placeholder text in body_html would be public."""
+    from blog_pipeline.schemas import RefreshedArticle
+
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article",
+        lambda **kw: RefreshedArticle(
+            body_html="<p>refreshed body</p>",
+            change_summary=["x"],
+            image_suggestions=[
+                {"role": "inline", "placement_hint": "Types section",
+                 "prompt": "diagram of layers", "alt": "layer diagram"}
+            ],
+        ),
+    )
+    _make_article()
+    result = _run(dry_run=False)
+
+    written = shopify.updates[0][1]
+    assert "diagram of layers" not in written
+    assert "[IMAGE" not in written.upper()
+    assert result["articles"][0]["image_suggestions"][0]["prompt"] == "diagram of layers"
+
+
+# ── stray placeholder marker guard ──────────────────────────────
+
+
+def test_a_leaked_image_marker_triggers_a_named_retry_then_publishes(
+    shopify, agent, monkeypatch
+):
+    calls = []
+
+    def fake_agent(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return RefreshedArticle(
+                body_html='<p>see this: [IMAGE - inline: a photo (alt: x)]</p>',
+                change_summary=["x"],
+            )
+        return RefreshedArticle(body_html="<p>clean body, no marker</p>", change_summary=["x"])
+
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article", fake_agent
+    )
+    _make_article()
+
+    result = _run(dry_run=False)
+
+    assert result["refreshed"] == 1 and result["failed"] == 0
+    assert len(calls) == 2
+    assert calls[1]["forbid_image_markers"] is True
+    assert calls[0].get("forbid_image_markers", False) is False
+
+
+def test_a_marker_that_survives_retry_is_refused(shopify, agent, monkeypatch):
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article",
+        lambda **kw: RefreshedArticle(
+            body_html='<p>[IMAGE - featured: still here (alt: x)]</p>',
+            change_summary=["x"],
+        ),
+    )
+    _make_article()
+
+    result = _run(dry_run=False)
+
+    assert result["failed"] == 1
+    assert shopify.updates == []
+    assert "placeholder" in result["articles"][0]["error"]
+
+
+def test_no_retry_when_body_is_clean(shopify, agent, monkeypatch):
+    calls = []
+
+    def fake_agent(**kw):
+        calls.append(kw)
+        return RefreshedArticle(body_html="<p>clean, no markers, no losses</p>", change_summary=["x"])
+
+    monkeypatch.setattr(
+        "blog_pipeline.graphs.refresh_graph.refresh_article", fake_agent
+    )
+    _make_article()
+
+    result = _run(dry_run=False)
+
+    assert result["refreshed"] == 1
+    assert len(calls) == 1

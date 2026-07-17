@@ -79,6 +79,15 @@ the biggest single lever, and also the easiest to fake. An empty pull_quote is \
 infinitely better than an invented authority or a fabricated statistic. If \
 nothing genuine fits, leave it empty.
 
+IMAGE_SUGGESTIONS. A separate field, never body HTML. This page has no human \
+review before going live, so under no circumstances write an [IMAGE - ...] \
+marker or any placeholder text into body_html — that would be public the \
+instant this is applied. If a section you genuinely expanded or added would \
+be clearer with a photo or diagram, describe it here instead: role, where it \
+goes, a prompt, alt text. Most refreshes touch nothing that needs a new \
+image — leave this empty rather than inventing a reason for one. This is a \
+suggestion a human acts on later, not part of the edit itself.
+
 If none of that applies, set skipped=true and return the body unchanged. An \
 honest no-op is a good answer; busywork on a ranking page is not."""
 
@@ -105,15 +114,17 @@ def refresh_article(
     published_at: datetime | None = None,
     business_context: str = "",
     must_keep: list[str] | None = None,
+    forbid_image_markers: bool = False,
     cost: CostTracker | None = None,
 ) -> RefreshedArticle:
     """Refresh one live post. Returns the article unchanged with skipped=True
     when the model judges it doesn't need the work.
 
-    `must_keep` is the retry path for the caller's asset guard: URLs the
-    previous attempt dropped despite the standing preserve-everything rule.
-    Naming the specific offenders works where the general instruction didn't —
-    the model can see exactly which <img>/<a href> it lost.
+    `must_keep` and `forbid_image_markers` are the retry path for the caller's
+    publish guards: which specific rule the previous attempt broke despite the
+    standing instruction. Naming the exact failure works where the general
+    instruction didn't — see refresh_graph.lost_assets /
+    has_stray_image_marker for what triggers each.
     """
     settings = get_settings()
 
@@ -146,6 +157,15 @@ def refresh_article(
             "Every one of these must appear in your output, byte-for-byte, in "
             "its original <img src> or <a href>:\n"
             + "\n".join(f"- {u}" for u in must_keep)
+        )
+    if forbid_image_markers:
+        human.append(
+            "HARD REQUIREMENT — a previous attempt wrote a bracketed "
+            "[IMAGE - ...] placeholder into body_html. This page is live with "
+            "no human review before publishing, so that text would be public. "
+            "Do not write any [IMAGE ...] marker or bracketed image "
+            "instruction into body_html. If you have an idea for a new image, "
+            "put it in image_suggestions instead — never in the body."
         )
     human.append("Current article HTML:\n" + body_html)
 
