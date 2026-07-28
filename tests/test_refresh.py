@@ -503,6 +503,40 @@ def test_a_dry_run_does_not_start_the_cooldown(shopify, agent):
     assert [a["article_id"] for a in result["articles"]] == [article_id]
 
 
+# ── skip_ids ────────────────────────────────────────────────────
+
+
+def test_a_skipped_article_is_not_refreshed(shopify, agent):
+    """The top decayer earns the most, so it's often the one you least want
+    rewritten unattended."""
+    article_id = _make_article()
+
+    result = _run(dry_run=True, skip_ids={article_id})
+
+    assert result["considered"] == 0
+    assert shopify.updates == []
+
+
+def test_skipping_yields_to_the_next_worst(shopify, agent):
+    """Like the cooldown, skipping must not merely shrink the batch."""
+    skipped = _make_article(gid="gid://shopify/Article/skipped")
+    eligible = _make_article(
+        published_at=OLD + timedelta(days=1), gid="gid://shopify/Article/eligible"
+    )
+
+    result = _run(dry_run=True, limit=1, skip_ids={skipped})
+
+    assert [a["article_id"] for a in result["articles"]] == [eligible]
+
+
+def test_skip_ids_none_changes_nothing(shopify, agent):
+    article_id = _make_article()
+
+    result = _run(dry_run=True, skip_ids=None)
+
+    assert [a["article_id"] for a in result["articles"]] == [article_id]
+
+
 # ── asset-drop retry ────────────────────────────────────────────
 
 _BODY_WITH_ASSETS = (

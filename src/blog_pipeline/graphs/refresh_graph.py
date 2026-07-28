@@ -150,13 +150,19 @@ def recently_refreshed_ids(session, *, days: int = REFRESH_COOLDOWN_DAYS) -> set
     }
 
 
-def select_stale_articles(session, *, older_than_months: int, limit: int) -> list[Article]:
+def select_stale_articles(
+    session, *, older_than_months: int, limit: int, skip_ids: set[int] | None = None
+) -> list[Article]:
     """Live posts, oldest first, older than the cutoff.
 
     Requires shopify_article_id: there's nothing to write back to without one.
+
+    `skip_ids` is excluded here rather than by the caller so that `limit`
+    still counts survivors — filtering afterwards would shrink the batch
+    instead of reaching for the next candidate.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=30 * older_than_months)
-    cooling = recently_refreshed_ids(session)
+    cooling = recently_refreshed_ids(session) | set(skip_ids or ())
     query = session.query(Article).filter(
         Article.status == ArticleStatus.published,
         Article.shopify_article_id.isnot(None),
@@ -168,7 +174,9 @@ def select_stale_articles(session, *, older_than_months: int, limit: int) -> lis
     return query.order_by(Article.published_at.asc()).limit(limit).all()
 
 
-def select_decaying_articles(session, *, limit: int) -> list[Article]:
+def select_decaying_articles(
+    session, *, limit: int, skip_ids: set[int] | None = None
+) -> list[Article]:
     """Live posts whose impressions actually fell, worst first.
 
     Strictly better than age when the data exists: a 2023 post that still
@@ -181,10 +189,14 @@ def select_decaying_articles(session, *, limit: int) -> list[Article]:
     windows move, so without this the same one is picked every week — and
     asking for `limit` rows before filtering would return nothing at all once
     the top of the list was cooling.
+
+    `skip_ids` excludes articles the same way, for a page being handled by
+    hand. The top decayer is often the one you least want rewritten
+    unattended: it earns the most, so it has the most to lose.
     """
     from blog_pipeline.performance import decaying_articles
 
-    cooling = recently_refreshed_ids(session)
+    cooling = recently_refreshed_ids(session) | set(skip_ids or ())
     # Over-fetch by the cooldown set so `limit` survivors remain after
     # filtering; +5 covers rows whose article was deleted or never published.
     decayed = decaying_articles(limit=limit + len(cooling) + 5)
@@ -259,9 +271,11 @@ def run_refresh(
     older_than_months: int = 12,
     limit: int = 5,
     dry_run: bool = True,
+    skip_ids: set[int] | None = None,
 ) -> dict:
     """Refresh up to `limit` stale live posts. dry_run=True reports what would
-    change without touching Shopify."""
+    change without touching Shopify. `skip_ids` leaves specific articles
+    alone — see select_decaying_articles."""
     settings = get_settings()
     cost = CostTracker()
     results: list[dict] = []
@@ -270,12 +284,15 @@ def run_refresh(
         # Measured decay when Search Console has two windows to compare;
         # oldest-first otherwise. Age is only ever a stand-in for "has stopped
         # working", and it's a poor one — a post can be old and still ranking.
-        candidates = select_decaying_articles(session, limit=limit)
+        candidates = select_decaying_articles(
+            session, limit=limit, skip_ids=skip_ids
+        )
         strategy = "decay"
         if not candidates:
             strategy = "age"
             candidates = select_stale_articles(
-                session, older_than_months=older_than_months, limit=limit
+                session, older_than_months=older_than_months, limit=limit,
+                skip_ids=skip_ids,
             )
         # Detach what we need now: the Shopify/LLM calls below are slow, and
         # holding rows across them would pin the transaction open for minutes.

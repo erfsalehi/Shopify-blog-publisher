@@ -468,6 +468,11 @@ def run_refresh_cmd(
         "--apply",
         help="Actually write to Shopify. Without this, reports only.",
     ),
+    skip: str = typer.Option(
+        "", "--skip",
+        help="Comma-separated article ids to leave alone (e.g. a page you're "
+             "editing by hand).",
+    ),
 ) -> None:
     """Refresh stale live posts, oldest first.
 
@@ -482,8 +487,15 @@ def run_refresh_cmd(
         console.print("[red]Shopify not configured — nothing to refresh.[/red]")
         raise typer.Exit(1)
 
+    try:
+        skip_ids = {int(s) for s in skip.split(",") if s.strip()}
+    except ValueError:
+        console.print(f"[red]--skip wants article ids, got: {escape(skip)}[/red]")
+        raise typer.Exit(1)
+
     result = run_refresh(
-        older_than_months=older_than_months, limit=limit, dry_run=not apply
+        older_than_months=older_than_months, limit=limit, dry_run=not apply,
+        skip_ids=skip_ids or None,
     )
     table = Table("Article", "Outcome", "Notes")
     for a in result["articles"]:
