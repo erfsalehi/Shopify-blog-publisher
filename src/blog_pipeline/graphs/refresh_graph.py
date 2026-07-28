@@ -17,6 +17,7 @@ so the next article proceeds and the failure is reported at the end.
 
 from __future__ import annotations
 
+import html
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -52,6 +53,33 @@ _A_HREF = re.compile(r'<a[^>]+href=["\']([^"\']+)["\']', re.I)
 _IMAGE_MARKER = re.compile(r'\[\s*IMAGE\s*[-—]', re.I)
 
 
+def _asset_key(url: str) -> str:
+    """The destination an asset URL points at, ignoring how it's spelled.
+
+    The model re-emits the whole body rather than copying it, so a link can
+    survive with a different trailing slash, an entity-escaped ampersand, or
+    http where the original had https — and still point at the same page.
+    Comparing raw strings called those dropped assets and refused to publish:
+    a live run lost three of five articles that way, two of them on nothing
+    worse than `https://drflooring.ca/` coming back as `https://drflooring.ca`.
+
+    Deliberately not full URL parsing. Case is folded on the host only (paths
+    are case-sensitive), and the query is kept — `?variant=2` is a different
+    page, not a different spelling.
+    """
+    u = html.unescape(url or "").strip()
+    u = re.sub(r"^https?:", "", u, flags=re.I)  # http and https are one page
+    if u.startswith("//"):
+        u = u[2:]
+    u = u.split("#", 1)[0]  # a fragment is the same document
+    if "/" in u:
+        host, _, rest = u.partition("/")
+        u = f"{host.lower()}/{rest}"
+    else:
+        u = u.lower()
+    return u.rstrip("/")
+
+
 def lost_assets(original: str, refreshed: str) -> list[str]:
     """Image sources and link targets the refresh dropped.
 
@@ -63,10 +91,21 @@ def lost_assets(original: str, refreshed: str) -> list[str]:
     Compares URLs, not markup: rewording an anchor or reformatting a figure is
     fine, losing the destination is not. Only reports losses — apply_geo
     legitimately adds links afterwards.
+
+    Compares destinations, not strings — see _asset_key. Reports the original
+    spelling of anything genuinely missing, because the retry quotes these
+    back to the model as the URLs it must reproduce byte-for-byte.
     """
-    before = set(_IMG_SRC.findall(original)) | set(_A_HREF.findall(original))
-    after = set(_IMG_SRC.findall(refreshed)) | set(_A_HREF.findall(refreshed))
-    return sorted(before - after)
+    after = {
+        _asset_key(u)
+        for u in _IMG_SRC.findall(refreshed) + _A_HREF.findall(refreshed)
+    }
+    lost: dict[str, str] = {}
+    for url in _IMG_SRC.findall(original) + _A_HREF.findall(original):
+        key = _asset_key(url)
+        if key and key not in after:
+            lost.setdefault(key, url)
+    return sorted(lost.values())
 
 
 def has_stray_image_marker(html: str) -> bool:

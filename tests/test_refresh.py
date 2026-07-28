@@ -349,6 +349,76 @@ def test_added_links_are_not_a_loss():
     assert lost_assets(before, after) == []
 
 
+# A refresh re-emits the body rather than copying it, so the same destination
+# comes back spelled differently. Each of these refused a real article.
+
+
+def test_a_dropped_trailing_slash_is_not_a_loss():
+    """Two of five articles failed a live run on exactly this."""
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p><a href="https://drflooring.ca/">home</a></p>'
+    after = '<p><a href="https://drflooring.ca">home</a></p>'
+    assert lost_assets(before, after) == []
+
+
+def test_an_added_trailing_slash_is_not_a_loss():
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p><a href="https://drflooring.ca/collections/vinyl">v</a></p>'
+    after = '<p><a href="https://drflooring.ca/collections/vinyl/">v</a></p>'
+    assert lost_assets(before, after) == []
+
+
+def test_a_rescheme_is_not_a_loss():
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p><a href="http://drflooring.ca/vinyl">v</a></p>'
+    after = '<p><a href="https://drflooring.ca/vinyl">v</a></p>'
+    assert lost_assets(before, after) == []
+
+
+def test_an_escaped_ampersand_is_not_a_loss():
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p><a href="https://a.ca/x?p=1&amp;q=2">x</a></p>'
+    after = '<p><a href="https://a.ca/x?p=1&q=2">x</a></p>'
+    assert lost_assets(before, after) == []
+
+
+def test_host_case_is_ignored_but_path_case_is_not():
+    """Hosts are case-insensitive; paths are not, and Shopify handles differ."""
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    assert lost_assets(
+        '<p><a href="https://DRFlooring.ca/vinyl">v</a></p>',
+        '<p><a href="https://drflooring.ca/vinyl">v</a></p>',
+    ) == []
+    assert lost_assets(
+        '<p><a href="https://drflooring.ca/Vinyl">v</a></p>',
+        '<p><a href="https://drflooring.ca/vinyl">v</a></p>',
+    ) == ["https://drflooring.ca/Vinyl"]
+
+
+def test_a_different_query_is_still_a_loss():
+    """?variant=2 is a different page, not a different spelling."""
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p><a href="https://a.ca/x?variant=2">x</a></p>'
+    after = '<p><a href="https://a.ca/x?variant=9">x</a></p>'
+    assert lost_assets(before, after) == ["https://a.ca/x?variant=2"]
+
+
+def test_a_genuine_loss_reports_the_original_spelling():
+    """The retry quotes these back as must-reproduce URLs, so the report has
+    to name what the article actually contains."""
+    from blog_pipeline.graphs.refresh_graph import lost_assets
+
+    before = '<p><a href="https://a.ca/x?p=1&amp;q=2">x</a></p>'
+    after = "<p>x</p>"
+    assert lost_assets(before, after) == ["https://a.ca/x?p=1&amp;q=2"]
+
+
 def test_a_refresh_that_drops_an_image_is_not_published(shopify, monkeypatch):
     """The whole point: fail one article loudly rather than replace a working
     live page with a degraded one."""
