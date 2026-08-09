@@ -514,11 +514,22 @@ def create_app() -> FastAPI:
     # ── Advisor ─────────────────────────────────────────────────────
     @app.post("/advisor/{scope}/generate")
     def generate_advice(scope: str):
-        """Generate on demand. Slow (a reasoning model), so it runs off the
-        request thread and the page reloads when it lands."""
+        """Generate on demand. Slow (a reasoning model), so off the request
+        thread — except on Vercel, where there is no thread to be off to."""
         if scope not in advisor.SCOPES:
             return JSONResponse({"error": f"unknown scope {scope}"}, status_code=404)
         if _advice_running(scope):
+            return RedirectResponse(f"/{_scope_path(scope)}", status_code=303)
+        if is_serverless():
+            # Same reason as "Run now" in run_job_route: the function is
+            # frozen the moment this redirect is sent, so a background thread
+            # is killed before the model answers and the button does nothing
+            # at all. Generate first, then redirect to a page that already
+            # has the note on it — no ?generating=1 poll to wait on.
+            try:
+                advisor.generate(scope)
+            except Exception:  # noqa: BLE001 - recorded on the note itself
+                log.exception("advisor generation for %s failed", scope)
             return RedirectResponse(f"/{_scope_path(scope)}", status_code=303)
         _start_advice(scope)
         return RedirectResponse(

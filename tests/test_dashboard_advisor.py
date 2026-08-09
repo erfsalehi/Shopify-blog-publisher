@@ -408,3 +408,57 @@ def test_a_surfaced_task_failure_reaches_the_job_as_skipped(
     result = sync_dataforseo_keywords(client=FailingClient(), today=TODAY)
     assert result.skipped is True
     assert "40501" in result.skip_reason
+
+
+class _NeverCalledClient:
+    """Both tests below must decide without spending a request — reaching
+    DataForSEO at all would itself be the bug."""
+
+    enabled = True
+    last_error = None
+
+    def keyword_data(self, keywords, location_code=2124, language_code="en"):
+        raise AssertionError("no request should be made with zero candidates")
+
+
+def test_no_search_data_is_not_reported_as_everything_being_fresh(dashboard_db):
+    """Both cases produce zero candidates and they need opposite responses.
+    On the first deployment the Search Console sync had failed, so there were
+    no terms at all — and the job reported "every striking-distance term
+    already has fresh volume data", which reads as success. The Keywords tab
+    sat empty and green for hours."""
+    from dashboard.jobs.dataforseo_keywords import sync_dataforseo_keywords
+
+    result = sync_dataforseo_keywords(client=_NeverCalledClient(), today=TODAY)
+
+    assert result.skipped is True
+    assert "Search Console" in result.skip_reason
+    assert result.detail["candidates"] == 0
+
+
+def test_all_terms_already_fresh_still_reports_that(dashboard_db):
+    """The other half: there WERE terms, they're all cached, and that really
+    is a no-op worth reporting as one rather than as a skip."""
+    from dashboard.jobs.dataforseo_keywords import (
+        STALE_AFTER_DAYS,
+        sync_dataforseo_keywords,
+    )
+    from dashboard.models import KeywordMetric
+
+    _query("floor underlayment", 5, 300, 12.0)
+    with get_session() as session:
+        session.add(
+            KeywordMetric(
+                keyword="floor underlayment",
+                location_code=store.get(store.DFS_LOCATION_CODE),
+                fetched_at=datetime.now(timezone.utc),
+                search_volume=100,
+            )
+        )
+
+    result = sync_dataforseo_keywords(client=_NeverCalledClient(), today=TODAY)
+
+    assert result.skipped is False
+    assert result.detail["considered"] >= 1
+    assert "already has fresh" in result.detail["note"]
+    assert STALE_AFTER_DAYS > 0

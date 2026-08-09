@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import func
@@ -86,7 +87,29 @@ def budget_remaining() -> float:
     return max(0.0, float(store.get(store.DFS_BUDGET_USD)) - spend_to_date())
 
 
-def _candidate_keywords(limit: int, today: date | None = None) -> list[str]:
+@dataclass(frozen=True)
+class Candidates:
+    """The terms to look up, plus how many there were to choose from.
+
+    `considered` is what separates "nothing new to look up" from "Search
+    Console has never synced" — both produce an empty `keywords`, and they
+    need opposite responses from the owner. Reporting the first when the
+    truth is the second is how a deployment sat looking healthy with no
+    keyword data at all: the job said everything was already fresh, which
+    reads as success.
+    """
+
+    keywords: list[str]
+    considered: int
+
+    def __len__(self) -> int:
+        return len(self.keywords)
+
+    def __iter__(self):
+        return iter(self.keywords)
+
+
+def _candidate_keywords(limit: int, today: date | None = None) -> Candidates:
     """Terms worth paying to learn about, best first.
 
     Ordered by impressions because that is the site's own evidence of
@@ -139,7 +162,7 @@ def _candidate_keywords(limit: int, today: date | None = None) -> list[str]:
         out.append(query)
         if len(out) >= limit:
             break
-    return out
+    return Candidates(keywords=out, considered=len(rows))
 
 
 def sync_dataforseo_keywords(
@@ -176,13 +199,30 @@ def sync_dataforseo_keywords(
             detail=detail,
         )
 
-    keywords = _candidate_keywords(store.get(store.DFS_MAX_KEYWORDS), today)
+    candidates = _candidate_keywords(store.get(store.DFS_MAX_KEYWORDS), today)
+    keywords = candidates.keywords
     detail["candidates"] = len(keywords)
     if not keywords:
+        if candidates.considered == 0:
+            # No search terms to choose from at all, which is not the same as
+            # having chosen none. Saying "already fresh" here reads as success
+            # and hides the actual blocker one job upstream.
+            return JobResult(
+                skipped=True,
+                skip_reason=(
+                    "No Search Console query data yet, so there are no terms "
+                    "to look up. Run the Search Console sync first."
+                ),
+                detail=detail,
+            )
         return JobResult(
             rows=0,
-            detail={**detail, "note": "every striking-distance term already has "
-                                      "fresh volume data"},
+            detail={
+                **detail,
+                "considered": candidates.considered,
+                "note": "every striking-distance term already has fresh "
+                        "volume data",
+            },
         )
 
     rows = client.keyword_data(keywords, location_code=location)

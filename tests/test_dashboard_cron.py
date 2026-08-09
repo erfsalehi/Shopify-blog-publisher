@@ -182,3 +182,59 @@ def test_run_now_stays_asynchronous_off_vercel(dashboard_db, monkeypatch):
     assert resp.status_code == 200
     assert resp.json() == {"started": True, "job": "alerts"}
     assert started == ["alerts"]
+
+
+def test_regenerating_advice_completes_before_redirecting_when_serverless(
+    dashboard_db, monkeypatch
+):
+    """The same defect as "Run now", in a second place. Regenerate handed the
+    model call to a background thread and redirected; on Vercel the function
+    freezes as that redirect is sent, so the thread died before the model
+    answered and the button did nothing at all. This is what "the advisor is
+    not working" turned out to be."""
+    monkeypatch.setenv("VERCEL", "1")
+
+    from dashboard import advisor
+    from dashboard.web import create_app
+
+    generated: list[str] = []
+    monkeypatch.setattr(advisor, "generate", lambda scope: generated.append(scope))
+    monkeypatch.setattr(
+        "dashboard.web._start_advice",
+        lambda scope: (_ for _ in ()).throw(
+            AssertionError("a background thread cannot survive here")
+        ),
+    )
+
+    with TestClient(create_app(), follow_redirects=False) as client:
+        resp = client.post("/advisor/overview/generate")
+
+    assert resp.status_code == 303
+    assert generated == ["overview"]
+    # No ?generating=1 — the note already exists by the time the page loads.
+    assert "generating" not in resp.headers["location"]
+
+
+def test_regenerating_advice_stays_asynchronous_off_vercel(dashboard_db, monkeypatch):
+    """Locally the model call really is slow enough to want off the request
+    thread, and the page really can poll for it."""
+    monkeypatch.delenv("VERCEL", raising=False)
+
+    from dashboard import advisor
+    from dashboard.web import create_app
+
+    started: list[str] = []
+    monkeypatch.setattr("dashboard.web._start_advice", lambda s: started.append(s))
+    monkeypatch.setattr(
+        advisor, "generate",
+        lambda scope: (_ for _ in ()).throw(
+            AssertionError("must not block the request thread locally")
+        ),
+    )
+
+    with TestClient(create_app(), follow_redirects=False) as client:
+        resp = client.post("/advisor/overview/generate")
+
+    assert resp.status_code == 303
+    assert started == ["overview"]
+    assert "generating=1" in resp.headers["location"]
