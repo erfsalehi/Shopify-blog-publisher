@@ -13,6 +13,7 @@ dashboard code has one obvious way to reach `GSC_CREDENTIALS_JSON` and friends.
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from pydantic import AliasChoices, Field, field_validator
@@ -20,6 +21,19 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from blog_pipeline.config import Settings as PipelineSettings
 from blog_pipeline.config import get_settings as pipeline
+
+
+def is_serverless() -> bool:
+    """Running as a Vercel function rather than a long-lived process.
+
+    Not a setting — it's a fact about the runtime, set by the platform, and
+    nothing should be able to override it from `.env`. Two things depend on
+    it, and both are cases where a background thread or timer is silently
+    useless rather than merely slower: the scheduler
+    (`enable_scheduler_effective`) and "Run now" (web.py), because the
+    function is frozen the instant its response is sent.
+    """
+    return os.environ.get("VERCEL") == "1"
 
 
 class DashboardSettings(BaseSettings):
@@ -87,9 +101,7 @@ class DashboardSettings(BaseSettings):
 
     @property
     def enable_scheduler_effective(self) -> bool:
-        import os
-
-        if os.environ.get("VERCEL") == "1":
+        if is_serverless():
             return False
         return self.enable_scheduler
 

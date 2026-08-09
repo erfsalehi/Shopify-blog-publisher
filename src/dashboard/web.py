@@ -30,16 +30,19 @@ from dashboard import (
 )
 from blog_pipeline.tools.shopify import ShopifyError
 
-from dashboard.config import get_settings, pipeline
-from dashboard.db import init_db
+from dashboard.config import get_settings, is_serverless, pipeline
+from dashboard.db import init_db, init_pipeline_db
 from dashboard.jobs import all_jobs
 from dashboard.jobs.gsc import SETTLING_DAYS
 from dashboard.jobs.registry import get_job
 from dashboard.jobs.runner import (
+    JobAlreadyRunning,
     is_running,
     last_runs,
+    reap_stale_runs,
     recent_runs,
     run_in_background,
+    run_job,
 )
 from dashboard.models import (
     AlertRule, Competitor, Experiment, ExperimentProduct, ShopifyProduct,
@@ -56,6 +59,14 @@ STATIC = _HERE / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # No-op locally, where the pipeline has its own database and its own
+    # `blog-pipeline init-db`. On Vercel both share the one Neon database and
+    # that CLI can't be run, so the Blog page's reads of the pipeline's
+    # `article` table would fail until this creates it.
+    init_pipeline_db()
+    # Close out any run whose process died mid-job, so the Jobs page doesn't
+    # show something permanently in flight that nothing will ever finish.
+    reap_stale_runs()
     if get_settings().enable_scheduler_effective:
         scheduler.start()
     yield
@@ -841,6 +852,33 @@ def create_app() -> FastAPI:
             return JSONResponse(
                 {"started": False, "job": name, "reason": "already running"},
                 status_code=409,
+            )
+        if is_serverless():
+            # A background thread does not survive here: Vercel freezes the
+            # function the moment the response is sent, so the thread is
+            # killed mid-job and its job_run row stays "running" forever —
+            # the button appears to work and silently does nothing. Run it on
+            # the request thread instead and report the real outcome, the
+            # same way the cron endpoints do.
+            #
+            # The cost is that a job slower than the function's maxDuration
+            # returns a gateway timeout. That's the better failure: loud, and
+            # visible on the page that asked for it.
+            try:
+                run = run_job(name, trigger="manual")
+            except JobAlreadyRunning:
+                return JSONResponse(
+                    {"started": False, "job": name, "reason": "already running"},
+                    status_code=409,
+                )
+            return JSONResponse(
+                {
+                    "started": True,
+                    "job": name,
+                    "status": run.status,
+                    "rows": run.rows,
+                    "error": run.error,
+                }
             )
         run_in_background(name, trigger="manual")
         return JSONResponse({"started": True, "job": name})

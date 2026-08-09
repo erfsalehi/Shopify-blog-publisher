@@ -115,3 +115,70 @@ def test_the_cron_path_is_not_gated_by_the_owner_password(
         )
     assert resp.status_code == 200
     get_settings.cache_clear()
+
+
+# ── "Run now" under a serverless runtime ────────────────────────────
+
+
+def test_run_now_completes_on_the_request_thread_when_serverless(
+    dashboard_db, monkeypatch
+):
+    """Off Vercel, "Run now" hands the job to a background thread so a long
+    GSC backfill doesn't hold the response open. On Vercel that thread is
+    killed the instant the response is sent — the button returns 200, the job
+    never finishes, and its row sits at `running` forever. So there the work
+    has to happen before responding, and the response reports the outcome."""
+    monkeypatch.setenv("VERCEL", "1")
+
+    from dashboard.jobs import runner
+    from dashboard.jobs.registry import JobResult
+    from dashboard.web import create_app
+
+    ran: list[str] = []
+
+    def fake_run_job(name, *, trigger="manual", **kw):
+        ran.append(trigger)
+        return runner.JobRun(
+            job=name, status="ok", rows=7, trigger=trigger, error=None
+        )
+
+    def explode(*a, **kw):  # pragma: no cover - asserts it's never reached
+        raise AssertionError("a background thread cannot survive here")
+
+    monkeypatch.setattr("dashboard.web.run_job", fake_run_job)
+    monkeypatch.setattr("dashboard.web.run_in_background", explode)
+
+    with TestClient(create_app()) as client:
+        resp = client.post("/jobs/alerts/run")
+
+    assert resp.status_code == 200
+    assert resp.json()["rows"] == 7
+    assert ran == ["manual"]
+
+
+def test_run_now_stays_asynchronous_off_vercel(dashboard_db, monkeypatch):
+    """The local behaviour is unchanged: return immediately, let the jobs
+    page poll. Holding the response open for a multi-minute backfill would
+    just look like a hung page."""
+    monkeypatch.delenv("VERCEL", raising=False)
+
+    from dashboard.web import create_app
+
+    started: list[str] = []
+    monkeypatch.setattr(
+        "dashboard.web.run_in_background",
+        lambda name, trigger="manual": started.append(name),
+    )
+    monkeypatch.setattr(
+        "dashboard.web.run_job",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("must not run on the request thread locally")
+        ),
+    )
+
+    with TestClient(create_app()) as client:
+        resp = client.post("/jobs/alerts/run")
+
+    assert resp.status_code == 200
+    assert resp.json() == {"started": True, "job": "alerts"}
+    assert started == ["alerts"]

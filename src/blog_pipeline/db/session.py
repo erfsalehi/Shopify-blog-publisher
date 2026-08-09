@@ -7,12 +7,14 @@ fresh checkout can `init-db` without manual setup.
 
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import NullPool
 
 from blog_pipeline.config import get_settings
 from blog_pipeline.db.models import (
@@ -61,13 +63,26 @@ def _make_engine() -> Engine:
         )
     url = normalize_database_url(raw_url)
     connect_args: dict = {}
+    engine_kwargs: dict = {"future": True}
     if url.startswith("sqlite"):
         # Ensure the sqlite file's directory exists (e.g. ./data).
         path = url.split("///", 1)[-1]
         if path and path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         connect_args["check_same_thread"] = False
-    return create_engine(url, connect_args=connect_args, future=True)
+    elif os.environ.get("VERCEL") == "1":
+        # The dashboard imports this package as a library and reads the
+        # pipeline's own tables (the Blog page), so this engine gets built
+        # inside a serverless function too. A default QueuePool there holds
+        # connections open for a process that won't survive to reuse them,
+        # and Neon's connection limit is reached long before the traffic
+        # justifies it. Same reasoning as dashboard/db.py — but scoped to
+        # Vercel rather than to Postgres generally, because a long-lived
+        # pipeline run against Postgres (Railway, GitHub Actions) genuinely
+        # wants the pool it has today.
+        engine_kwargs["poolclass"] = NullPool
+        engine_kwargs["pool_pre_ping"] = True
+    return create_engine(url, connect_args=connect_args, **engine_kwargs)
 
 
 def get_engine() -> Engine:

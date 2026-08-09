@@ -523,6 +523,35 @@ password, because cron has no browser and no session cookie to present.
 Note the Hobby plan runs cron **once a day** with up to ~59 minutes of jitter,
 so the times in `vercel.json` are ordering, not appointments.
 
+**"Run now" runs synchronously here.** Locally the button hands the job to a
+background thread and the page polls, because a GSC backfill takes minutes and
+holding the response open would look like a hung page. A background thread
+can't survive on Vercel — the function is frozen the moment it responds — so
+`is_serverless()` switches the route to run the job on the request thread and
+report the real outcome. The failure this replaces was much worse than a slow
+response: the button returned 200, the thread was killed mid-job, and the run
+sat at `running` forever. It was intermittent, too, which is what made it
+confusing — the ~20s jobs usually finished in time and only the GSC sync
+didn't. `reap_stale_runs()` closes out any row left that way (age-based, so a
+job genuinely in flight in a concurrent invocation is never declared dead).
+
+A job slower than `maxDuration` now returns a gateway timeout instead. That's
+the better failure — loud, and on the page that asked for it.
+
+**Both schemas live in the one Neon database.** The dashboard reads the
+pipeline's `article` table directly rather than copying it, so the Blog page
+needs the pipeline's tables to exist — and `blog-pipeline init-db` is a CLI
+nobody can point at a serverless deployment. `init_pipeline_db()` runs at
+startup and creates them, but *only* when both packages resolve to the same
+database, which is true on Vercel and false locally (where they are two
+separate SQLite files and the pipeline owns its own schema). The two share no
+table name; `test_the_two_schemas_can_share_one_database` is what keeps that
+true, since neither package imports the other's models.
+
+Note this creates the pipeline's schema, not its data — the articles in the
+local `data/pipeline.db` are not migrated, so the deployed Blog page counts
+only what the pipeline writes to Neon from now on.
+
 **Access.** The app was local-only by design; reachability *was* the access
 control. Public means that's gone, so `DASHBOARD_PASSWORD` gates every route
 by default (see [auth.py](../src/dashboard/auth.py)) with an

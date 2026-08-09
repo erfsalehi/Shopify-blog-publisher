@@ -32,7 +32,7 @@ from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
-from dashboard.config import get_settings
+from dashboard.config import get_settings, pipeline
 from dashboard.models import Base
 
 _engine: Engine | None = None
@@ -140,6 +140,54 @@ def get_session() -> Iterator[Session]:
 def init_db() -> None:
     """Create any missing tables. Safe to call on every start, and is."""
     Base.metadata.create_all(get_engine())
+
+
+def shares_database_with_pipeline() -> bool:
+    """Whether the dashboard and the pipeline resolve to the same database.
+
+    Locally they never do: the dashboard opens data/dashboard.db and the
+    pipeline opens data/pipeline.db, deliberately separate so neither schema
+    has to migrate in lockstep with a database it doesn't own.
+
+    On Vercel they always do, and not by choice — there is one Neon database,
+    the integration publishes it as DATABASE_URL, and both packages read that
+    name. Which is fine (the two schemas share no table name; asserted by
+    test_the_two_schemas_can_share_one_database) but it does mean something
+    has to create the pipeline's tables there, and `blog-pipeline init-db` is
+    a CLI nobody can run against a serverless deployment.
+    """
+    from blog_pipeline.db import session as pipeline_db
+
+    try:
+        theirs = pipeline_db.normalize_database_url(pipeline().database_url)
+    except Exception:
+        return False
+    return bool(theirs.strip()) and theirs == normalize_database_url(
+        get_settings().database_url
+    )
+
+
+def init_pipeline_db() -> bool:
+    """Create the pipeline's tables too, when it shares this database.
+
+    The Blog page reads the pipeline's `article` table directly rather than
+    copying it — that's the point of importing blog_pipeline as a library. So
+    on Vercel the page 500s with `relation "article" does not exist` until
+    something runs the pipeline's own init, which is what this is. Returns
+    whether it ran, so a caller can say so.
+
+    Deliberately calls the pipeline's `init_db()` rather than its
+    `Base.metadata.create_all` directly: that function also reconciles
+    Postgres ENUM labels, which create_all creates once and then never
+    touches again (see its docstring — an enum value added after the first
+    init is absent from the database forever and every insert using it dies).
+    """
+    if not shares_database_with_pipeline():
+        return False
+    from blog_pipeline.db.session import init_db as pipeline_init_db
+
+    pipeline_init_db()
+    return True
 
 
 def reset_engine() -> None:

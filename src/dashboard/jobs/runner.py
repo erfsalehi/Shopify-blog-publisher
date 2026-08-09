@@ -17,7 +17,7 @@ import logging
 import random
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -235,6 +235,47 @@ def _run_and_swallow(name: str, trigger: str) -> None:
         log.info("job %s already running; ignoring duplicate trigger", name)
     except Exception:  # pragma: no cover - run_job records its own failures
         log.exception("job %s crashed outside the runner", name)
+
+
+#: How long a `running` row is given before it's assumed dead. Well above
+#: Vercel's 60s function ceiling, and above the slowest honest local job (a
+#: GSC backfill runs for minutes), so this can only ever catch a corpse.
+STALE_RUN_AFTER = timedelta(minutes=15)
+
+
+def reap_stale_runs(older_than: timedelta = STALE_RUN_AFTER) -> int:
+    """Close out `running` rows whose process is gone. Returns how many.
+
+    A run is marked `running` in one transaction and resolved in another, so
+    anything that kills the process in between leaves the row saying
+    "running" forever — the Jobs page then shows a job permanently in flight
+    that nothing will ever finish.
+
+    Rare locally (it needs a crash or a Ctrl-C at the wrong moment) and
+    routine on Vercel, where a function is frozen the instant it responds and
+    any work still on a background thread simply stops. The in-process lock
+    dies with the process, so this is cosmetic rather than blocking — but a
+    status display that lies is its own bug.
+
+    Age-based rather than "mark everything running at startup": Vercel runs
+    concurrent invocations, and a cron job legitimately in flight in another
+    one must not be declared dead by this one booting.
+    """
+    cutoff = datetime.now(timezone.utc) - older_than
+    with get_session() as session:
+        stale = (
+            session.query(JobRun)
+            .filter(JobRun.status == JobStatus.running.value)
+            .filter(JobRun.started_at < cutoff)
+            .all()
+        )
+        for row in stale:
+            row.status = JobStatus.error.value
+            row.error = (
+                "Interrupted — the process running this job stopped before it "
+                "could report a result."
+            )
+        return len(stale)
 
 
 def last_runs() -> dict[str, JobRun]:

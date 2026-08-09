@@ -251,3 +251,72 @@ def test_database_url_falls_back_to_the_bare_env_var_when_unset(monkeypatch):
         assert get_settings().database_url == "postgresql://neon-test/db"
     finally:
         get_settings.cache_clear()
+
+
+# ── Sharing one database with the pipeline (Vercel only) ────────────
+
+
+def test_the_two_schemas_can_share_one_database():
+    """On Vercel there is one Neon database and both packages read
+    DATABASE_URL, so the schemas coexist whether or not that was ever the
+    plan. They may not share a table name: create_all would silently skip
+    the second definition of it, and one package would then be reading the
+    other's columns. Nothing else enforces this — the two Bases are declared
+    in different packages that never import each other."""
+    from blog_pipeline.db.models import Base as pipeline_base
+
+    from dashboard.models import Base as dashboard_base
+
+    overlap = set(pipeline_base.metadata.tables) & set(
+        dashboard_base.metadata.tables
+    )
+    assert overlap == set(), f"table name collision: {sorted(overlap)}"
+
+
+def test_separate_databases_are_left_alone(dashboard_db, monkeypatch):
+    """The local shape: the pipeline has its own database and its own
+    `blog-pipeline init-db`. The dashboard must not reach in and create the
+    pipeline's tables inside its own file just because it can."""
+    from dashboard import db as dash_db
+
+    # dashboard_db points DASHBOARD_DATABASE_URL at a temp file; conftest
+    # points the pipeline's DATABASE_URL at a different one.
+    assert dash_db.shares_database_with_pipeline() is False
+    assert dash_db.init_pipeline_db() is False
+
+
+def test_a_shared_database_gets_the_pipelines_tables_too(monkeypatch, tmp_path):
+    """The Vercel shape. The Blog page reads the pipeline's `article` table
+    directly, and on Vercel nothing has run `blog-pipeline init-db` against
+    Neon — the page 500s with `relation "article" does not exist` until the
+    dashboard's own startup creates it."""
+    import blog_pipeline.config as pipeline_config
+    import blog_pipeline.db.session as pipeline_session
+    from sqlalchemy import inspect
+
+    import dashboard.config as dash_config
+    from dashboard import db as dash_db
+
+    shared = tmp_path / "shared.db"
+    url = f"sqlite:///{shared.as_posix()}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    monkeypatch.setenv("DASHBOARD_DATABASE_URL", url)
+    monkeypatch.setitem(dash_config.DashboardSettings.model_config, "env_file", None)
+    monkeypatch.setitem(pipeline_config.Settings.model_config, "env_file", None)
+    pipeline_config.get_settings.cache_clear()
+    pipeline_session._engine = None
+    pipeline_session._SessionLocal = None
+    dash_db.reset_engine()
+    try:
+        assert dash_db.shares_database_with_pipeline() is True
+        dash_db.init_db()
+        assert dash_db.init_pipeline_db() is True
+
+        tables = set(inspect(dash_db.get_engine()).get_table_names())
+        assert "article" in tables       # the pipeline's, the one that broke
+        assert "job_run" in tables       # the dashboard's, still there
+    finally:
+        dash_db.reset_engine()
+        pipeline_config.get_settings.cache_clear()
+        pipeline_session._engine = None
+        pipeline_session._SessionLocal = None

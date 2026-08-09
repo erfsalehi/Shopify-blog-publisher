@@ -175,3 +175,56 @@ def test_last_runs_reports_the_most_recent_per_job(dashboard_db, registry):
     latest = last_runs()
     assert set(latest) == {"a", "b"}
     assert latest["a"].rows == 1
+
+
+# ── Runs whose process died ─────────────────────────────────────────
+
+
+def test_a_dead_run_is_closed_out_not_left_in_flight(dashboard_db, registry):
+    """A run is marked `running` in one transaction and resolved in another.
+    Anything that stops the process in between — a crash locally, or Vercel
+    freezing a function the instant it responds — leaves the row claiming to
+    be running forever, and the Jobs page shows a job nothing will finish."""
+    from datetime import datetime, timedelta, timezone
+
+    from dashboard.jobs.runner import reap_stale_runs
+
+    with get_session() as session:
+        session.add(
+            JobRun(
+                job="abandoned",
+                status=JobStatus.running.value,
+                started_at=datetime.now(timezone.utc) - timedelta(hours=2),
+                trigger="manual",
+            )
+        )
+
+    assert reap_stale_runs() == 1
+    with get_session() as session:
+        row = session.query(JobRun).filter(JobRun.job == "abandoned").one()
+        assert row.status == JobStatus.error.value
+        assert "Interrupted" in row.error
+
+
+def test_a_run_still_in_flight_is_never_declared_dead(dashboard_db, registry):
+    """Vercel runs concurrent invocations, so a cron job genuinely in
+    progress in one function must survive another function booting. Age is
+    what distinguishes the two — not the mere presence of a running row."""
+    from datetime import datetime, timezone
+
+    from dashboard.jobs.runner import reap_stale_runs
+
+    with get_session() as session:
+        session.add(
+            JobRun(
+                job="in-flight",
+                status=JobStatus.running.value,
+                started_at=datetime.now(timezone.utc),
+                trigger="cron",
+            )
+        )
+
+    assert reap_stale_runs() == 0
+    with get_session() as session:
+        row = session.query(JobRun).filter(JobRun.job == "in-flight").one()
+        assert row.status == JobStatus.running.value
