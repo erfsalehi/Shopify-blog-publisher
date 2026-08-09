@@ -425,9 +425,17 @@ def create_app() -> FastAPI:
     @app.get("/blog", response_class=HTMLResponse)
     def blog_page(request: Request, window: int = 28, order: str = "decay"):
         window = max(7, min(window, 180))
+        pipeline_state = reporting.content_pipeline()
         return render(
             request, "blog.html",
             data=reporting.blog_posts(window_days=window, order=order),
+            pipeline=pipeline_state,
+            funnel=(
+                charts.pipeline_funnel(
+                    pipeline_state["counts"], pipeline_state["stages"]
+                )
+                if pipeline_state["available"] else ""
+            ),
             advisor_scope="blog",
             window=window, order=order,
             last_sync=last_runs().get("blog_articles"),

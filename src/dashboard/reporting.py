@@ -1082,3 +1082,176 @@ def our_terms_in(text: str, *, limit: int = 5, today: date | None = None) -> lis
         if len(out) >= limit:
             break
     return out
+
+
+# ── The content pipeline ────────────────────────────────────────────
+
+#: What each stage means and what unblocks it. The order is the order an
+#: article moves through, which is also the order to read the funnel in.
+PIPELINE_STAGES = (
+    ("queued", "Queued", "Scheduled, not written yet"),
+    ("drafting", "Drafting", "The pipeline is working on it"),
+    ("held", "Held by QA", "Written, but QA wants a human read"),
+    ("shopify_draft", "Draft in Shopify", "Written and uploaded — needs one click"),
+    ("stranded", "Stranded", "Passed QA but never reached Shopify"),
+    ("published", "Published", "Live on the site"),
+)
+
+
+def _blocked_reason(article, *, confidence_threshold: float) -> tuple[str, str, str]:
+    """Why one written article isn't live, and what would change that.
+
+    Returns `(stage, reason, action)`. Derived from the pipeline's actual
+    publish gate (`article_graph.route_after_qa`), not guessed:
+    auto-publish requires Shopify to be configured and enabled AND a QA
+    verdict of "pass" AND confidence at or above the threshold.
+
+    Note what is deliberately *not* here: the SEO score. It gates one
+    revision pass and nothing else, so an article can score 60 and still
+    publish. Listing it as a blocking reason would send you to fix the wrong
+    thing — which is exactly what the raw numbers on this page invite.
+    """
+    if (article.failure_reason or "").strip():
+        return ("held", f"The run failed: {article.failure_reason.strip()}",
+                "Re-run the article, or queue the topic again.")
+
+    report = article.qa_report or {}
+    verdict = str(report.get("verdict") or "").lower()
+    confidence = article.qa_confidence_score
+
+    if article.shopify_article_id:
+        # It exists in Shopify but isn't live: SHOPIFY_PUBLISH_LIVE=false
+        # creates confident articles as hidden drafts on purpose. This is the
+        # cheapest pile to clear — the writing is done and reviewed.
+        return (
+            "shopify_draft",
+            "Uploaded to Shopify as a hidden draft, waiting to be published.",
+            "Open it in Shopify admin and click Publish.",
+        )
+
+    problems = []
+    if verdict and verdict != "pass":
+        problems.append(f"QA verdict was '{verdict}', not 'pass'")
+    if confidence is not None and confidence < confidence_threshold:
+        problems.append(
+            f"QA confidence {confidence:.2f} is below the {confidence_threshold:g} "
+            "threshold"
+        )
+    if problems:
+        return (
+            "held",
+            " and ".join(problems) + ".",
+            "Read it in Linear and publish by hand, or fix and re-run it.",
+        )
+
+    return (
+        "stranded",
+        "Passed QA but no Shopify article exists — the publish step didn't "
+        "run or didn't succeed.",
+        "Check the article's Linear issue for a publish error, then publish "
+        "by hand.",
+    )
+
+
+def content_pipeline(*, limit: int = 60, today: date | None = None) -> dict:
+    """The calendar and the backlog: what's coming, and what's stuck where.
+
+    Reads the **pipeline's** own tables directly rather than the dashboard's
+    `blog_article` mirror. The mirror carries what's needed to join articles
+    to search metrics; this needs the queue, the QA verdicts and the failure
+    reasons, which only the pipeline has and which no sync would be right to
+    duplicate.
+    """
+    today = today or date.today()
+    try:
+        from blog_pipeline.config import get_settings as pipeline_settings
+        from blog_pipeline.db.models import (
+            Article,
+            ArticleStatus,
+            CalendarEntry,
+            EntryStatus,
+        )
+        from blog_pipeline.db.session import get_session as pipeline_session
+    except Exception as e:  # noqa: BLE001 - reported, not raised
+        return {"available": False, "error": f"{type(e).__name__}: {e}"}
+
+    settings = pipeline_settings()
+    threshold = settings.confidence_threshold
+
+    try:
+        with pipeline_session() as session:
+            upcoming = (
+                session.query(CalendarEntry)
+                .filter(CalendarEntry.status.in_(
+                    [EntryStatus.queued, EntryStatus.drafting]
+                ))
+                .order_by(CalendarEntry.scheduled_date.asc())
+                .limit(limit)
+                .all()
+            )
+            unpublished = (
+                session.query(Article)
+                .filter(Article.status != ArticleStatus.published)
+                .order_by(Article.updated_at.desc(), Article.id.desc())
+                .limit(limit)
+                .all()
+            )
+            published_count = (
+                session.query(func.count(Article.id))
+                .filter(Article.status == ArticleStatus.published)
+                .scalar()
+            ) or 0
+            for row in list(upcoming) + list(unpublished):
+                session.expunge(row)
+    except Exception as e:  # noqa: BLE001 - an unreadable pipeline DB is a
+        # message, not a 500. Same handling as the Blog page's own reads.
+        return {"available": False, "error": f"{type(e).__name__}: {e}"}
+
+    blocked = []
+    for article in unpublished:
+        stage, reason, action = _blocked_reason(
+            article, confidence_threshold=threshold
+        )
+        blocked.append({
+            "article": article,
+            "stage": stage,
+            "reason": reason,
+            "action": action,
+            "days_waiting": (
+                (today - article.updated_at.date()).days
+                if article.updated_at else None
+            ),
+        })
+
+    counts = {key: 0 for key, _, _ in PIPELINE_STAGES}
+    for entry in upcoming:
+        key = "drafting" if entry.status == EntryStatus.drafting else "queued"
+        counts[key] += 1
+    for row in blocked:
+        counts[row["stage"]] += 1
+    counts["published"] = published_count
+
+    # Ordered so the cheapest wins come first: a Shopify draft is one click,
+    # a QA hold needs reading, a stranded article needs diagnosing.
+    order = {"shopify_draft": 0, "held": 1, "stranded": 2}
+    blocked.sort(key=lambda r: (order.get(r["stage"], 9), -(r["days_waiting"] or 0)))
+
+    return {
+        "available": True,
+        "error": None,
+        "upcoming": upcoming,
+        "blocked": blocked,
+        "counts": counts,
+        "stages": PIPELINE_STAGES,
+        "confidence_threshold": threshold,
+        "publishes_live": bool(
+            settings.can_autopublish and settings.shopify_publish_live
+        ),
+        "can_autopublish": bool(settings.can_autopublish),
+        "next_due": upcoming[0].scheduled_date if upcoming else None,
+        "overdue": [
+            e for e in upcoming
+            if e.scheduled_date and e.scheduled_date < today
+        ],
+        "today": today,
+    }

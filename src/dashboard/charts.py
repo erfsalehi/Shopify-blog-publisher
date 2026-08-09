@@ -164,3 +164,82 @@ def line_chart(points: list[Point], *, title: str = "", empty_note: str = "No da
 
     parts.append("</svg>")
     return Markup("".join(parts))
+
+
+# ── Pipeline funnel ─────────────────────────────────────────────────
+
+_FUNNEL_W = 960
+_FUNNEL_H = 132
+_FUNNEL_GAP = 10
+
+#: Which stages need the owner to do something. Coloured as attention rather
+#: than as failure: a Shopify draft isn't broken, it's finished work sitting
+#: one click from being live, which is a different feeling and should look
+#: like one.
+_ACTIONABLE = {"held", "shopify_draft", "stranded"}
+
+
+def pipeline_funnel(counts: dict, stages) -> Markup:
+    """Where every article is, as one row of proportional blocks.
+
+    A funnel rather than a bar chart because the stages are sequential and
+    the question is "where is the pile", not "compare these six numbers".
+    Blocks are sized by count with a floor, so a stage holding one article is
+    still clickable and still visible next to a stage holding seventy — the
+    single stuck article is usually the one worth seeing.
+
+    Empty stages are drawn as a thin marker rather than dropped, because the
+    shape of the pipeline is the message: a gap at "Queued" means nothing is
+    coming, and a stage that vanished couldn't tell you that.
+    """
+    present = [(key, label, note) for key, label, note in stages]
+    total = sum(max(0, counts.get(key, 0)) for key, _, _ in present) or 1
+
+    # Every block gets a minimum share so small stages stay legible; the rest
+    # of the width is distributed by actual count.
+    floor = 0.055
+    weights = []
+    for key, _, _ in present:
+        share = max(0, counts.get(key, 0)) / total
+        weights.append(floor + share * (1 - floor * len(present)))
+    scale = sum(weights) or 1
+    widths = [
+        w / scale * (_FUNNEL_W - _FUNNEL_GAP * (len(present) - 1)) for w in weights
+    ]
+
+    parts = [
+        f'<svg viewBox="0 0 {_FUNNEL_W} {_FUNNEL_H}" class="funnel" '
+        f'role="img" aria-label="Where every article is in the pipeline">'
+    ]
+    x = 0.0
+    for (key, label, note), width in zip(present, widths):
+        count = max(0, counts.get(key, 0))
+        empty = count == 0
+        css = "funnel-block"
+        if key == "published":
+            css += " done"
+        elif empty:
+            css += " empty"
+        elif key in _ACTIONABLE:
+            css += " act"
+
+        parts.append(
+            f'<g class="{css}">'
+            f'<rect x="{x:.1f}" y="0" width="{width:.1f}" height="46" rx="6"/>'
+            f'<text x="{x + width / 2:.1f}" y="30" class="funnel-count" '
+            f'text-anchor="middle">{count}</text>'
+            f'<text x="{x + width / 2:.1f}" y="72" class="funnel-label" '
+            f'text-anchor="middle">{escape(label)}</text>'
+            f'<text x="{x + width / 2:.1f}" y="90" class="funnel-note" '
+            f'text-anchor="middle">{escape(_wrap(note))}</text>'
+            f"</g>"
+        )
+        x += width + _FUNNEL_GAP
+    parts.append("</svg>")
+    return Markup("".join(parts))
+
+
+def _wrap(note: str, limit: int = 30) -> str:
+    """SVG text doesn't wrap. Truncate rather than overflow into the
+    neighbouring block, where it would read as that block's label."""
+    return note if len(note) <= limit else note[: limit - 1] + "…"

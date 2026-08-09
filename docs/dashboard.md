@@ -281,6 +281,37 @@ frozen for the life of an experiment. Nothing in the live catalogue encodes
 the existing SEO pilot's 10/50 split, so it has to be entered once on the
 Products page.
 
+### The content pipeline
+
+The top of the Blog page answers "what should I do next", which is a
+different question from how published posts are performing. Six stages,
+sized by how many articles sit in each: **Queued → Drafting → Held by QA →
+Draft in Shopify → Stranded → Published**. Empty stages are drawn as thin
+dashed markers rather than dropped, because a gap at *Queued* is the message
+— it means no article will be written at all.
+
+Reads the pipeline's own `article` and `calendar_entry` tables directly, not
+the dashboard's `blog_article` mirror. The mirror carries what's needed to
+join articles to search metrics; this needs the queue, the QA verdicts and
+the failure reasons, and duplicating those into a sync would just be a second
+copy to go stale.
+
+**The reason an article is stuck is derived from the actual publish gate**
+(`article_graph.route_after_qa`), which requires Shopify configured and
+enabled, a QA verdict of `pass`, and confidence at or above
+`CONFIDENCE_THRESHOLD`. Three distinct outcomes, ordered cheapest-to-clear:
+
+| Stage | Means | What clears it |
+|---|---|---|
+| **Draft in Shopify** | `SHOPIFY_PUBLISH_LIVE=false` creates confident articles hidden on purpose | One click in Shopify admin |
+| **Held by QA** | Verdict wasn't `pass`, or confidence was under the threshold | Read it in Linear, publish by hand or re-run |
+| **Stranded** | Cleared every gate and still isn't in Shopify | Check Linear for a publish error |
+
+**The SEO score is deliberately never given as a reason.** It gates one
+revision pass and nothing else, so an article can score 60 and still publish
+— a real one did. Showing it next to a stuck article invites you to go and
+improve a number that would not release it.
+
 ## Refreshing an article (the only path that changes a public page)
 
 `/blog/<id>` → **Preview a refresh** runs `run_refresh(only_ids={id},

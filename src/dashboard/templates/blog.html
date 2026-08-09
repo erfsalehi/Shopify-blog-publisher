@@ -37,6 +37,132 @@
 </div>
 {% endif %}
 
+{# ── Content pipeline ─────────────────────────────────────────────
+   Reads the pipeline's own database, so it can be unreachable in a way the
+   rest of this page cannot. Handled as a message rather than a 500. #}
+<h2>Content pipeline</h2>
+
+{% if not pipeline.available %}
+<div class="notice bad-box">
+  <strong>Couldn't read the pipeline database.</strong>
+  {{ pipeline.error }}
+</div>
+{% else %}
+
+<div class="funnel-scroll">{{ funnel }}</div>
+
+{% if pipeline.counts.queued == 0 and pipeline.counts.drafting == 0 %}
+<div class="notice bad-box">
+  <strong>Nothing is queued.</strong>
+  The calendar is empty, so no new article will be written — the weekly run
+  has nothing to pick up. Queue topics with
+  <code>blog-pipeline add-topic</code> or <code>run-calendar</code>, or hit
+  <strong>Counter this</strong> on a
+  <a href="/competitors">competitor's post</a>.
+</div>
+{% endif %}
+
+{% set stuck = pipeline.counts.shopify_draft + pipeline.counts.held
+               + pipeline.counts.stranded %}
+{% if stuck %}
+<p class="muted window-note">
+  <strong>{{ stuck }} article{{ '' if stuck == 1 else 's' }} written and not
+  live.</strong>
+  {% if not pipeline.publishes_live %}
+  Auto-publishing to Shopify is set to <em>staging</em>
+  (<code>SHOPIFY_PUBLISH_LIVE=false</code>), so even articles that pass every
+  check are created hidden and wait for you to click Publish. That's the
+  biggest group below and it's the cheapest to clear.
+  {% endif %}
+  QA holds an article back when its verdict isn't <em>pass</em> or its
+  confidence is under {{ pipeline.confidence_threshold }} — the SEO score
+  doesn't gate publishing at all, it only triggers one rewrite, so a low
+  score here is not the reason anything is stuck.
+</p>
+{% endif %}
+
+{% if pipeline.upcoming %}
+<h3>Next up</h3>
+{% if pipeline.overdue %}
+<p class="muted small">
+  {{ pipeline.overdue | length }} scheduled for a date that has already
+  passed — the drafting run either hasn't fired or didn't reach them.
+</p>
+{% endif %}
+<table>
+  <thead>
+    <tr><th>Scheduled</th><th>Topic</th><th>Target keywords</th><th>Status</th></tr>
+  </thead>
+  <tbody>
+    {% for entry in pipeline.upcoming %}
+    <tr>
+      <td class="{{ 'bad' if entry.scheduled_date and entry.scheduled_date < pipeline.today }}">
+        {{ entry.scheduled_date }}
+      </td>
+      <td>
+        {% if entry.linear_url %}
+        <a href="{{ entry.linear_url }}" target="_blank" rel="noopener">{{ entry.topic }}</a>
+        {% else %}{{ entry.topic }}{% endif %}
+      </td>
+      <td class="muted small">{{ (entry.target_keywords or []) | join(', ') or '—' }}</td>
+      <td class="muted small">{{ entry.status.value }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if pipeline.blocked %}
+<h3>Written but not published</h3>
+<p class="muted small">
+  Ordered by how cheap it is to fix: a Shopify draft is one click, a QA hold
+  needs you to read it, a stranded article needs diagnosing.
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>Article</th><th>Where it is</th><th>Why it stopped</th>
+      <th>What clears it</th><th class="n">Waiting</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in pipeline.blocked %}
+    {% set a = row.article %}
+    <tr>
+      <td>
+        {{ a.title or a.topic }}
+        <div class="muted small">
+          {% if a.linear_url %}
+          <a href="{{ a.linear_url }}" target="_blank" rel="noopener">
+            {{ a.linear_identifier or 'Linear' }}</a> ·
+          {% endif %}
+          SEO {{ '%.0f' | format(a.seo_score or 0) }}
+          {%- if a.qa_confidence_score is not none %}
+          · confidence {{ '%.2f' | format(a.qa_confidence_score) }}
+          {%- endif %}
+        </div>
+      </td>
+      <td><span class="stage-tag {{ row.stage }}">
+        {%- if row.stage == 'shopify_draft' %}Shopify draft
+        {%- elif row.stage == 'held' %}Held by QA
+        {%- else %}Stranded{% endif -%}
+      </span></td>
+      <td class="why">{{ row.reason }}</td>
+      <td class="do-this">{{ row.action }}</td>
+      <td class="n muted small">
+        {{ row.days_waiting if row.days_waiting is not none else '—' }}
+        {%- if row.days_waiting is not none %} d{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endif %}
+
+<h2>Published performance</h2>
+
 <section class="cards">
   <div class="card">
     <div class="card-label">Articles</div>

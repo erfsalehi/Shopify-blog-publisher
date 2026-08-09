@@ -295,3 +295,42 @@ ul.tight li { margin: 2px 0; }
   padding: 10px; font-size: 11.5px; line-height: 1.45; max-height: 420px;
   overflow: auto; white-space: pre-wrap; color: var(--muted);
 }
+
+/* ── Content pipeline funnel ─────────────────────────────────────── */
+/* Stage colours carry meaning and must survive both themes, so they're
+   drawn from the same variables as everything else rather than hardcoded.
+   "Actionable" is warn, not bad: a finished article waiting on one click is
+   not a failure, and painting it red would teach the owner to ignore red. */
+.funnel { width: 100%; height: auto; margin: 4px 0 8px; }
+.funnel-block rect {
+  fill: var(--accent-soft);
+  stroke: var(--line);
+  stroke-width: 1;
+}
+.funnel-block.act rect { fill: var(--warn); fill-opacity: 0.22; stroke: var(--warn); }
+.funnel-block.done rect { fill: var(--good); fill-opacity: 0.18; }
+.funnel-block.empty rect { fill: none; stroke-dasharray: 3 3; }
+.funnel-count { font-size: 19px; font-weight: 600; fill: var(--ink); }
+.funnel-block.empty .funnel-count { fill: var(--muted); font-weight: 400; }
+.funnel-label { font-size: 12px; font-weight: 600; fill: var(--ink); }
+.funnel-note { font-size: 10.5px; fill: var(--muted); }
+
+/* One row per stuck article: the reason reads as prose, the action as the
+   thing to click. Keeping them visually distinct matters — a reason that
+   looks like an instruction sends people to fix the wrong thing. */
+.stage-tag {
+  display: inline-block; padding: 2px 8px; border-radius: 10px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+}
+.stage-tag.shopify_draft { background: var(--warn); color: #fff; }
+.stage-tag.held { background: var(--accent-soft); color: var(--accent); }
+.stage-tag.stranded { background: var(--bad); color: #fff; }
+.why { color: var(--muted); font-size: 13px; }
+.do-this { font-size: 13px; }
+
+/* The funnel is six labelled blocks in a row and cannot reflow — an SVG
+   scales its text with its width, so at phone width the labels rendered at
+   ~4px. Give it a floor and let it scroll inside its own box rather than
+   shrinking into illegibility or pushing the page sideways. */
+.funnel-scroll { overflow-x: auto; max-width: 100%; }
+.funnel-scroll .funnel { min-width: 780px; }
