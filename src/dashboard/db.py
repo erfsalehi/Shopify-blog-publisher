@@ -24,16 +24,19 @@ Two shapes, chosen by `DATABASE_URL`:
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, inspect, text
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from dashboard.config import get_settings, pipeline
 from dashboard.models import Base
+
+log = logging.getLogger(__name__)
 
 _engine: Engine | None = None
 _SessionLocal: sessionmaker[Session] | None = None
@@ -137,9 +140,64 @@ def get_session() -> Iterator[Session]:
         session.close()
 
 
+def add_missing_columns() -> list[str]:
+    """Add columns the models declare and the database doesn't have yet.
+
+    `create_all()` creates a table once and then never touches it again, so a
+    column added to a model after that table exists is missing forever and
+    every query naming it dies with `no such column`. That's not a subtle
+    failure — the page 500s — but it only happens against a database that
+    predates the change, which is to say never in tests and always in
+    production.
+
+    This is deliberately **not** a migration system, and must not grow into
+    one. Adding a column is the one schema change that is always safe, always
+    additive and idempotent; renames, drops and type changes need a real tool
+    and a human deciding. The pipeline draws exactly this line for enum
+    labels — see `blog_pipeline.db.session._sync_enum_labels`.
+
+    Columns are added nullable even when the model says otherwise: an
+    existing row has no value to put there, and `NOT NULL` without a default
+    would fail the ALTER outright. New rows get the model's default from the
+    ORM regardless.
+    """
+    engine = get_engine()
+    inspector = inspect(engine)
+    present_tables = set(inspector.get_table_names())
+    added: list[str] = []
+
+    with engine.begin() as conn:
+        for table in Base.metadata.sorted_tables:
+            if table.name not in present_tables:
+                continue  # create_all will build it complete.
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                ddl_type = column.type.compile(dialect=engine.dialect)
+                sql = (
+                    f"ALTER TABLE {table.name} "
+                    f"ADD COLUMN {column.name} {ddl_type}"
+                )
+                default = getattr(column.default, "arg", None)
+                if default is not None and not callable(default):
+                    literal = (
+                        f"'{default}'" if isinstance(default, str) else str(default)
+                    )
+                    sql += f" DEFAULT {literal}"
+                # Identifiers come from our own model definitions, never input.
+                conn.execute(text(sql))
+                added.append(f"{table.name}.{column.name}")
+
+    if added:
+        log.info("added missing columns: %s", ", ".join(added))
+    return added
+
+
 def init_db() -> None:
-    """Create any missing tables. Safe to call on every start, and is."""
+    """Create any missing tables and columns. Safe on every start, and is."""
     Base.metadata.create_all(get_engine())
+    add_missing_columns()
 
 
 def shares_database_with_pipeline() -> bool:

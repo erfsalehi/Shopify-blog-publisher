@@ -40,10 +40,16 @@ from dashboard.models import (
     AdsCampaignDaily,
     Alert,
     AlertRule,
+    Competitor,
+    CompetitorMatch,
+    CompetitorPost,
+    CompetitorProduct,
     Ga4EventDaily,
     GscSiteDaily,
     JobRun,
     JobStatus,
+    MatchStatus,
+    ShopifyProduct,
 )
 
 log = logging.getLogger(__name__)
@@ -281,6 +287,100 @@ def _job_failures(threshold: float, today: date) -> list[Finding]:
     return findings
 
 
+def _competitor_undercuts(threshold: float, today: date) -> list[Finding]:
+    """A confirmed-match product where they are cheaper than us by more than
+    `threshold` percent.
+
+    Confirmed matches only. A proposed match is a guess, and an alert saying
+    "you are being undercut on X" about a product that isn't X is worse than
+    no alert — it costs trust in every other alert in the inbox.
+
+    Products whose price we hide are skipped rather than treated as $0. A
+    hidden price isn't a low price, and the show-price question is a separate
+    (and bigger) conversation than a per-product undercut.
+    """
+    findings = []
+    with get_session() as session:
+        rows = (
+            session.query(CompetitorMatch, CompetitorProduct, ShopifyProduct, Competitor)
+            .join(
+                CompetitorProduct,
+                CompetitorProduct.id == CompetitorMatch.competitor_product_id,
+            )
+            .join(
+                ShopifyProduct,
+                ShopifyProduct.id == CompetitorMatch.shopify_product_id,
+            )
+            .join(Competitor, Competitor.id == CompetitorProduct.competitor_id)
+            .filter(CompetitorMatch.status == MatchStatus.confirmed.value)
+            .all()
+        )
+        for match, theirs, ours, site in rows:
+            if ours.price_min <= 0 or theirs.price_min <= 0:
+                continue
+            if theirs.price_min >= ours.price_min:
+                continue
+            gap_pct = (ours.price_min - theirs.price_min) / ours.price_min * 100
+            if gap_pct < threshold:
+                continue
+            findings.append(Finding(
+                kind="competitor_undercut",
+                subject=f"{site.name}:{theirs.handle}",
+                title=f"{site.name} is {gap_pct:.0f}% cheaper on {ours.title}",
+                body=(
+                    f"Ours ${ours.price_min:.2f} vs theirs "
+                    f"${theirs.price_min:.2f} ({gap_pct:.0f}% lower). "
+                    f"{theirs.url or ''}"
+                ).strip(),
+                link="/competitors",
+                severity="warn",
+            ))
+    return findings
+
+
+def _competitor_posted(threshold: float, today: date) -> list[Finding]:
+    """A competitor published something in the last `threshold` days.
+
+    One finding per competitor per window rather than one per post: five
+    alerts because they had a busy week is how an inbox gets ignored. The
+    body names the posts.
+    """
+    days = max(1, int(threshold or 7))
+    cutoff = datetime.combine(today - timedelta(days=days), datetime.min.time())
+    findings = []
+    with get_session() as session:
+        sites = {c.id: c for c in session.query(Competitor)}
+        posts = (
+            session.query(CompetitorPost)
+            .filter(CompetitorPost.published_at >= cutoff)
+            .order_by(CompetitorPost.published_at.desc())
+            .all()
+        )
+        grouped: dict[int, list] = {}
+        for post in posts:
+            grouped.setdefault(post.competitor_id, []).append(post)
+        for competitor_id, items in grouped.items():
+            site = sites.get(competitor_id)
+            if site is None:
+                continue
+            titles = "\n".join(f"- {p.title}" for p in items[:8])
+            findings.append(Finding(
+                kind="competitor_posted",
+                subject=f"{site.name}:{today.isocalendar().week}",
+                title=(
+                    f"{site.name} published {len(items)} "
+                    f"{'post' if len(items) == 1 else 'posts'} in {days} days"
+                ),
+                body=(
+                    f"{titles}\n\nCounter any of these from the Competitors "
+                    "page — it queues the reply into the article pipeline."
+                ),
+                link="/competitors",
+                severity="info",
+            ))
+    return findings
+
+
 KINDS: tuple[RuleKind, ...] = (
     RuleKind(
         key="clicks_drop", label="Organic clicks drop (week over week)",
@@ -317,6 +417,19 @@ KINDS: tuple[RuleKind, ...] = (
              "stale numbers with no error on screen is the failure this whole "
              "dashboard exists to prevent.",
         unit="", default_threshold=0, evaluate=_job_failures,
+    ),
+    RuleKind(
+        key="competitor_undercut", label="A competitor undercuts us",
+        help="Fires when a competitor's price on a CONFIRMED product match is "
+             "more than this percentage below ours. Products whose price we "
+             "hide are skipped — hidden is not cheap.",
+        unit="%", default_threshold=10, evaluate=_competitor_undercuts,
+    ),
+    RuleKind(
+        key="competitor_posted", label="A competitor published",
+        help="Fires when a watched competitor posted within this many days. "
+             "One alert per competitor per window, not one per post.",
+        unit="days", default_threshold=7, evaluate=_competitor_posted,
     ),
 )
 

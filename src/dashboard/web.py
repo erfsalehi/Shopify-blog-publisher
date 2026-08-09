@@ -45,7 +45,8 @@ from dashboard.jobs.runner import (
     run_job,
 )
 from dashboard.models import (
-    AlertRule, Competitor, Experiment, ExperimentProduct, ShopifyProduct,
+    AlertRule, Competitor, CompetitorMatch, CompetitorPost, Experiment,
+    ExperimentProduct, MatchStatus, ShopifyProduct,
 )
 from dashboard.db import get_session
 
@@ -510,6 +511,126 @@ def create_app() -> FastAPI:
             dfs_error=_last_dfs_error(),
             advisor_scope="keywords",
         )
+
+    def _sync_topic_to_linear(entry, topic: str, keywords: list[str], notes: str):
+        """Mirror a queued topic into Linear, as `add-topic` does.
+
+        Review and publishing happen in Linear, not here — a topic queued
+        only in the database would be invisible to the process that actually
+        acts on it. Failure is non-fatal for the same reason it is in the
+        CLI: the entry is already saved, and losing the queue because an
+        unrelated API is down would be the worse outcome.
+        """
+        from blog_pipeline.tools.linear import LinearClient, LinearError
+
+        if not pipeline().has_linear:
+            return
+        description = f"Countering a competitor post.\n\n{notes}"
+        if keywords:
+            description += f"\n\n**Target keywords:** {', '.join(keywords)}"
+        try:
+            client = LinearClient()
+            result = client.create_issue(
+                title=topic,
+                description=description,
+                state="Backlog",
+                due_date=date.today().isoformat(),
+                labels=["Blog"],
+            )
+            entry.linear_issue_id = result.id
+            entry.linear_identifier = result.identifier
+            entry.linear_url = result.url
+            client.close()
+        except LinearError:
+            log.exception("Linear sync failed for countered topic %r", topic)
+
+    # ── Competitors ─────────────────────────────────────────────────
+    @app.get("/competitors", response_class=HTMLResponse)
+    def competitors_page(request: Request, window: int = 90):
+        window = max(28, min(window, 365))
+        data = reporting.competitors(days=window)
+        return render(
+            request, "competitors.html",
+            data=data,
+            window=window,
+            # Posts carry a competitor_id, not the row — one lookup here
+            # beats a join per row in the template.
+            competitor_names={
+                row["competitor"].id: row["competitor"].name
+                for row in data["overview"]
+            },
+            advisor_scope="competitors",
+        )
+
+    @app.post("/competitors/match/{match_id}")
+    def decide_match(match_id: int, decision: str = Form(...)):
+        """Confirm or reject one proposed product match.
+
+        Rejections are stored, not deleted — see `CompetitorMatch`. A deleted
+        rejection is a proposal the next run makes all over again.
+        """
+        if decision not in (MatchStatus.confirmed.value, MatchStatus.rejected.value):
+            return JSONResponse({"error": f"bad decision {decision}"}, status_code=400)
+        with get_session() as session:
+            match = session.get(CompetitorMatch, match_id)
+            if match is None:
+                return JSONResponse({"error": "unknown match"}, status_code=404)
+            match.status = decision
+            match.decided_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        return RedirectResponse("/competitors", status_code=303)
+
+    @app.post("/competitors/post/{post_id}/counter")
+    def counter_post(post_id: int):
+        """Queue an article answering a competitor's post.
+
+        Writes a `CalendarEntry` into the pipeline's own queue rather than
+        drafting anything here: the pipeline already knows how to research,
+        write, QA and publish, and a second path into Shopify is the last
+        thing this needs. This adds a topic and gets out of the way — the
+        same thing `blog-pipeline add-topic` does, including the Linear
+        issue, so a countered post is reviewed exactly like every other
+        queued article rather than arriving through a side door.
+
+        Target keywords come from our own striking-distance terms that appear
+        in their title. Countering a competitor is only worth doing on a term
+        Google already associates with this site; without that it's just
+        writing about whatever they wrote about.
+        """
+        from blog_pipeline.db.models import CalendarEntry, EntryStatus, TopicSource
+        from blog_pipeline.db.session import get_session as pipeline_session
+        from blog_pipeline.graphs.calendar_graph import _get_or_create_calendar
+
+        with get_session() as session:
+            post = session.get(CompetitorPost, post_id)
+            if post is None:
+                return JSONResponse({"error": "unknown post"}, status_code=404)
+            if post.countered_at:
+                # Already queued. Not an error — a double-submitted form.
+                return RedirectResponse("/competitors", status_code=303)
+            topic = post.title.strip()[:500]
+            keywords = reporting.our_terms_in(topic)
+            post.countered_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            post.countered_topic = topic
+
+        notes = (
+            "Countering a competitor post. Write the better answer for a "
+            "Langley, BC audience and make the local angle explicit — that is "
+            "the part a competitor without a local showroom cannot copy."
+        )
+        with pipeline_session() as session:
+            calendar = _get_or_create_calendar(session)
+            entry = CalendarEntry(
+                calendar_id=calendar.id,
+                scheduled_date=date.today(),
+                topic=topic,
+                target_keywords=keywords,
+                source=TopicSource.manual,
+                status=EntryStatus.queued,
+                notes=notes,
+            )
+            session.add(entry)
+            _sync_topic_to_linear(entry, topic, keywords, notes)
+        return RedirectResponse("/competitors?countered=1", status_code=303)
 
     # ── Advisor ─────────────────────────────────────────────────────
     @app.post("/advisor/{scope}/generate")

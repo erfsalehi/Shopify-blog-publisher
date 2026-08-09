@@ -431,6 +431,124 @@ Two findings from wiring this up:
   DataForSEO's own message instead of a guess. Verify at
   <https://app.dataforseo.com/> to turn the volume column on.
 
+## Competitors
+
+Add competitors on the Settings page — a name and their website. Everything
+else is discovered.
+
+**What can actually be known.** No free source exposes a competitor's traffic
+or revenue, and this doesn't pretend otherwise. What is public:
+
+| Signal | Where from | Worth |
+|---|---|---|
+| Their whole catalogue, with prices | Shopify's `/products.json` | High — it's their real assortment and their real prices |
+| Their best-selling **order** | `/collections/all?sort_by=best-selling` | High — the closest public thing to what actually sells |
+| Their blog, with dates | Atom/RSS feed | Medium — says which searches they intend to own |
+| Brands they carry | derived from the catalogue | Medium — the assortment gap |
+
+Most local flooring retailers run Shopify, which publishes the first three for
+machines. Sites that don't are recorded as `platform=other` and left alone
+rather than retried nightly; per-page JSON-LD scraping for them isn't built.
+
+Requests go at one per second with a User-Agent that says what this is and
+links to drflooring.ca. A competitor who wants to block it can — that's their
+call to make, and hiding would be the wrong answer to their having made it.
+
+### The best-seller trap
+
+`/collections/all/products.json` **silently ignores `sort_by`**. Confirmed
+against a live store: `best-selling`, `title-ascending` and no sort at all
+returned byte-identical results. Using it would have recorded alphabetical
+order as a sales ranking — worse than no ranking, because it looks like data
+and would be acted on.
+
+The HTML collection page does honour the sort, so that's what's read. And
+because some themes ignore it too, a result that comes back in exact
+alphabetical order is refused rather than stored.
+
+### Matching their products to ours
+
+Genuinely hard, and treated as such. The same board is sold under different
+series names by different retailers, and the discriminators that actually
+identify it — thickness in mm, wear layer in mil, AC rating — are buried in
+free text in no consistent order.
+
+So `matching.py` proposes and scores, showing its working, and **you confirm
+each match once**. Thickness carries the most weight in both directions: a
+match adds to the score, a mismatch subtracts enough to sink an otherwise
+near-identical name, because 8mm and 12mm laminate are not the same product
+however similar the titles.
+
+Confirmed matches persist. Rejected ones persist too — a deleted rejection is
+a proposal the next run makes all over again.
+
+**Only confirmed matches reach the price comparison.** A proposed match is a
+guess, and a guess in a price table becomes "they're undercutting us on X"
+about a product that isn't X.
+
+PLAN.md originally specified fastembed title embeddings here. Dropped
+deliberately: it pulls ~45MB of onnxruntime into the serverless bundle, and
+for this problem it would mostly be an expensive way to notice that two
+titles both say "laminate".
+
+### Hidden prices
+
+~94% of this catalogue sits at 0.00 with the price hidden by the Orichi app.
+Everywhere a price is compared, that zero is reported as **hidden**, never as
+a number — subtracting naively would report every one of those products as us
+being several dollars cheaper, which is the exact opposite of the truth.
+
+The page does surface the aggregate, though, because it's the most actionable
+thing here: if competitors show prices on the same goods and we say "call for
+price", the click goes to the number before anyone picks up a phone. That's
+what the [show-price experiment](#experiments) exists to measure.
+
+### Counter this
+
+Each competitor post has a **Counter this** button. It queues a
+`CalendarEntry` into the *pipeline's* own database — the same thing
+`blog-pipeline add-topic` does — so the reply is researched, written, QA'd and
+published by the existing pipeline rather than through a second path into
+Shopify.
+
+Target keywords come from our own striking-distance terms that appear in
+their title, matched as whole phrases. Countering is only worth doing on a
+term Google already associates with this site; without that filter it just
+means writing about whatever they happened to write about.
+
+### Jobs
+
+Four, because they want different cadences and because one site refusing to
+serve its blog shouldn't cost you its prices:
+
+| Job | Cadence | Does |
+|---|---|---|
+| `competitor_catalog` | daily | Their products and today's prices |
+| `competitor_posts` | daily | Their blog feed |
+| `competitor_bestsellers` | daily | Their sales ranking |
+| `competitor_matches` | daily | Proposes matches for the review queue |
+
+**One competitor per run, stalest first.** A Vercel function has 60 seconds;
+paging a 3,000-product catalogue politely does not fit alongside four more of
+them. Rotation means N competitors are covered within N days with no run near
+the ceiling, and a slow site delays only itself.
+
+The attempt is stamped **before** the fetch, in its own transaction. Without
+that, a site that always fails keeps a null timestamp, sorts first forever,
+and starves every other competitor of its turn. No database session is held
+open across the network either — a catalogue crawl is a dozen requests over
+several seconds, and on Neon that would be a real connection sitting idle.
+
+### Alerts
+
+Two rules, both off by default until competitors exist:
+
+- **A competitor undercuts us** — fires on a confirmed match where they're
+  more than N% below us. Hidden prices are skipped.
+- **A competitor published** — one alert per competitor per window, not one
+  per post. Five alerts because they had a busy week is how an inbox gets
+  ignored.
+
 ## The advisor
 
 A per-tab note plus a tracked checklist, on `/`, `/products`, `/keywords`,

@@ -43,7 +43,10 @@ from dashboard.models import AdvisorAction, AdvisorNote
 
 log = logging.getLogger(__name__)
 
-SCOPES = ("overview", "products", "blog", "keywords", "ads", "experiments")
+SCOPES = (
+    "overview", "products", "blog", "keywords", "ads", "experiments",
+    "competitors",
+)
 
 SCOPE_TITLES = {
     "overview": "Organic search overview",
@@ -52,6 +55,7 @@ SCOPE_TITLES = {
     "keywords": "Search terms and market opportunity",
     "ads": "Google Ads against organic and calls",
     "experiments": "Running experiments",
+    "competitors": "Competitors' catalogues, prices and blogs",
 }
 
 _SYSTEM = """You advise the owner of D&R Flooring, a flooring retailer and \

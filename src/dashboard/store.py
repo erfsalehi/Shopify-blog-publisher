@@ -367,6 +367,10 @@ def _schedule_specs() -> tuple[Spec, ...]:
         ("blog_articles", "Blog article index", 5),
         ("alerts", "Alert rules", 8),
         ("dataforseo_keywords", "Keyword market data", 4),
+        ("competitor_catalog", "Competitor catalogue", 3),
+        ("competitor_posts", "Competitor blog watch", 3),
+        ("competitor_bestsellers", "Competitor best sellers", 2),
+        ("competitor_matches", "Competitor match proposals", 4),
         ("advisor_weekly", "Advisor notes", 9),
     )
     out: list[Spec] = []

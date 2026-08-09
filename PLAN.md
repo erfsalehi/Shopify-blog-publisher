@@ -303,7 +303,30 @@ confirm dialog and written to an audit log table.
 
 ---
 
-## Phase 5 — Competitor price watch (free path)
+## Phase 5 — Competitor watch — ✅ built (as Collector A+)
+
+Shipped, and wider than the original plan: not just prices, but their whole
+catalogue, their best-selling order, their blog cadence, and the brands they
+carry that we don't. Full write-up:
+[docs/dashboard.md](docs/dashboard.md#competitors).
+
+Three things the design notes below got wrong, all found by testing against a
+live store rather than reasoning about it:
+
+1. **`/collections/all/products.json` ignores `sort_by`.** `best-selling`,
+   `title-ascending` and no sort at all return byte-identical results. The
+   HTML page honours it; that's what's read. Storing the JSON order would
+   have recorded alphabetical order as a sales ranking.
+2. **A best-seller ordering is obtainable at all**, which the notes below
+   never considered. It's the closest public signal to what actually sells,
+   and it needed no SERP API.
+3. **fastembed was the wrong tool for matching.** ~45MB of onnxruntime into a
+   serverless bundle to mostly notice that two titles both say "laminate".
+   Thickness / wear layer / AC rating do the real work and cost nothing.
+
+Collector B (Google CSE) stays dead — see the warning box below.
+
+## Phase 5 — original design notes (free path)
 
 Two collectors, one comparison engine, all config in-app.
 

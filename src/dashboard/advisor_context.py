@@ -394,6 +394,90 @@ def _experiments(today: date) -> str:
     return "\n\n".join(out)
 
 
+def _competitors(today: date) -> str:
+    data = reporting.competitors(days=90, today=today)
+    if not data["configured"]:
+        return (
+            "No competitors are being watched yet. Nothing can be said about "
+            "the competitive position until some are added on the Settings "
+            "page."
+        )
+
+    ours = data["ours"]
+    lines = [
+        "COMPETITORS (their public sites, last 90 days):",
+        f"- We list {ours['products']:,} products, "
+        f"{ours['priced']:,} of them with a visible price "
+        f"({ours['priced_pct']:.0f}%). The rest say 'call for price'.",
+        f"- We published {ours['posts_in_window']} articles "
+        f"({ours['posts_per_month']}/month).",
+        "",
+    ]
+    for row in data["overview"]:
+        site = row["competitor"]
+        lines.append(
+            f"- {site.name}: {row['products']:,} products, "
+            f"{row['priced']:,} priced ({row['priced_pct']:.0f}%), "
+            f"{row['posts_per_month']} posts/month."
+            + (f" Not readable: {site.last_error}" if site.last_error else "")
+        )
+
+    if data["comparisons"]:
+        lines += ["", "CONFIRMED PRODUCT MATCHES (owner-verified pairs):"]
+        for row in data["comparisons"][:15]:
+            theirs = row["theirs"]
+            if row["our_price_hidden"]:
+                lines.append(
+                    f"- {row['ours'].title}: our price is hidden; "
+                    f"{row['competitor'].name if row['competitor'] else 'they'} "
+                    f"show ${theirs.price_min:.2f}."
+                )
+            else:
+                lines.append(
+                    f"- {row['ours'].title}: ours ${row['ours'].price_min:.2f} "
+                    f"vs theirs ${theirs.price_min:.2f} "
+                    f"({row['delta']:+.2f})."
+                )
+    else:
+        lines += [
+            "",
+            "No product matches have been confirmed yet, so no price "
+            "comparison exists. Do not infer one from the catalogue sizes.",
+        ]
+
+    if data["best_sellers"]:
+        lines += ["", "WHAT SELLS FOR THEM (their own best-selling order):"]
+        for product in data["best_sellers"][:10]:
+            price = (
+                f"${product.price_min:.2f}" if product.price_min > 0 else "price hidden"
+            )
+            lines.append(f"- #{product.best_seller_rank} {product.title} ({price})")
+
+    if data["gaps"]:
+        brands = ", ".join(
+            f"{g['vendor']} ({g['products']})" for g in data["gaps"][:10]
+        )
+        lines += ["", f"BRANDS THEY CARRY AND WE DO NOT: {brands}."]
+
+    recent = [p for p in data["posts"] if p.published_at][:12]
+    if recent:
+        lines += ["", "THEIR RECENT POSTS:"]
+        for post in recent:
+            lines.append(
+                f"- {post.published_at:%Y-%m-%d}: {post.title}"
+                + (" [already countered]" if post.countered_at else "")
+            )
+
+    lines += [
+        "",
+        "IMPORTANT: a best-selling ORDER is not sales volume — it ranks their "
+        "own products against each other and says nothing about how many they "
+        "sell or how that compares to us. No traffic, revenue or conversion "
+        "data exists for any competitor and none can be inferred here.",
+    ]
+    return "\n".join(lines)
+
+
 _BUILDERS = {
     "overview": _overview,
     "products": _products,
@@ -401,6 +485,7 @@ _BUILDERS = {
     "keywords": _keywords,
     "ads": _ads,
     "experiments": _experiments,
+    "competitors": _competitors,
 }
 
 

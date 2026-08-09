@@ -13,6 +13,10 @@
     { "path": "/api/cron/ga4_daily", "schedule": "0 13 * * *" },
     { "path": "/api/cron/ads_windsor", "schedule": "0 14 * * *" },
     { "path": "/api/cron/blog_articles", "schedule": "0 15 * * *" },
+    { "path": "/api/cron/competitor_catalog", "schedule": "0 7 * * *" },
+    { "path": "/api/cron/competitor_posts", "schedule": "0 8 * * *" },
+    { "path": "/api/cron/competitor_bestsellers", "schedule": "0 9 * * *" },
+    { "path": "/api/cron/competitor_matches", "schedule": "0 16 * * *" },
     { "path": "/api/cron/alerts", "schedule": "0 17 * * *" },
     { "path": "/api/cron/advisor_weekly", "schedule": "0 18 * * *" }
   ]

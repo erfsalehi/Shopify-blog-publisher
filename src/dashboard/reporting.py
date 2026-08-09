@@ -15,16 +15,22 @@ wrong:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from sqlalchemy import func
 
 from dashboard.db import get_session
+from dashboard.jobs.dataforseo_keywords import STRIKING_MAX, STRIKING_MIN
 from dashboard.jobs.gsc import settled_through
 from dashboard.models import (
     AdsCampaignDaily,
     BlogArticle,
+    Competitor,
+    CompetitorMatch,
+    CompetitorPost,
+    CompetitorProduct,
     Ga4EventDaily,
     GscPageDaily,
     GscQueryDaily,
@@ -32,6 +38,7 @@ from dashboard.models import (
     KeywordMetric,
     Experiment,
     ExperimentProduct,
+    MatchStatus,
     ShopifyProduct,
 )
 
@@ -821,3 +828,257 @@ def coverage(today: date | None = None) -> dict:
         "settled_through": settled_through(today),
         "stale_days": (today - latest).days if latest else None,
     }
+
+
+# ── Competitors ─────────────────────────────────────────────────────
+
+
+def competitors(*, days: int = 90, today: date | None = None) -> dict:
+    """Everything the Competitors page shows, in one read.
+
+    Four questions, because they're the four a flooring retailer can act on:
+    what do they sell that we don't, who shows a price where we don't, what
+    are they pushing, and what are they writing about.
+
+    The price comparison covers **confirmed matches only**. A proposed match
+    is a guess, and a guess that reaches a price table becomes "they're
+    undercutting us on X" about a product that isn't X.
+    """
+    today = today or date.today()
+    since = datetime.combine(today - timedelta(days=days), datetime.min.time())
+
+    with get_session() as session:
+        sites = (
+            session.query(Competitor)
+            .order_by(Competitor.enabled.desc(), Competitor.name)
+            .all()
+        )
+        by_id = {c.id: c for c in sites}
+
+        counts = dict(
+            session.query(
+                CompetitorProduct.competitor_id, func.count(CompetitorProduct.id)
+            ).group_by(CompetitorProduct.competitor_id).all()
+        )
+        priced = dict(
+            session.query(
+                CompetitorProduct.competitor_id, func.count(CompetitorProduct.id)
+            )
+            .filter(CompetitorProduct.price_min > 0)
+            .group_by(CompetitorProduct.competitor_id)
+            .all()
+        )
+        post_counts = dict(
+            session.query(
+                CompetitorPost.competitor_id, func.count(CompetitorPost.id)
+            )
+            .filter(CompetitorPost.published_at >= since)
+            .group_by(CompetitorPost.competitor_id)
+            .all()
+        )
+
+        overview = []
+        for site in sites:
+            total = counts.get(site.id, 0)
+            with_price = priced.get(site.id, 0)
+            recent_posts = post_counts.get(site.id, 0)
+            overview.append({
+                "competitor": site,
+                "products": total,
+                "priced": with_price,
+                # The comparison that matters most for this store: ~94% of our
+                # own catalogue hides its price behind "call for price". A
+                # competitor showing prices on the same goods is winning the
+                # click before anyone picks up a phone.
+                "priced_pct": (with_price / total * 100) if total else 0.0,
+                "posts_in_window": recent_posts,
+                "posts_per_month": round(recent_posts / (days / 30.0), 1)
+                if days else 0.0,
+            })
+
+        # Our own equivalents, so every competitor number has something to be
+        # compared against rather than sitting on its own.
+        our_total = session.query(func.count(ShopifyProduct.id)).scalar() or 0
+        our_priced = (
+            session.query(func.count(ShopifyProduct.id))
+            .filter(ShopifyProduct.price_min > 0)
+            .scalar()
+        ) or 0
+        our_posts = (
+            session.query(func.count(BlogArticle.id))
+            .filter(BlogArticle.published_at >= since)
+            .scalar()
+        ) or 0
+
+        posts = (
+            session.query(CompetitorPost)
+            .order_by(
+                CompetitorPost.published_at.is_(None).asc(),
+                CompetitorPost.published_at.desc(),
+            )
+            .limit(40)
+            .all()
+        )
+
+        best = (
+            session.query(CompetitorProduct)
+            .filter(CompetitorProduct.best_seller_rank.isnot(None))
+            .order_by(CompetitorProduct.best_seller_rank.asc())
+            .limit(25)
+            .all()
+        )
+
+        # Confirmed matches, with both prices side by side.
+        confirmed = (
+            session.query(CompetitorMatch)
+            .filter(CompetitorMatch.status == MatchStatus.confirmed.value)
+            .all()
+        )
+        comparisons = _pair_up(session, confirmed, by_id, with_delta=True)
+        comparisons.sort(key=lambda c: (c["delta"] is None, -(c["delta"] or 0.0)))
+
+        pending = (
+            session.query(CompetitorMatch)
+            .filter(CompetitorMatch.status == MatchStatus.proposed.value)
+            .order_by(CompetitorMatch.score.desc())
+            .limit(30)
+            .all()
+        )
+        queue = _pair_up(session, pending, by_id, with_delta=False)
+
+        # Brands they carry and we don't — the assortment gap, and the
+        # cheapest question here to answer well.
+        our_vendors = {
+            (v or "").strip().lower()
+            for (v,) in session.query(ShopifyProduct.vendor).distinct()
+            if v
+        }
+        their_vendors = (
+            session.query(
+                CompetitorProduct.vendor,
+                func.count(CompetitorProduct.id),
+                func.min(CompetitorProduct.price_min),
+            )
+            .filter(CompetitorProduct.vendor.isnot(None))
+            .group_by(CompetitorProduct.vendor)
+            .order_by(func.count(CompetitorProduct.id).desc())
+            .all()
+        )
+        gaps = [
+            {"vendor": v, "products": n, "from_price": lo}
+            for v, n, lo in their_vendors
+            if (v or "").strip().lower() not in our_vendors
+        ][:25]
+
+    return {
+        "overview": overview,
+        "ours": {
+            "products": our_total,
+            "priced": our_priced,
+            "priced_pct": (our_priced / our_total * 100) if our_total else 0.0,
+            "posts_in_window": our_posts,
+            "posts_per_month": round(our_posts / (days / 30.0), 1) if days else 0.0,
+        },
+        "posts": posts,
+        "best_sellers": best,
+        "comparisons": comparisons,
+        "queue": queue,
+        "gaps": gaps,
+        "window_days": days,
+        "configured": bool(sites),
+    }
+
+
+def _pair_up(session, matches, by_id: dict, *, with_delta: bool) -> list[dict]:
+    """Attach both products (and optionally the price gap) to each match.
+
+    Batched rather than per-match lazy loads: the review queue is 30 rows and
+    the confirmed list grows without bound, so N+1 here would be the page's
+    slowest thing for no reason.
+    """
+    their_ids = [m.competitor_product_id for m in matches]
+    our_ids = [m.shopify_product_id for m in matches]
+    theirs_by_id = {
+        p.id: p
+        for p in session.query(CompetitorProduct).filter(
+            CompetitorProduct.id.in_(their_ids)
+        )
+    } if their_ids else {}
+    ours_by_id = {
+        p.id: p
+        for p in session.query(ShopifyProduct).filter(
+            ShopifyProduct.id.in_(our_ids)
+        )
+    } if our_ids else {}
+
+    out: list[dict] = []
+    for match in matches:
+        theirs = theirs_by_id.get(match.competitor_product_id)
+        ours = ours_by_id.get(match.shopify_product_id)
+        if theirs is None or ours is None:
+            continue
+        row = {
+            "match": match,
+            "theirs": theirs,
+            "ours": ours,
+            "competitor": by_id.get(theirs.competitor_id),
+        }
+        if with_delta:
+            # Our price is 0.00 for ~94% of the catalogue — hidden, not free.
+            # Reported as "hidden" rather than as a huge win, which is what a
+            # naive subtraction would call it.
+            hidden = ours.price_min <= 0
+            delta = None if hidden else round(ours.price_min - theirs.price_min, 2)
+            row["our_price_hidden"] = hidden
+            row["delta"] = delta
+            row["we_are_higher"] = bool(delta is not None and delta > 0)
+        out.append(row)
+    return out
+
+
+def our_terms_in(text: str, *, limit: int = 5, today: date | None = None) -> list[str]:
+    """Our own striking-distance search terms that appear in `text`.
+
+    Used when countering a competitor's post: the reply is only worth writing
+    on terms Google already associates with this site. Without that filter,
+    "counter this" just means writing about whatever they happened to write
+    about, which is how a content calendar fills up with articles that rank
+    for nothing.
+
+    Matched by whole phrase rather than by word overlap — "laminate" appearing
+    in both is not evidence, "laminate stair nosing" is.
+    """
+    today = today or date.today()
+    end = settled_through(today)
+    start = end - timedelta(days=27)
+    haystack = " " + re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower()) + " "
+    haystack = re.sub(r"\s+", " ", haystack)
+
+    with get_session() as session:
+        rows = (
+            session.query(
+                GscQueryDaily.query,
+                func.sum(GscQueryDaily.impressions).label("impressions"),
+                func.sum(GscQueryDaily.position * GscQueryDaily.impressions),
+            )
+            .filter(GscQueryDaily.date >= start, GscQueryDaily.date <= end)
+            .group_by(GscQueryDaily.query)
+            .order_by(func.sum(GscQueryDaily.impressions).desc())
+            .all()
+        )
+
+    out: list[str] = []
+    for query, impressions, weight in rows:
+        if not query:
+            continue
+        impressions = int(impressions or 0)
+        if impressions < 10:
+            continue
+        position = float(weight or 0.0) / impressions if impressions else 0.0
+        if not (STRIKING_MIN <= position <= STRIKING_MAX):
+            continue
+        if f" {query.strip().lower()} " in haystack:
+            out.append(query.strip())
+        if len(out) >= limit:
+            break
+    return out

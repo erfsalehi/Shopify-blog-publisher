@@ -1,0 +1,274 @@
+{% extends "base.html" %}
+{% block title %}Competitors{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Competitors</h1>
+  <span class="muted small">
+    {{ data.overview | length }} watched · last {{ data.window_days }} days
+  </span>
+</div>
+
+{% if not data.configured %}
+<div class="notice">
+  <strong>No competitors yet.</strong>
+  Add them on the <a href="/settings">Settings page</a> — a name and their
+  website is all that's needed. Everything below is discovered from their
+  public site: their catalogue, their prices, their blog, and their own
+  best-selling order.
+</div>
+{% else %}
+
+<p class="muted window-note">
+  Everything here comes from pages a browser can load, read at a browsing
+  pace. Most flooring retailers run Shopify, which publishes its whole
+  catalogue and blog for machines — no scraping, nothing hidden.
+  <strong>Prices are only compared for matches you have confirmed</strong>,
+  because a guessed match produces a confident claim about the wrong product.
+</p>
+
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Their catalogues</div>
+    <div class="card-value">{{ data.overview | sum(attribute='products') | int_ }}</div>
+    <div class="card-delta muted">ours: {{ data.ours.products | int_ }}</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Showing a price</div>
+    <div class="card-value">{{ data.overview | sum(attribute='priced') | int_ }}</div>
+    <div class="card-delta {{ 'bad' if data.ours.priced_pct < 20 }}">
+      ours: {{ '%.0f' | format(data.ours.priced_pct) }}% of catalogue
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Confirmed matches</div>
+    <div class="card-value">{{ data.comparisons | length | int_ }}</div>
+    <div class="card-delta muted">{{ data.queue | length }} awaiting review</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Assortment gaps</div>
+    <div class="card-value">{{ data.gaps | length | int_ }}</div>
+    <div class="card-delta muted">brands they carry, we don't</div>
+  </div>
+</section>
+
+<h2>Who they are</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Competitor</th><th class="n">Products</th><th class="n">Showing price</th>
+      <th class="n">Posts / month</th><th>Last checked</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in data.overview %}
+    <tr>
+      <td>
+        <a href="{{ row.competitor.base_url }}" target="_blank" rel="noopener nofollow">
+          {{ row.competitor.name }}</a>
+        {% if not row.competitor.enabled %}<span class="muted small">paused</span>{% endif %}
+        {% if row.competitor.last_error %}
+          <div class="muted small bad">{{ row.competitor.last_error }}</div>
+        {% endif %}
+      </td>
+      <td class="n">{{ row.products | int_ }}</td>
+      <td class="n">
+        {{ row.priced | int_ }}
+        <span class="muted small">({{ '%.0f' | format(row.priced_pct) }}%)</span>
+      </td>
+      <td class="n">{{ row.posts_per_month }}</td>
+      <td class="muted small">{{ row.competitor.last_checked_at | when or 'never' }}</td>
+    </tr>
+    {% endfor %}
+    <tr class="us">
+      <td><strong>D&amp;R Flooring (us)</strong></td>
+      <td class="n">{{ data.ours.products | int_ }}</td>
+      <td class="n">
+        {{ data.ours.priced | int_ }}
+        <span class="muted small">({{ '%.0f' | format(data.ours.priced_pct) }}%)</span>
+      </td>
+      <td class="n">{{ data.ours.posts_per_month }}</td>
+      <td class="muted small">—</td>
+    </tr>
+  </tbody>
+</table>
+
+{% if data.ours.priced_pct < 20 and data.overview | sum(attribute='priced') > 0 %}
+<div class="notice bad-box">
+  <strong>They show prices and we mostly don't.</strong>
+  {{ data.ours.priced | int_ }} of our {{ data.ours.products | int_ }} products
+  carry a visible price; the competitors above show
+  {{ data.overview | sum(attribute='priced') | int_ }}. A shopper comparing on
+  Google sees their number and our "call for price", and the click goes to the
+  number. That is what the
+  <a href="/experiments">show-price experiment</a> exists to measure.
+</div>
+{% endif %}
+
+{% if data.comparisons %}
+<h2>Price comparison <span class="muted small">confirmed matches only</span></h2>
+<table>
+  <thead>
+    <tr>
+      <th>Our product</th><th>Theirs</th><th>Competitor</th>
+      <th class="n">Ours</th><th class="n">Theirs</th><th class="n">Difference</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in data.comparisons %}
+    <tr>
+      <td>
+        {% if row.ours.online_url %}
+        <a href="{{ row.ours.online_url }}" target="_blank" rel="noopener">{{ row.ours.title }}</a>
+        {% else %}{{ row.ours.title }}{% endif %}
+      </td>
+      <td>
+        <a href="{{ row.theirs.url }}" target="_blank" rel="noopener nofollow">
+          {{ row.theirs.title }}</a>
+      </td>
+      <td class="muted small">{{ row.competitor.name if row.competitor }}</td>
+      <td class="n">
+        {% if row.our_price_hidden %}<span class="muted">hidden</span>
+        {% else %}${{ '%.2f' | format(row.ours.price_min) }}{% endif %}
+      </td>
+      <td class="n">${{ '%.2f' | format(row.theirs.price_min) }}</td>
+      <td class="n {{ 'bad' if row.we_are_higher }}">
+        {% if row.delta is none %}—
+        {% else %}{{ '%+.2f' | format(row.delta) }}{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if data.queue %}
+<h2>Match review <span class="muted small">{{ data.queue | length }} proposed</span></h2>
+<p class="muted small">
+  Matching flooring across retailers is genuinely hard — the same board is
+  sold under different series names, and only thickness, wear layer and AC
+  rating really identify it. So these are proposals with their reasoning
+  shown, and nothing reaches the price table until you confirm it. A rejection
+  is remembered and never proposed again.
+</p>
+<table>
+  <thead>
+    <tr><th>Theirs</th><th>Ours</th><th class="n">Score</th><th>Why</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for row in data.queue %}
+    <tr>
+      <td>
+        <a href="{{ row.theirs.url }}" target="_blank" rel="noopener nofollow">
+          {{ row.theirs.title }}</a>
+        <div class="muted small">
+          {{ row.competitor.name if row.competitor }} ·
+          ${{ '%.2f' | format(row.theirs.price_min) }}
+        </div>
+      </td>
+      <td>{{ row.ours.title }}</td>
+      <td class="n">{{ '%.2f' | format(row.match.score) }}</td>
+      <td class="muted small">{{ row.match.reason }}</td>
+      <td class="row-actions">
+        <form method="post" action="/competitors/match/{{ row.match.id }}" class="inline">
+          <input type="hidden" name="decision" value="confirmed">
+          <button type="submit" class="small-btn">Same product</button>
+        </form>
+        <form method="post" action="/competitors/match/{{ row.match.id }}" class="inline">
+          <input type="hidden" name="decision" value="rejected">
+          <button type="submit" class="small-btn muted">Not a match</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if data.best_sellers %}
+<h2>What's selling for them</h2>
+<p class="muted small">
+  Their own storefront's best-selling order. No competitor publishes traffic
+  or revenue, and no free source exposes it — this ordering is the closest
+  public signal there is to what actually moves, which makes it the best
+  guide to what to stock and what to price visibly.
+</p>
+<table>
+  <thead>
+    <tr><th class="n">#</th><th>Product</th><th>Brand</th><th class="n">Their price</th></tr>
+  </thead>
+  <tbody>
+    {% for p in data.best_sellers %}
+    <tr>
+      <td class="n">{{ p.best_seller_rank }}</td>
+      <td><a href="{{ p.url }}" target="_blank" rel="noopener nofollow">{{ p.title }}</a></td>
+      <td class="muted small">{{ p.vendor or '—' }}</td>
+      <td class="n">
+        {% if p.price_min > 0 %}${{ '%.2f' | format(p.price_min) }}
+        {% else %}<span class="muted">hidden</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if data.gaps %}
+<h2>Brands they carry that we don't</h2>
+<table>
+  <thead><tr><th>Brand</th><th class="n">Their products</th><th class="n">From</th></tr></thead>
+  <tbody>
+    {% for g in data.gaps %}
+    <tr>
+      <td>{{ g.vendor }}</td>
+      <td class="n">{{ g.products | int_ }}</td>
+      <td class="n">
+        {% if g.from_price and g.from_price > 0 %}${{ '%.2f' | format(g.from_price) }}
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if data.posts %}
+<h2>What they're publishing</h2>
+<p class="muted small">
+  Their posting cadence against ours is on the table above. What they write
+  about is which searches they intend to own — <strong>Counter this</strong>
+  queues a topic into the article pipeline, so the reply gets written the same
+  way every other article does.
+</p>
+<table>
+  <thead>
+    <tr><th>Published</th><th>Post</th><th>Competitor</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for post in data.posts %}
+    <tr>
+      <td class="muted small">{{ post.published_at | when or 'unknown' }}</td>
+      <td>
+        <a href="{{ post.url }}" target="_blank" rel="noopener nofollow">{{ post.title }}</a>
+        {% if post.summary %}<div class="muted small">{{ post.summary | truncate(160) }}</div>{% endif %}
+      </td>
+      <td class="muted small">{{ competitor_names.get(post.competitor_id, '—') }}</td>
+      <td class="row-actions">
+        {% if post.countered_at %}
+          <span class="muted small">queued {{ post.countered_at | when }}</span>
+        {% else %}
+        <form method="post" action="/competitors/post/{{ post.id }}/counter" class="inline">
+          <button type="submit" class="small-btn">Counter this</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endif %}
+
+{% include "_advisor.html" %}
+{% endblock %}

@@ -686,12 +686,28 @@ class ExperimentProduct(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class CompetitorPlatform(str, enum.Enum):
+    """How a competitor's site gives up its data.
+
+    Worth storing rather than re-probing: it decides which collector runs,
+    and it changes about never. `unknown` means the probe hasn't run;
+    `other` means it ran and found no machine-readable catalogue, which is a
+    different thing and shouldn't be retried every night as though it were
+    the first attempt.
+    """
+
+    unknown = "unknown"
+    shopify = "shopify"
+    other = "other"
+
+
 class Competitor(Base):
     """A competitor site the owner added in the app.
 
-    Nothing reads this until Phase 5. It exists now because the settings page
-    is a Phase 0 deliverable and a settings page with nothing interesting to
-    set is untestable.
+    The owner supplies name and base URL; everything else is discovered. Most
+    local flooring retailers run Shopify, which publishes its whole catalogue
+    at /products.json and its blog as Atom — no scraping, no parsing HTML
+    that changes next week. `platform` records which door was open.
     """
 
     __tablename__ = "competitor"
@@ -706,3 +722,177 @@ class Competitor(Base):
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    platform: Mapped[str] = mapped_column(
+        String(20), default=CompetitorPlatform.unknown.value
+    )
+    # Why the last collection attempt found nothing, if it found nothing.
+    # Kept on the competitor rather than only in the job log so the page can
+    # say "this one is not readable" next to the competitor it's about.
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    @property
+    def host(self) -> str:
+        """`drflooring.ca` — for display, and for building absolute URLs."""
+        raw = (self.base_url or "").strip().rstrip("/")
+        for prefix in ("https://", "http://"):
+            if raw.startswith(prefix):
+                raw = raw[len(prefix):]
+        return raw.split("/")[0]
+
+
+class CompetitorProduct(Base):
+    """One product in a competitor's catalogue, as of the last collection.
+
+    `first_seen` / `last_seen` rather than delete-and-reinsert, for the same
+    reason as `ShopifyProduct`: a product leaving a catalogue is a fact worth
+    keeping, and it's indistinguishable from a half-finished sync if the row
+    just disappears.
+
+    Price lives here as the *current* price and in `CompetitorProductPrice`
+    as history. Duplicated deliberately — every list view wants today's
+    number, and joining to a history table for it would make the common read
+    the expensive one.
+    """
+
+    __tablename__ = "competitor_product"
+    __table_args__ = (
+        UniqueConstraint("competitor_id", "handle", name="uq_competitor_handle"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    competitor_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+
+    # Their own identifier where one exists (Shopify's numeric product id),
+    # else the URL path. Only unique within one competitor, hence the
+    # composite constraint above.
+    handle: Mapped[str] = mapped_column(String(400), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    title: Mapped[str] = mapped_column(String(600), nullable=False)
+    vendor: Mapped[str | None] = mapped_column(String(200), index=True, nullable=True)
+    product_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    url: Mapped[str | None] = mapped_column(String(800), nullable=True)
+
+    price_min: Mapped[float] = mapped_column(Float, default=0.0)
+    price_max: Mapped[float] = mapped_column(Float, default=0.0)
+    currency: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    # Their publish date, when the feed gives one. A competitor's recent
+    # additions say what they're betting on this season.
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Position in their best-selling collection, 1 = best seller. Null until
+    # the best-seller job has run. This is the closest thing to their sales
+    # data that exists publicly.
+    best_seller_rank: Mapped[int | None] = mapped_column(Integer, index=True)
+    best_seller_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    last_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+
+
+class CompetitorProductPrice(Base):
+    """A competitor product's price on one day.
+
+    One row per product per day, upserted — the same shape as every other
+    snapshot table here, and for the same reason: "are they discounting?" is
+    a question about a line, not a number.
+    """
+
+    __tablename__ = "competitor_product_price"
+    __table_args__ = (
+        UniqueConstraint(
+            "competitor_product_id", "date", name="uq_competitor_price_day"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    competitor_product_id: Mapped[int] = mapped_column(
+        Integer, index=True, nullable=False
+    )
+    date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    price_min: Mapped[float] = mapped_column(Float, default=0.0)
+    price_max: Mapped[float] = mapped_column(Float, default=0.0)
+    available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    best_seller_rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class CompetitorPost(Base):
+    """A blog post on a competitor's site.
+
+    The point isn't to read them, it's to see the shape: how often they
+    publish, and about what. A competitor posting weekly about "laminate vs
+    vinyl in Langley" is telling you which searches they intend to own.
+    """
+
+    __tablename__ = "competitor_post"
+    __table_args__ = (
+        UniqueConstraint("competitor_id", "url", name="uq_competitor_post_url"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    competitor_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+
+    url: Mapped[str] = mapped_column(String(800), nullable=False)
+    title: Mapped[str] = mapped_column(String(600), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime, index=True, nullable=True
+    )
+
+    # Set once the owner has queued a reply article, so the "Counter this"
+    # button can't be pressed twice and the page can show what's already
+    # answered.
+    countered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    countered_topic: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class MatchStatus(str, enum.Enum):
+    proposed = "proposed"
+    confirmed = "confirmed"
+    rejected = "rejected"
+
+
+class CompetitorMatch(Base):
+    """"Their product X is our product Y" — proposed by heuristics, decided
+    by the owner.
+
+    Matching flooring SKUs across brands is genuinely hard: the same board is
+    sold as different series names by different retailers, and the only
+    reliable discriminators (thickness, wear layer, AC rating) are buried in
+    free text. So the machine proposes and scores, and the owner confirms
+    once. A confirmed match persists and is never re-proposed.
+
+    `rejected` is kept rather than deleted for exactly that reason — a
+    deleted rejection is a proposal the next run makes again.
+    """
+
+    __tablename__ = "competitor_match"
+    __table_args__ = (
+        UniqueConstraint(
+            "competitor_product_id", "shopify_product_id", name="uq_competitor_match"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    competitor_product_id: Mapped[int] = mapped_column(
+        Integer, index=True, nullable=False
+    )
+    shopify_product_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+
+    status: Mapped[str] = mapped_column(
+        String(20), default=MatchStatus.proposed.value, index=True
+    )
+    # 0..1. Not a probability — a heuristic sum, useful only for ordering the
+    # review queue so the obvious matches are confirmed first.
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    # Which signals fired, so the review queue can show its working rather
+    # than asking the owner to trust a number.
+    reason: Mapped[str | None] = mapped_column(String(400), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
