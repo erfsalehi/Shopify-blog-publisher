@@ -2,6 +2,7 @@
 
 Commands map to the pipeline's operational surface:
   init-db       create tables
+  migrate-articles  copy articles into another database (local -> Neon)
   run-article   draft one topic now and sync it to Linear (supports --dry-run)
   run-calendar  weekly topic-queue refresh (Content Calendar agent)
   run-daily     draft every calendar entry due today
@@ -65,6 +66,54 @@ def init_db_cmd() -> None:
         # Worth reporting: it means the schema had drifted from the code, and
         # every insert using these labels was failing until now.
         console.print(f"[yellow]Added missing enum labels: {', '.join(added)}[/yellow]")
+
+
+@app.command("migrate-articles")
+def migrate_articles_cmd(
+    to_file: str = typer.Option(
+        ...,
+        "--to-file",
+        help="Path to a file containing ONLY the destination database URL.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Report what would be copied; write nothing."
+    ),
+) -> None:
+    """Copy articles and their revisions into another database.
+
+    For the deployed Control Center, which reads Neon rather than the local
+    data/pipeline.db. Re-runnable: it copies what's missing and leaves the
+    rest alone.
+
+    The destination is read from a *file* rather than an argument on purpose.
+    A Postgres URL carries its own password, and a command line ends up in
+    shell history, in `ps` output, and in the terminal scrollback of whoever
+    was watching.
+    """
+    from pathlib import Path
+
+    from blog_pipeline.migrate import copy_articles
+
+    url = Path(to_file).read_text(encoding="utf-8").strip()
+    if not url:
+        console.print(f"[red]{escape(to_file)} is empty.[/red]")
+        raise typer.Exit(1)
+
+    source = get_settings().database_url
+    if url == source:
+        # Copying a database onto itself is a no-op at best; more likely it
+        # means --to-file points at the wrong thing.
+        console.print("[red]Destination is the same database as the source.[/red]")
+        raise typer.Exit(1)
+
+    try:
+        report = copy_articles(url, dry_run=dry_run)
+    except Exception as e:  # noqa: BLE001 - surfaced to the operator
+        console.print(_error(e))
+        raise typer.Exit(1)
+
+    prefix = "[yellow]Dry run[/yellow] — " if dry_run else "[green]Copied[/green] — "
+    console.print(prefix + escape(report.summary()))
 
 
 @app.command("serve")

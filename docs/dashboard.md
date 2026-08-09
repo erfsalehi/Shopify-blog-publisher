@@ -548,9 +548,26 @@ separate SQLite files and the pipeline owns its own schema). The two share no
 table name; `test_the_two_schemas_can_share_one_database` is what keeps that
 true, since neither package imports the other's models.
 
-Note this creates the pipeline's schema, not its data — the articles in the
-local `data/pipeline.db` are not migrated, so the deployed Blog page counts
-only what the pipeline writes to Neon from now on.
+That creates the pipeline's schema, not its data. To move the articles
+themselves across:
+
+```bash
+blog-pipeline migrate-articles --to-file neon-url.txt --dry-run
+```
+
+Drop the `--dry-run` to write. `--to-file` holds the destination URL and
+nothing else — a Postgres URL carries its own password, and an argument on a
+command line ends up in shell history and in `ps`. Delete the file afterwards.
+
+It copies `article` and `article_revision` only (the two tables
+`jobs/blog_articles.py` reads), keeps their primary keys so a revision stays
+attached to its own article, and re-runs safely — it tops up what's missing
+rather than duplicating. `search_performance` is left behind deliberately:
+the dashboard syncs its own `gsc_*` tables from the API, so 30,000 rows of a
+second opinion would buy nothing.
+
+The pipeline still runs locally and still writes to `data/pipeline.db`, so
+re-run this whenever the deployed Blog page should catch up.
 
 **Access.** The app was local-only by design; reachability *was* the access
 control. Public means that's gone, so `DASHBOARD_PASSWORD` gates every route

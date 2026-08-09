@@ -45,3 +45,5 @@ keys/
 service-account*.json
 
 .vercel
+neon-url.txt
+*-url.txt
