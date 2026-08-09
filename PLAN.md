@@ -43,7 +43,14 @@ not a rewrite.
 
 ---
 
-## Phase 0 — Foundation
+## Phase 0 — Foundation ✅ built
+
+Shipped as `src/dashboard/` — see [docs/dashboard.md](docs/dashboard.md).
+`python -m dashboard` serves on 127.0.0.1:8600. Two deviations from the stack
+below, both to avoid committing downloaded JS bundles to a repo on a machine
+with a flaky proxy: charts are **server-rendered inline SVG** rather than
+Chart.js, and the one interactive control uses ~50 lines of vanilla `fetch`
+rather than htmx. Everything else is as written.
 
 **Stack**
 
@@ -68,11 +75,32 @@ not a rewrite.
 3. Job-run log table + a page showing last run / status / errors for every
    job (essential given the proxy).
 
-**Milestone:** open the app, see yesterday's GSC totals from the DB.
+**Milestone:** open the app, see yesterday's GSC totals from the DB. ✅
+First real backfill: 179 days, 140,852 per-URL rows, 27 API calls, 93s. Second
+run re-fetched only the restatement window: 3 calls, 10s, zero duplicate rows.
 
 ---
 
-## Phase 1 — Monitoring dashboard
+## Phase 1 — Monitoring dashboard — ✅ built
+
+All four pages (Site overview, Products with the SEO-pilot cohort view, Blog
+posts with decay flags, Alerts v1) and all syncs. Alerts notify via the
+already-configured Slack webhook rather than a Windows toast — a toast is gone
+when dismissed and invisible when the machine is locked, which is most of the
+time this runs. See [docs/dashboard.md](docs/dashboard.md).
+
+Two measured corrections to the assumptions below:
+
+- **`call_for_price_click` does not exist** in the GA4 property — it has never
+  fired. The events that do: `whatsapp_click` (45), `call_click` (41),
+  `directions_click` (16), and `phone_call` (24, but it stopped around
+  2026-07-17 — worth checking why).
+- **`click_phone_number` is an exact duplicate of `call_click`** (identical
+  counts on all 26 active days — two GTM tags on one click). Counting both
+  doubles every phone conversion, so only `call_click` is counted.
+- The conversion tags only start on **2026-07-04**, so any comparison reaching
+  further back measures when tracking was installed. The Ads page says so
+  rather than rendering the resulting 418% rise as good news.
 
 **Data syncs (daily)**
 
@@ -102,7 +130,29 @@ not a rewrite.
 
 ---
 
-## Phase 2 — Blog management
+## Phase 2 — Blog management — ✅ built
+
+Blog list plus a per-article page with preview → diff → approve → publish.
+Two things below turned out differently:
+
+- **"Approve" publishes the previewed HTML, not a second run.** Re-running
+  `run_refresh` on approval would call the model again and publish something
+  the owner never read — the change summary would still say "shortened the
+  intro" and the article would be different. The proposal's HTML is stored and
+  that is what gets written, with all three guards re-checked at apply time
+  against the *current* live body: unchanged-since-preview, no dropped assets,
+  no leaked `[IMAGE - ...]` marker.
+- **The `$0.00` cost is not an instrumentation bug.** `llm.MODEL_RATES` is
+  empty on purpose (see its comment): AI Studio's free tier is rate-limited,
+  not billed, so zero dollars is the correct figure. The genuine gap was that
+  `CostTracker` measured input/output tokens and threw them away —
+  `run_refresh` now returns them and each proposal records them, since tokens
+  against the daily cap are the resource actually constrained.
+
+Two small additive changes to `blog_pipeline` were needed:
+`run_refresh(only_ids=...)` to target one named article (bypassing the
+selector cooldown, which is a scheduling heuristic and not a safety guard),
+and `original_html`/`proposed_html` on dry-run results so a diff can be shown.
 
 UI over the existing pipeline functions:
 
@@ -118,7 +168,40 @@ Low risk, low effort: no new external integrations.
 
 ---
 
-## Phase 3 — Experiments (A/B testing)
+## Phase 3 — Experiments (A/B testing) — ✅ framework built
+
+`/experiments`: create, matched controls, freeze baseline, apply, verdict.
+Scoring is difference-in-differences as described below, with significance
+from a **permutation test** rather than a t-test — with 10 products against
+50 there is no reason to believe per-product deltas are normally distributed,
+and a t-test's p-value would carry more confidence than the data supports.
+Shuffling group labels 5,000 times assumes nothing and needs no scipy. Below
+5 products per group it refuses to give a verdict at all.
+
+The `show-price` prerequisite is written up in
+[docs/show-price.md](docs/show-price.md), including the exact patch for the
+live theme's `sections/main-product.liquid` (read from the running theme, so
+it matches). Three findings from that work:
+
+- **Inventory tracking is off store-wide** (`tracksInventory: false`, all
+  2,786 products report 0) while `availableForSale` is true. So the markup
+  takes availability from `product.available`, never a quantity — quoting the
+  count would mark every product OutOfStock, which is worse than no markup.
+- **47 accessories already carry real prices** ($12–$30 reducers, stair
+  noses, T-mouldings), so the first `show-price` set needs only tagging, no
+  admin price entry. `python -m dashboard.tools.show_price_candidates` lists
+  them.
+- **One product is priced $0.39** (Underlay - Memory Foam Vinyl Underlayment)
+  — almost certainly per-square-foot or an error. Excluded from the
+  recommended set; publishing it as a product price would be wrong in public.
+
+Also confirmed: the custom app **does** hold `write_products`, so title and
+description experiments can be applied by the app. `write_theme_code` is
+granted too, but the theme patch is left for a human to paste into a
+duplicated theme — a live theme edit is not something this app should do
+unattended.
+
+## Phase 3 — original design notes
 
 **Honest framing baked into the design:** per-visitor split tests are not
 possible here — search shows one title to everyone, and Shopify can't show
@@ -161,7 +244,25 @@ prior session, not yet built):
 
 ## Phase 4 — Google Ads (both routes)
 
-### Route A: Windsor MCP (reporting, fast)
+### Route A: Windsor (reporting, fast) — ✅ built, needs a key
+
+Built as the `ads_windsor` job. Two corrections to what's written below,
+both found on 2026-08-05 with the account connected:
+
+- **The MCP is not the integration.** Windsor's MCP connector is a tool inside
+  Claude's session; a scheduled job on this machine cannot reach it. The job
+  uses Windsor's REST API (`connectors.windsor.ai`) and needs
+  `WINDSOR_API_KEY` in `.env`, from onboard.windsor.ai/app/data-preview.
+- **Windsor is not reporting-only.** It exposes write actions on Google Ads —
+  `pause_campaign`, `enable_campaign`, `set_campaign_budget`,
+  `push_negative_keywords`, `set_target_cpa`, `set_max_cpc` and more. So the
+  Phase 4B management feature set is reachable today. The direct API is still
+  worth having (free, no vendor in the path), but it is no longer a blocker
+  for management.
+
+Account confirmed connected: D&R Flooring, `690-753-6043`. Three live
+campaigns — `Leads-Performance Max- July 25`, `Store Goal PMax` (both PMax)
+and `phone camp aug 2025` (Search).
 
 - Windsor.ai connector; the owner connects their Google Ads account in
   Windsor's UI, then the MCP exposes spend/clicks/conversions.
@@ -226,6 +327,27 @@ Two collectors, one comparison engine, all config in-app.
 
 ### Collector B: Google SERP, first 2 pages — free
 
+> **⚠️ This route is closed as of 2026-08-05 — verify before building.**
+> Google's own docs now state: *"The Custom Search JSON API is closed to new
+> customers"*, and existing customers *"have until January 1, 2027 to
+> transition to an alternative solution"*
+> ([source](https://developers.google.com/custom-search/v1/overview)). A new
+> `CSE_API_KEY` almost certainly cannot be obtained, and even a grandfathered
+> one dies in under 18 months — not worth building against.
+>
+> **Two-minute check before writing this off:** in Cloud project
+> `ytsearch-495619`, try APIs & Services → Library → "Custom Search API" →
+> Enable. If the project is grandfathered it will enable; if it's closed the
+> option won't be available.
+>
+> **Recommended fallback:** ship Phase 5 as **Collector A only**. It was
+> always the more reliable half — named competitors, direct fetch, JSON-LD
+> extraction, human-confirmed product matching — and the owner already
+> supplies the competitor list from the settings page. What's lost is
+> *discovery* of competitors we didn't name, which for a local flooring
+> market is a short, stable, already-known list. A paid SERP API remains the
+> upgrade path and remains out of scope.
+
 - **Google Programmable Search Engine (Custom Search JSON API)** — free
   100 queries/day, legitimate and stable. Setup (owner, ~10 min):
   1. programmablesearchengine.google.com → create engine → "Search the
@@ -275,14 +397,30 @@ Owner actions that gate later phases — start now, they cost calendar time
 not build time:
 
 1. Google Ads MCC + developer token application (Phase 4B).
-2. Programmable Search Engine + API key (Phase 5).
+2. ~~Programmable Search Engine + API key (Phase 5).~~ **Dead — the Custom
+   Search JSON API closed to new customers and shuts down 2027-01-01. See the
+   warning box in Phase 5.** Replaced by: name the competitor sites on the
+   settings page, which needs no key and no calendar time.
 3. Decide the first `show-price` product set — recommended: accessories
    (underlay, stair nose, transitions, moulding; $25–30 commodity items
    where a visible price wins the click).
 
+## Deployed — ✅ built
+
+Superseded the "no hosting" non-goal below. The dashboard runs at
+<https://dr-flooring-control-center.vercel.app> on Vercel + Neon Postgres,
+gated by a single owner password, with the sync jobs running as Vercel Cron
+against `/api/cron/<job>` instead of the in-process scheduler (which cannot
+survive in a serverless function). It still runs locally on loopback exactly
+as before, unchanged and unauthenticated. Full write-up:
+[docs/dashboard.md](docs/dashboard.md#running-on-vercel).
+
+Still single-user — one shared password, not a users table for one person.
+
 ## Non-goals
 
-- No hosting/remote access, no multi-user auth.
+- ~~No hosting/remote access~~ — now deployed, see above. Still no
+  multi-user auth.
 - No paid SERP/data subscriptions.
 - No per-visitor split testing (impossible in this stack; see Phase 3).
 - No fabricated structured data, ever — schema must match the visible page.

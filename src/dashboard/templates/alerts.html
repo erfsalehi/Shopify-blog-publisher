@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Alerts{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Alerts</h1>
+  <span class="muted small">{{ open_count }} open</span>
+  <form method="get" class="inline-form">
+    <label>Show
+      <select name="show" onchange="this.form.submit()">
+        <option value="open" {{ 'selected' if show == 'open' }}>Open only</option>
+        <option value="all" {{ 'selected' if show == 'all' }}>Everything recent</option>
+      </select>
+    </label>
+  </form>
+</div>
+
+<p class="muted window-note">
+  Rules are evaluated after every sync, and again on a schedule as a backstop.
+  Nothing is checked against unsettled days — every source here restates its
+  most recent data, so a rule reading the last three days would fire on
+  Google's bookkeeping every morning, and an alert that cries wolf daily gets
+  muted within a week, taking the real ones with it.
+</p>
+
+<section class="panel">
+  <h2>Inbox</h2>
+  {% if items %}
+  <table>
+    <thead>
+      <tr>
+        <th></th><th>Alert</th><th class="num">Seen</th><th>Last</th><th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for a in items %}
+      <tr>
+        <td><span class="pill {{ 'error' if a.severity == 'high' else 'warn' }}">
+          {{ a.severity }}
+        </span></td>
+        <td>
+          <div class="job-name">
+            {% if a.link %}<a href="{{ a.link }}">{{ a.title }}</a>
+            {% else %}{{ a.title }}{% endif %}
+          </div>
+          <div class="muted small">{{ a.body }}</div>
+        </td>
+        <td class="num">{{ a.times_seen }}</td>
+        <td class="nowrap muted small">{{ a.last_seen | when }}</td>
+        <td>
+          {% if a.acknowledged_at %}
+          <span class="muted small">acknowledged</span>
+          {% else %}
+          <form method="post" action="/alerts/{{ a.id }}/ack">
+            <button type="submit" class="small-btn">Acknowledge</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">
+    A condition that persists shows as one row with a rising <em>seen</em>
+    count, not one row per night. Acknowledging clears it; if the condition
+    comes back after that, it reopens.
+  </p>
+  {% else %}
+  <p class="muted">
+    {% if show == 'open' %}Nothing open. {% else %}No alerts recorded yet.{% endif %}
+  </p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Rules</h2>
+  <p class="muted small">
+    Thresholds are rows, not code — a threshold that needs an edit-and-restart
+    to tune is a threshold that stays wrong.
+    {% if slack_ready %}
+      Slack notifications use the webhook already configured for the pipeline.
+    {% else %}
+      <span class="warn-text">SLACK_WEBHOOK_URL isn't set</span>, so notify
+      only logs. The inbox above is the system of record either way.
+    {% endif %}
+  </p>
+  <form method="post" action="/alerts/rules">
+    <table>
+      <thead>
+        <tr>
+          <th>On</th><th>Rule</th><th class="num">Threshold</th>
+          <th>Notify</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for rule in rules %}
+        {% set spec = kinds.get(rule.kind) %}
+        <tr>
+          <td>
+            <input type="checkbox" name="enabled-{{ rule.id }}"
+                   {{ 'checked' if rule.enabled }}>
+          </td>
+          <td>
+            <div class="job-name">{{ rule.name }}</div>
+            <div class="muted small">{{ spec.help if spec else 'Unknown rule kind.' }}</div>
+          </td>
+          <td class="num nowrap">
+            {% if spec and spec.unit %}
+            <input type="number" step="any" style="width:90px"
+                   name="threshold-{{ rule.id }}" value="{{ rule.threshold }}">
+            <span class="muted small">{{ spec.unit }}</span>
+            {% else %}
+            <span class="muted small">n/a</span>
+            {% endif %}
+          </td>
+          <td>
+            <input type="checkbox" name="notify-{{ rule.id }}"
+                   {{ 'checked' if rule.notify }}>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="actions" style="margin-top:14px">
+      <button type="submit" class="primary">Save rules</button>
+    </div>
+  </form>
+</section>
+{% endblock %}

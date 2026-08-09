@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Control Center{% endblock %} · D&amp;R Flooring</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>🪵</text></svg>">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="/">D&amp;R <span>Control Center</span></a>
+  <nav>
+    <a href="/" class="{{ 'active' if nav == 'overview' }}">Overview</a>
+    <a href="/products" class="{{ 'active' if nav == 'products' }}">Products</a>
+    <a href="/keywords" class="{{ 'active' if nav == 'keywords' }}">Keywords</a>
+    <a href="/blog" class="{{ 'active' if nav == 'blog' }}">Blog</a>
+    <a href="/experiments" class="{{ 'active' if nav == 'experiments' }}">Experiments</a>
+    <a href="/ads" class="{{ 'active' if nav == 'ads' }}">Ads</a>
+    <a href="/alerts" class="{{ 'active' if nav == 'alerts' }}">
+      Alerts{% if open_alerts %}<span class="badge">{{ open_alerts }}</span>{% endif %}
+    </a>
+    <a href="/jobs" class="{{ 'active' if nav == 'jobs' }}">Jobs</a>
+    <a href="/settings" class="{{ 'active' if nav == 'settings' }}">Settings</a>
+  </nav>
+  <div class="freshness">
+    {% if coverage.latest_day %}
+      <span class="dot {{ 'warn' if coverage.stale_days and coverage.stale_days > 5 else 'ok' }}"></span>
+      Data through {{ coverage.latest_day }}
+    {% else %}
+      <span class="dot idle"></span> No data yet
+    {% endif %}
+  </div>
+  {% if auth_required %}
+  <form method="post" action="/logout" style="margin-left:12px;">
+    <button type="submit" class="small-btn">Sign out</button>
+  </form>
+  {% endif %}
+</header>
+
+<main>
+  {% block content %}{% endblock %}
+</main>
+
+<footer>
+  Local only · reads the dashboard database, never a live API ·
+  <a href="/jobs">job log</a>
+</footer>
+<script src="/static/app.js"></script>
+</body>
+</html>

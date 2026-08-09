@@ -1,0 +1,19 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60,
+      "excludeFiles": "{tests/**,docs/**,.venv/**,data/**,keys/**,prompts/**,.github/**,*.md,PLAN.md,README.md,.env*}"
+    }
+  },
+  "crons": [
+    { "path": "/api/cron/shopify_catalog", "schedule": "0 10 * * *" },
+    { "path": "/api/cron/gsc_daily", "schedule": "0 11 * * *" },
+    { "path": "/api/cron/dataforseo_keywords", "schedule": "0 12 * * *" },
+    { "path": "/api/cron/ga4_daily", "schedule": "0 13 * * *" },
+    { "path": "/api/cron/ads_windsor", "schedule": "0 14 * * *" },
+    { "path": "/api/cron/blog_articles", "schedule": "0 15 * * *" },
+    { "path": "/api/cron/alerts", "schedule": "0 17 * * *" },
+    { "path": "/api/cron/advisor_weekly", "schedule": "0 18 * * *" }
+  ]
+}

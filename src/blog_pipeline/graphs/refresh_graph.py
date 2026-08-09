@@ -266,34 +266,68 @@ def _sync_refresh_to_linear(
         return None
 
 
+def select_named_articles(session, ids: set[int]) -> list[Article]:
+    """Exactly these live articles, cooldown ignored.
+
+    The cooldown exists so the weekly cron doesn't rewrite the same post every
+    week — it is a scheduling heuristic, not a safety guard. When a person
+    names an article, silently returning nothing because it was refreshed
+    recently is a UI that appears broken. The actual guards (snapshot before
+    write, refuse-on-asset-loss, dry-run by default) all still apply.
+    """
+    rows = {
+        a.id: a
+        for a in session.query(Article)
+        .filter(Article.id.in_(ids), Article.shopify_article_id.isnot(None))
+        .all()
+    }
+    return [rows[i] for i in ids if i in rows]
+
+
 def run_refresh(
     *,
     older_than_months: int = 12,
     limit: int = 5,
     dry_run: bool = True,
     skip_ids: set[int] | None = None,
+    only_ids: set[int] | None = None,
 ) -> dict:
     """Refresh up to `limit` stale live posts. dry_run=True reports what would
     change without touching Shopify. `skip_ids` leaves specific articles
-    alone — see select_decaying_articles."""
+    alone — see select_decaying_articles.
+
+    `only_ids` refreshes exactly the articles named and nothing else, which is
+    what a person clicking a button on one article means. It bypasses the
+    selection heuristics entirely, cooldown included; see
+    select_named_articles.
+
+    On a dry run each result also carries `original_html` and `proposed_html`,
+    so a caller can show what would change rather than only a summary of it.
+    Omitted on a real run, where the proposal has already become the page.
+    """
     settings = get_settings()
     cost = CostTracker()
     results: list[dict] = []
 
     with get_session() as session:
-        # Measured decay when Search Console has two windows to compare;
-        # oldest-first otherwise. Age is only ever a stand-in for "has stopped
-        # working", and it's a poor one — a post can be old and still ranking.
-        candidates = select_decaying_articles(
-            session, limit=limit, skip_ids=skip_ids
-        )
-        strategy = "decay"
-        if not candidates:
-            strategy = "age"
-            candidates = select_stale_articles(
-                session, older_than_months=older_than_months, limit=limit,
-                skip_ids=skip_ids,
+        if only_ids:
+            strategy = "named"
+            candidates = select_named_articles(session, only_ids)
+        else:
+            # Measured decay when Search Console has two windows to compare;
+            # oldest-first otherwise. Age is only ever a stand-in for "has
+            # stopped working", and a poor one — a post can be old and still
+            # ranking.
+            candidates = select_decaying_articles(
+                session, limit=limit, skip_ids=skip_ids
             )
+            strategy = "decay"
+            if not candidates:
+                strategy = "age"
+                candidates = select_stale_articles(
+                    session, older_than_months=older_than_months, limit=limit,
+                    skip_ids=skip_ids,
+                )
         # Detach what we need now: the Shopify/LLM calls below are slow, and
         # holding rows across them would pin the transaction open for minutes.
         targets = [
@@ -446,14 +480,20 @@ def run_refresh(
                     dry_run=dry_run,
                 )
                 refreshed += 1
-                results.append(
-                    {
-                        **entry,
-                        "outcome": "refreshed",
-                        "changes": result.change_summary,
-                        "image_suggestions": image_suggestions,
-                    }
-                )
+                record = {
+                    **entry,
+                    "outcome": "refreshed",
+                    "changes": result.change_summary,
+                    "image_suggestions": image_suggestions,
+                }
+                if dry_run:
+                    # Only on a dry run: this is the proposal a human is being
+                    # asked to approve, and without the bodies there is nothing
+                    # to show them but a summary of changes they can't check.
+                    # On a real run it's already the live page.
+                    record["original_html"] = body
+                    record["proposed_html"] = body_out
+                results.append(record)
             except Exception as e:
                 # One bad article must not abort the batch: its snapshot is
                 # already committed, and the remaining candidates are
@@ -471,6 +511,13 @@ def run_refresh(
         "skipped": skipped,
         "failed": failed,
         "cost_usd": round(cost.usd, 4),
+        # Tokens, not just dollars. On AI Studio's free tier MODEL_RATES is
+        # empty by design — the tier is rate-limited rather than billed — so
+        # cost_usd is correctly 0.00 and tells you nothing about how close a
+        # run came to the daily cap. The tracker has always measured these;
+        # they were simply thrown away before reaching a caller.
+        "input_tokens": cost.input_tokens,
+        "output_tokens": cost.output_tokens,
         "dry_run": dry_run,
         "selected_by": strategy,
         "articles": results,

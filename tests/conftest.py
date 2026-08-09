@@ -40,3 +40,25 @@ def _isolated_settings(monkeypatch, tmp_path):
     config.get_settings.cache_clear()
     session._engine = None
     session._SessionLocal = None
+
+
+@pytest.fixture
+def dashboard_db(monkeypatch, tmp_path):
+    """A fresh, empty dashboard database for one test.
+
+    Not autouse: only the dashboard tests need it, and importing `dashboard`
+    into every pipeline test would make the suite depend on the [dashboard]
+    extra being installed.
+    """
+    import dashboard.config as dash_config
+    import dashboard.db as dash_db
+
+    db_path = tmp_path / "dashboard.db"
+    monkeypatch.setenv("DASHBOARD_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("DASHBOARD_ENABLE_SCHEDULER", "false")
+    monkeypatch.setitem(dash_config.DashboardSettings.model_config, "env_file", None)
+
+    dash_db.reset_engine()
+    dash_db.init_db()
+    yield db_path
+    dash_db.reset_engine()

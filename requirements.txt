@@ -1,0 +1,56 @@
+# Vercel's dependency list for api/index.py. Deliberately NOT
+# `pip install -e .` / pyproject.toml's base dependencies — those include
+# langgraph, fastembed (+ its ~45MB onnxruntime), textstat, rich and typer,
+# none of which any code path reachable from the dashboard imports (verified
+# by tracing every `from blog_pipeline...` import the dashboard package makes,
+# transitively, before writing this list). Installing the full pipeline
+# dependency set here would still fit Vercel's bundle limit, but there is no
+# reason to ship 150+MB of unreachable code to a serverless function on every
+# cold start. If a future dashboard feature imports something from
+# blog_pipeline.agents.* or blog_pipeline.dedup that isn't already covered
+# below, add exactly that package here rather than switching to the full set.
+
+fastapi>=0.110
+starlette>=0.37
+jinja2>=3.1
+python-multipart>=0.0.9
+itsdangerous>=2.1
+
+sqlalchemy>=2.0.30
+psycopg[binary]>=3.1
+
+httpx>=0.27
+pydantic>=2.7
+pydantic-settings>=2.3
+python-dotenv>=1.0
+
+# Google Search Console / GA4 auth (blog_pipeline.tools.search_console,
+# blog_pipeline.tools.analytics) — REST over httpx, only the token exchange
+# needs these.
+google-auth>=2.30
+requests>=2.32
+
+# blog_pipeline.llm / blog_pipeline.agents.refresh (the advisor, and the
+# refresh-preview diff) — Gemini via AI Studio's OpenAI-compatible endpoint.
+langchain-core>=0.3.15
+langchain-openai>=0.2.8
+openai>=1.0
+
+# dashboard/diffing.py's block-level article diff.
+beautifulsoup4>=4.12
+
+# APScheduler is imported at module load by dashboard/scheduler.py even
+# though it's never started under Vercel (see
+# DashboardSettings.enable_scheduler_effective) — web.py imports scheduler.py
+# unconditionally, so this has to be installed for the import to succeed even
+# though .start() is never called in this environment.
+apscheduler>=3.10
+
+# blog_pipeline.notify (Slack webhook posts, used by dashboard/alerts.py
+# whenever an alert rule has notify=True) imports rich.console.Console at
+# module level. That import is only ever exercised if a rule actually fires
+# with notifications on, which is exactly the kind of path that's easy to
+# leave out of a hand-picked list and only discover missing in production —
+# caught here by tracing every reachable `from blog_pipeline...` import
+# rather than only the ones exercised by a typical local test run.
+rich>=13.7

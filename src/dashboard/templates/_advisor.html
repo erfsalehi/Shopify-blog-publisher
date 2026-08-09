@@ -1,0 +1,105 @@
+{# Shared advisor panel, included by every tab that sets `advisor_scope`.
+
+   Cached deliberately: the free Gemini tier is rate-limited, and advice that
+   changes on every page refresh is advice nobody trusts. The note's age is
+   always shown so stale advice can't pass for current.
+
+   Guarded on the scope so an accidental include on a page without one renders
+   nothing instead of an empty panel wired to a route that would 404. #}
+{% if advisor_scope %}
+<section class="panel advisor">
+  <div class="advisor-head">
+    <h2>Advisor <span class="muted">· {{ advisor_scope }}</span></h2>
+    <div class="advisor-actions">
+      {% if advisor_note and not advisor_note.error %}
+      <span class="muted small">generated {{ advisor_note.created_at | when }}</span>
+      {% endif %}
+      <form method="post" action="/advisor/{{ advisor_scope }}/generate" class="advisor-form">
+        <button type="submit" class="advisor-btn">
+          {{ 'Regenerate' if advisor_note else 'Get advice' }}
+        </button>
+      </form>
+    </div>
+  </div>
+
+  {% if not advisor_note %}
+  <p class="muted small">
+    No note yet. The advisor reads only what's already in this database — it
+    gets no tools and can't fetch anything — and writes a short read of how
+    this area is doing plus a few concrete things to try.
+  </p>
+  {% elif advisor_note.error %}
+  <div class="bad-box">{{ advisor_note.error }}</div>
+  {% else %}
+    {% if advisor_note.summary %}
+    <p class="advisor-summary">{{ advisor_note.summary }}</p>
+    {% endif %}
+    {% if advisor_note.body_md %}
+    <div class="advisor-body">{{ advisor_note.body_md | md }}</div>
+    {% endif %}
+
+    {% if advisor_note.unverified %}
+    <div class="note-box warn-box">
+      <strong>Unverified figures:</strong>
+      {{ advisor_note.unverified | join(', ') }}.
+      These don't appear in the data the model was given — it may have derived
+      them, or it may have made them up. Check before acting on them.
+    </div>
+    {% endif %}
+  {% endif %}
+
+  {% if advisor_open %}
+  <h2 style="margin-top:16px">Suggested actions</h2>
+  <table class="advisor-table">
+    <tbody>
+      {% for action in advisor_open %}
+      <tr>
+        <td>{{ action.text }}</td>
+        <td class="nowrap advisor-buttons">
+          <form method="post" action="/advisor/action/{{ action.id }}">
+            <input type="hidden" name="status" value="done">
+            <input type="hidden" name="back" value="{{ advisor_back }}">
+            <button type="submit" class="small-btn">Done</button>
+          </form>
+          <form method="post" action="/advisor/action/{{ action.id }}">
+            <input type="hidden" name="status" value="dismissed">
+            <input type="hidden" name="back" value="{{ advisor_back }}">
+            <button type="submit" class="small-btn">Dismiss</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">
+    Marking these is what gives the advisor memory. Next time it runs it's told
+    which suggestions you did and which you rejected, so it can follow up on
+    the first and stop repeating the second.
+  </p>
+  {% endif %}
+
+  {% if advisor_history %}
+  <details class="advisor-history">
+    <summary class="muted small">Past suggestions ({{ advisor_history | length }})</summary>
+    <table class="advisor-table">
+      <tbody>
+        {% for action in advisor_history %}
+        <tr>
+          <td><span class="pill {{ 'ok' if action.status == 'done' }}">{{ action.status }}</span></td>
+          <td class="muted">{{ action.text }}</td>
+          <td class="nowrap muted small">{{ action.resolved_at | when if action.resolved_at else '' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+  {% endif %}
+
+  {% if advisor_note and advisor_note.context_md %}
+  <details class="advisor-history">
+    <summary class="muted small">The exact data the model was given</summary>
+    <pre class="advisor-context">{{ advisor_note.context_md }}</pre>
+  </details>
+  {% endif %}
+</section>
+{% endif %}

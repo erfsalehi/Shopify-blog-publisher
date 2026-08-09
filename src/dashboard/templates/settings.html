@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}Settings{% endblock %}
+
+{% block content %}
+<div class="page-head"><h1>Settings</h1></div>
+
+{% if saved %}<div class="notice ok">Saved.</div>{% endif %}
+{% if error %}<div class="notice bad-box">{{ error }}</div>{% endif %}
+
+<section class="panel">
+  <h2>Integrations</h2>
+  <p class="muted small">
+    Read from <code>.env</code> — credentials stay there, not in this database.
+    A sync that returns nothing and a key that was never set look identical
+    from the outside, so this table exists to tell them apart.
+  </p>
+  <table>
+    <thead><tr><th>Integration</th><th>State</th><th>Value</th><th>Used by</th></tr></thead>
+    <tbody>
+      {% for row in integrations %}
+      <tr>
+        <td>{{ row.name }}</td>
+        <td><span class="pill {{ 'ok' if row.ok else 'idle' }}">
+          {{ 'configured' if row.ok else 'not set' }}
+        </span></td>
+        <td class="muted truncate">{{ row.detail }}</td>
+        <td class="muted small">{{ row.used_by }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<form method="post" action="/settings">
+  {% for group, specs in groups.items() %}
+  <section class="panel">
+    <h2>{{ group }}</h2>
+    {% for spec in specs %}
+    <div class="field">
+      {% if spec.kind == 'bool' %}
+      <label class="check">
+        <input type="checkbox" name="{{ spec.key }}" {{ 'checked' if values[spec.key] }}>
+        <span>{{ spec.label }}</span>
+      </label>
+      {% elif spec.kind == 'csv' %}
+      <label for="{{ spec.key }}">{{ spec.label }}</label>
+      {# Stored as a JSON list, edited as plain comma-separated text — asking
+         the owner to type JSON into a form is how a settings form goes
+         permanently unedited. #}
+      <input type="text" class="wide" id="{{ spec.key }}" name="{{ spec.key }}"
+             value="{{ values[spec.key] | join(', ') }}">
+      {% else %}
+      <label for="{{ spec.key }}">{{ spec.label }}</label>
+      <input type="number" id="{{ spec.key }}" name="{{ spec.key }}"
+             value="{{ values[spec.key] }}"
+             {% if spec.minimum is not none %}min="{{ spec.minimum }}"{% endif %}
+             {% if spec.maximum is not none %}max="{{ spec.maximum }}"{% endif %}>
+      {% endif %}
+      <p class="help">{{ spec.help }}</p>
+    </div>
+    {% endfor %}
+  </section>
+  {% endfor %}
+  <div class="actions"><button type="submit" class="primary">Save settings</button></div>
+</form>
+
+<section class="panel">
+  <h2>Competitor sites</h2>
+  <p class="muted small">
+    Nothing reads these until the competitor price watch (Phase 5) is built —
+    they're collected here now so the list is the owner's, in the app, rather
+    than hardcoded in the source.
+  </p>
+  {% if competitors %}
+  <table>
+    <thead>
+      <tr><th>Name</th><th>URL</th><th>Price selector</th><th>Notes</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for c in competitors %}
+      <tr>
+        <td>{{ c.name }}</td>
+        <td class="truncate">
+          <a href="{{ c.base_url }}" target="_blank" rel="noopener noreferrer">{{ c.base_url }}</a>
+        </td>
+        <td class="muted">{{ c.price_selector or 'auto (JSON-LD → OpenGraph)' }}</td>
+        <td class="muted truncate">{{ c.notes or '' }}</td>
+        <td>
+          <form method="post" action="/settings/competitors/{{ c.id }}/delete">
+            <button type="submit" class="danger small-btn">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">None added yet.</p>
+  {% endif %}
+
+  <form method="post" action="/settings/competitors" class="row-form">
+    <input name="name" placeholder="Name" required>
+    <input name="base_url" type="url" placeholder="https://competitor.ca" required>
+    <input name="price_selector" placeholder="CSS selector (optional)">
+    <input name="notes" placeholder="Notes (optional)">
+    <button type="submit">Add</button>
+  </form>
+</section>
+{% endblock %}

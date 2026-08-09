@@ -758,3 +758,66 @@ def test_no_retry_when_body_is_clean(shopify, agent, monkeypatch):
 
     assert result["refreshed"] == 1
     assert len(calls) == 1
+
+
+def test_only_ids_targets_exactly_that_article(monkeypatch):
+    """A person clicking refresh on one article means that article, not
+    whatever the decay ranking happens to prefer today."""
+    from blog_pipeline.db import Article
+    from blog_pipeline.db.session import get_session, init_db
+    from blog_pipeline.graphs.refresh_graph import select_named_articles
+
+    init_db()
+    with get_session() as session:
+        wanted = Article(topic="A", title="A", shopify_article_id="gid://1")
+        other = Article(topic="B", title="B", shopify_article_id="gid://2")
+        session.add_all([wanted, other])
+        session.flush()
+        wanted_id = wanted.id
+        picked = select_named_articles(session, {wanted_id})
+        assert [a.id for a in picked] == [wanted_id]
+
+
+def test_only_ids_ignores_the_refresh_cooldown(monkeypatch):
+    """The cooldown stops the weekly cron repeating itself. It is not a safety
+    guard, and silently returning nothing when a human names an article is a
+    UI that looks broken."""
+    from datetime import datetime, timezone
+
+    from blog_pipeline.db import Article, ArticleRevision
+    from blog_pipeline.db.session import get_session, init_db
+    from blog_pipeline.graphs.refresh_graph import (
+        recently_refreshed_ids,
+        select_named_articles,
+    )
+
+    init_db()
+    with get_session() as session:
+        article = Article(topic="A", title="A", shopify_article_id="gid://1")
+        session.add(article)
+        session.flush()
+        article_id = article.id
+        session.add(ArticleRevision(
+            article_id=article_id, body_html="<p>old</p>",
+            created_at=datetime.now(timezone.utc),
+        ))
+
+    with get_session() as session:
+        assert article_id in recently_refreshed_ids(session)
+        assert [a.id for a in select_named_articles(session, {article_id})] == [
+            article_id
+        ]
+
+
+def test_an_unpublished_article_is_never_named_for_refresh():
+    """Nothing to edit in place — refreshing it would have no target."""
+    from blog_pipeline.db import Article
+    from blog_pipeline.db.session import get_session, init_db
+    from blog_pipeline.graphs.refresh_graph import select_named_articles
+
+    init_db()
+    with get_session() as session:
+        draft = Article(topic="Draft", title="Draft")  # no shopify_article_id
+        session.add(draft)
+        session.flush()
+        assert select_named_articles(session, {draft.id}) == []

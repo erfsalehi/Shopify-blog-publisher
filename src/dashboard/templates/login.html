@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sign in · D&amp;R Control Center</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<main style="max-width:360px; margin:14vh auto 0; padding:0 20px;">
+  <h1 style="margin-bottom:4px;">D&amp;R Control Center</h1>
+  <p class="muted small" style="margin-bottom:24px;">Sign in to continue.</p>
+
+  {% if error %}
+  <div class="bad-box" style="margin-bottom:16px;">{{ error }}</div>
+  {% endif %}
+
+  <form method="post" action="/login" class="panel" style="padding:20px;">
+    <input type="hidden" name="next" value="{{ next }}">
+    <div class="field">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" class="wide"
+             autofocus required autocomplete="current-password">
+    </div>
+    <button type="submit" class="primary" style="width:100%;">Sign in</button>
+  </form>
+</main>
+</body>
+</html>

@@ -12,6 +12,11 @@ env/
 # Env / secrets
 .env
 .env.local
+# Every .env variant, including the timestamped backups a rotation leaves
+# behind (.env.bak-20260805-135123 and friends) — those hold the same live
+# credentials as .env itself and were showing up as untracked-but-committable.
+.env.*
+!.env.example
 
 # Data
 data/
@@ -38,3 +43,5 @@ Thumbs.db
 keys/
 *.json.key
 service-account*.json
+
+.vercel

@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.article.title }}{% endblock %}
+
+{% block content %}
+{% set a = detail.article %}
+<div class="page-head">
+  <a href="/blog" class="muted small">‹ Blog</a>
+</div>
+<h1 class="article-title">{{ a.title }}</h1>
+<p class="muted small">
+  {{ a.status or 'unknown' }}
+  {% if a.shopify_url %}
+  · <a href="{{ a.shopify_url }}" target="_blank" rel="noopener noreferrer">view live</a>
+  {% endif %}
+  {% if a.linear_url %}
+  · <a href="{{ a.linear_url }}" target="_blank" rel="noopener noreferrer">{{ a.linear_identifier or 'Linear issue' }}</a>
+  {% endif %}
+  {% if a.published_at %}· published {{ a.published_at | when }}{% endif %}
+</p>
+
+{% if request.query_params.get('applied') %}
+<div class="notice ok">Published. The live article now shows the approved version.</div>
+{% endif %}
+{% if request.query_params.get('error') %}
+<div class="notice bad-box">{{ request.query_params.get('error') }}</div>
+{% endif %}
+
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Impressions</div>
+    <div class="card-value">{{ detail.current.impressions | int_ }}</div>
+    <div class="card-delta {{ 'bad' if detail.impressions_lost > 0 else 'good' if detail.impressions_lost < 0 else 'flat' }}">
+      {% if detail.impressions_lost > 0 %}▼ {{ detail.impressions_lost | int_ }} lost
+      {% elif detail.impressions_lost < 0 %}▲ {{ (-detail.impressions_lost) | int_ }}
+      {% else %}no change{% endif %}
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Clicks</div>
+    <div class="card-value">{{ detail.current.clicks | int_ }}</div>
+    <div class="card-delta {{ 'good' if detail.clicks_delta > 0 else 'bad' if detail.clicks_delta < 0 else 'flat' }}">
+      {% if detail.clicks_delta %}{{ '+' if detail.clicks_delta > 0 }}{{ detail.clicks_delta | int_ }}
+      {% else %}no change{% endif %}
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Position</div>
+    <div class="card-value">
+      {% if detail.current.impressions %}{{ detail.current.position | num }}{% else %}—{% endif %}
+    </div>
+    <div class="card-delta muted">impression-weighted</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Refreshed</div>
+    <div class="card-value">{{ a.revision_count }}×</div>
+    <div class="card-delta muted">
+      {% if a.last_refreshed_at %}last {{ a.last_refreshed_at | when }}{% else %}never{% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Refresh</h2>
+  {% if not a.shopify_url %}
+  <p class="muted">
+    This article isn't live on Shopify, so there's nothing to refresh in place.
+  </p>
+  {% else %}
+  <p class="muted small">
+    Preview runs the real refresh agent with <code>dry_run=True</code> — it
+    calls the model but writes nothing. Approving publishes <em>exactly</em>
+    the HTML shown below: the stored proposal is what gets written, not a
+    second run whose output you'd never have read.
+  </p>
+
+  <form method="post" action="/blog/{{ a.pipeline_id }}/preview" class="preview-form"
+        data-article="{{ a.pipeline_id }}">
+    <button type="submit" class="preview-btn" {{ 'disabled' if running }}>
+      {% if running %}Running…{% else %}Preview a refresh{% endif %}
+    </button>
+    <span class="muted small">Takes a minute or two. Nothing is published.</span>
+  </form>
+
+  {% if proposal %}
+    {% if proposal.status == 'failed' %}
+    <div class="bad-box" style="margin-top:14px">{{ proposal.error }}</div>
+    {% elif proposal.status == 'skipped' %}
+    <div class="note-box" style="margin-top:14px">{{ proposal.error }}</div>
+    {% elif proposal.status == 'applied' %}
+    <div class="notice ok" style="margin-top:14px">
+      Applied {{ proposal.applied_at | when }}. Preview again to propose
+      further changes.
+    </div>
+    {% elif proposal.status == 'stale' %}
+    <p class="muted small">Superseded by a newer preview.</p>
+    {% elif proposal.status == 'pending' and diff_summary %}
+    <div class="diff-head">
+      <div>
+        <strong>{{ diff_summary.added }}</strong> blocks added ·
+        <strong>{{ diff_summary.removed }}</strong> removed ·
+        {{ diff_summary.unchanged }} unchanged ·
+        {{ diff_summary.words_before | int_ }} → {{ diff_summary.words_after | int_ }} words
+        <div class="muted small">
+          Previewed {{ proposal.created_at | when }} ·
+          {{ (proposal.input_tokens + proposal.output_tokens) | int_ }} tokens
+          ({{ proposal.input_tokens | int_ }} in / {{ proposal.output_tokens | int_ }} out)
+        </div>
+      </div>
+      <form method="post" action="/blog/{{ a.pipeline_id }}/apply"
+            onsubmit="return confirm('Publish this version to the live article on drflooring.ca? The current body is snapshotted first and can be rolled back.');">
+        <input type="hidden" name="proposal_id" value="{{ proposal.id }}">
+        <button type="submit" class="primary">Approve &amp; publish</button>
+      </form>
+    </div>
+
+    {% if proposal.changes %}
+    <div class="note-box" style="margin:12px 0">
+      <strong>What the agent says it changed</strong>
+      <ul class="tight">{% for c in proposal.changes %}<li>{{ c }}</li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+
+    <div class="diff">
+      {% for line in diff_lines %}
+        {% if line is none %}
+        <div class="diff-gap">⋯ unchanged</div>
+        {% else %}
+        <div class="diff-line {{ line.kind }}">
+          <span class="diff-mark">{{ '+' if line.kind == 'added' else '−' if line.kind == 'removed' else '' }}</span>
+          <span class="diff-tag">{{ line.tag }}</span>
+          <span class="diff-text">{{ line.text }}</span>
+        </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+
+    {% if proposal.image_suggestions %}
+    <div class="note-box" style="margin-top:14px">
+      <strong>Image suggestions</strong>
+      <p class="muted small">
+        These are recorded in the Linear issue the refresh opens — the pipeline
+        never puts them in the body.
+      </p>
+      <ul class="tight">
+        {% for s in proposal.image_suggestions %}
+        <li>{{ s.get('prompt') or s.get('role') or s }}</li>
+        {% endfor %}
+      </ul>
+    </div>
+    {% endif %}
+    {% endif %}
+  {% endif %}
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>History</h2>
+  {% if revisions %}
+  <table>
+    <thead><tr><th>Snapshot taken</th><th>Reason</th><th class="num">Body size</th></tr></thead>
+    <tbody>
+      {% for r in revisions %}
+      <tr>
+        <td class="nowrap">{{ r.created_at | when }}</td>
+        <td class="muted">{{ r.reason }}</td>
+        <td class="num muted">{{ r.length | int_ }} chars</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">
+    Each row is the body as it was <em>before</em> a refresh overwrote it —
+    the only undo Shopify offers for a published post. Restore with
+    <code>blog-pipeline rollback-refresh --article-id {{ a.pipeline_id }}</code>.
+  </p>
+  {% else %}
+  <p class="muted">No refresh has ever overwritten this article.</p>
+  {% endif %}
+
+  {% if history | length > 1 %}
+  <h2 style="margin-top:18px">Previous previews</h2>
+  <table>
+    <thead><tr><th>When</th><th>Status</th><th class="num">Tokens</th><th>Note</th></tr></thead>
+    <tbody>
+      {% for p in history %}
+      <tr>
+        <td class="nowrap">{{ p.created_at | when }}</td>
+        <td><span class="pill {{ 'ok' if p.status == 'applied' else 'error' if p.status == 'failed' else '' }}">{{ p.status }}</span></td>
+        <td class="num muted">{{ (p.input_tokens + p.output_tokens) | int_ }}</td>
+        <td class="muted truncate">{{ p.error or '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</section>
+{% endblock %}

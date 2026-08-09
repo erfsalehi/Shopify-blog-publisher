@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block title %}Overview{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Site overview</h1>
+  <form method="get" class="inline-form">
+    <label>Compare
+      <select name="window" onchange="this.form.submit()">
+        {% for w in [7, 14, 28, 90] %}
+        <option value="{{ w }}" {{ 'selected' if window == w }}>{{ w }} days</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Chart
+      <select name="days" onchange="this.form.submit()">
+        {% for d in [30, 90, 180, 365] %}
+        <option value="{{ d }}" {{ 'selected' if days == d }}>{{ d }} days</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+</div>
+
+{% if not summary.has_data %}
+<div class="notice">
+  <strong>Nothing synced yet.</strong>
+  Search Console data lands here after the <code>gsc_daily</code> job runs —
+  <a href="/jobs">run it now</a>. The first run backfills
+  {{ backfill_days }} days and takes a few minutes.
+  {% if last_sync and last_sync.status == 'skipped' %}
+  <p class="muted">Last attempt was skipped: {{ last_sync.error }}</p>
+  {% elif last_sync and last_sync.status == 'error' %}
+  <p class="bad">Last attempt failed: {{ last_sync.error }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<p class="muted window-note">
+  {{ summary.current_window[0] }} → {{ summary.current_window[1] }}
+  vs {{ summary.previous_window[0] }} → {{ summary.previous_window[1] }}.
+  Both windows end on settled data (Search Console restates its last
+  {{ settling_days }} days), so the comparison isn't fighting a partial tail.
+</p>
+
+<section class="cards">
+  {% for d in summary.deltas %}
+  <div class="card">
+    <div class="card-label">{{ d.label }}</div>
+    <div class="card-value">
+      {% if d.kind == 'pct' %}{{ d.current | pct }}
+      {% elif d.kind == 'float' %}{{ d.current | num }}
+      {% else %}{{ d.current | int_ }}{% endif %}
+    </div>
+    <div class="card-delta {{ 'good' if d.good else 'bad' if d.good is false else 'flat' }}">
+      {% if d.direction == 'flat' %}
+        no change
+      {% else %}
+        {{ '▲' if d.direction == 'up' else '▼' }}
+        {% if d.kind == 'pct' %}{{ d.change | abs | pct }}
+        {% elif d.kind == 'float' %}{{ d.change | abs | num }}
+        {% else %}{{ d.change | abs | int_ }}{% endif %}
+        {% if d.change_pct is not none %}
+          <span class="muted">({{ d.change_pct | abs | num }}%)</span>
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</section>
+
+<section class="panel">
+  <h2>Clicks per day</h2>
+  {{ clicks_chart }}
+  <p class="legend">
+    <span class="swatch solid"></span> settled
+    <span class="swatch dashed"></span> provisional — Google is still
+    restating these days
+  </p>
+</section>
+
+<section class="panel">
+  <h2>Impressions per day</h2>
+  {{ impressions_chart }}
+</section>
+
+<section class="panel">
+  <h2>Top pages <span class="muted">· last {{ window }} days</span></h2>
+  {% if pages %}
+  <table>
+    <thead>
+      <tr>
+        <th>Page</th>
+        <th class="num">Clicks</th>
+        <th class="num">Δ</th>
+        <th class="num">Impressions</th>
+        <th class="num">Δ</th>
+        <th class="num">CTR</th>
+        <th class="num">Position</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in pages %}
+      <tr>
+        <td class="page-cell">
+          <a href="{{ row.page }}" target="_blank" rel="noopener noreferrer">
+            {{ row.page | replace('https://', '') | replace('www.', '') }}
+          </a>
+        </td>
+        <td class="num">{{ row.current.clicks | int_ }}</td>
+        <td class="num {{ 'good' if row.clicks_delta > 0 else 'bad' if row.clicks_delta < 0 }}">
+          {{ '+' if row.clicks_delta > 0 }}{{ row.clicks_delta | int_ }}
+        </td>
+        <td class="num">{{ row.current.impressions | int_ }}</td>
+        <td class="num {{ 'good' if row.impressions_delta > 0 else 'bad' if row.impressions_delta < 0 }}">
+          {{ '+' if row.impressions_delta > 0 }}{{ row.impressions_delta | int_ }}
+        </td>
+        <td class="num">{{ (row.current.ctr * 100) | pct }}</td>
+        <td class="num">
+          {{ row.current.position | num }}
+          {% if row.position_delta is not none and row.position_delta | abs > 0.1 %}
+          {# Arrow follows the number, colour follows the meaning — same as the
+             KPI cards. Pointing the arrow at "better" instead would have this
+             column disagreeing with the card directly above it. #}
+          <span class="{{ 'good' if row.position_delta < 0 else 'bad' }}">
+            {{ '▼' if row.position_delta < 0 else '▲' }}{{ row.position_delta | abs | num }}
+          </span>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No per-URL rows for this window yet.</p>
+  {% endif %}
+</section>
+{% include "_advisor.html" %}
+{% endblock %}

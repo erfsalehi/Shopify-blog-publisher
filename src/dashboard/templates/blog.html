@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Blog{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Blog posts</h1>
+  <form method="get" class="inline-form">
+    <label>Sort
+      <select name="order" onchange="this.form.submit()">
+        {% for value, label in [('decay','Losing the most impressions'),
+                                ('clicks','Most clicks'),
+                                ('impressions','Most impressions'),
+                                ('refreshed','Recently refreshed'),
+                                ('published','Recently published')] %}
+        <option value="{{ value }}" {{ 'selected' if order == value }}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Window
+      <select name="window" onchange="this.form.submit()">
+        {% for w in [28, 90] %}
+        <option value="{{ w }}" {{ 'selected' if window == w }}>{{ w }} days</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+</div>
+
+{% if not data.total %}
+<div class="notice">
+  <strong>No articles indexed yet.</strong>
+  Run the <a href="/jobs">blog article index</a> — it copies article metadata
+  out of the pipeline's own database.
+  {% if last_sync and last_sync.status == 'skipped' %}
+  <p class="muted">Last attempt: {{ last_sync.error }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Articles</div>
+    <div class="card-value">{{ data.total | int_ }}</div>
+    <div class="card-delta muted">{{ data.live | int_ }} live on Shopify</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Decaying</div>
+    <div class="card-value">{{ data.decaying | int_ }}</div>
+    <div class="card-delta muted">losing impressions vs the previous window</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Ever refreshed</div>
+    <div class="card-value">{{ data.ever_refreshed | int_ }}</div>
+    <div class="card-delta muted">by <code>run-refresh</code></div>
+  </div>
+  <div class="card">
+    <div class="card-label">LLM cost</div>
+    <div class="card-value">{{ data.total_cost | money }}</div>
+    {# Not a bug, despite what PLAN.md assumed. AI Studio's free tier is
+       rate-limited rather than billed, so MODEL_RATES is empty on purpose and
+       $0.00 is the correct dollar figure. What actually constrains a run is
+       tokens against the daily cap — shown per refresh on each article. #}
+    <div class="card-delta muted">
+      free tier — billed in tokens, not dollars
+    </div>
+  </div>
+</section>
+
+<p class="muted window-note">
+  Decay is ranked by <strong>absolute impressions lost</strong>, not percent —
+  the same choice <code>run-refresh</code> makes. Percentage flatters trivia: a
+  post falling 25→1 is a 96% collapse worth 24 impressions, while 18,272→5,497
+  is "only" −70% and worth 12,775. The second one is the article to rewrite.
+  Comparing {{ data.window[0] }} → {{ data.window[1] }}
+  against {{ data.previous_window[0] }} → {{ data.previous_window[1] }}.
+</p>
+
+{% if data.rows %}
+<section class="panel">
+  <table>
+    <thead>
+      <tr>
+        <th>Article</th>
+        <th class="num">Impressions</th>
+        <th class="num">Lost</th>
+        <th class="num">Clicks</th>
+        <th class="num">Δ</th>
+        <th class="num">Position</th>
+        <th>Last refreshed</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in data.rows %}
+      {% set a = row.article %}
+      <tr>
+        <td class="page-cell">
+          <a href="/blog/{{ a.pipeline_id }}">{{ a.title }}</a>
+          <div class="muted small">
+            {{ a.status or 'unknown' }}
+            {% if not a.shopify_url %}· not published{% endif %}
+            {% if a.shopify_url %}
+            · <a href="{{ a.shopify_url }}" target="_blank" rel="noopener noreferrer">live</a>
+            {% endif %}
+            {% if a.linear_url %}
+            · <a href="{{ a.linear_url }}" target="_blank" rel="noopener noreferrer">{{ a.linear_identifier or 'Linear' }}</a>
+            {% endif %}
+          </div>
+        </td>
+        <td class="num">{{ row.current.impressions | int_ }}</td>
+        <td class="num">
+          {% if row.decaying %}
+          <span class="bad">−{{ row.impressions_lost | int_ }}</span>
+          {% elif row.impressions_lost < 0 %}
+          <span class="good">+{{ (-row.impressions_lost) | int_ }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td class="num">{{ row.current.clicks | int_ }}</td>
+        <td class="num {{ 'good' if row.clicks_delta > 0 else 'bad' if row.clicks_delta < 0 }}">
+          {% if row.clicks_delta %}{{ '+' if row.clicks_delta > 0 }}{{ row.clicks_delta | int_ }}{% endif %}
+        </td>
+        <td class="num">
+          {% if row.current.impressions %}{{ row.current.position | num }}
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td class="nowrap muted small">
+          {% if a.last_refreshed_at %}
+            {{ a.last_refreshed_at | when }}
+            {% if a.revision_count > 1 %}<br>({{ a.revision_count }} times){% endif %}
+          {% else %}never{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">
+    A post is only counted as decaying when it had at least 50 impressions to
+    fall from. A post that never had impressions isn't decaying — it's new, or
+    it's invisible, and those want different responses.
+  </p>
+</section>
+{% endif %}
+{% include "_advisor.html" %}
+{% endblock %}

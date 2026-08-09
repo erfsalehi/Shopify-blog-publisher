@@ -1,0 +1,141 @@
+{% extends "base.html" %}
+{% block title %}Products{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Products</h1>
+  <span class="muted small">
+    {{ data.total | int_ }} matching · {{ data.with_traffic | int_ }} with search
+    impressions in {{ data.window[0] }} → {{ data.window[1] }}
+  </span>
+</div>
+
+<form method="get" class="filters">
+  <input type="search" name="q" value="{{ q }}" placeholder="Search title or handle">
+  <select name="status">
+    <option value="">Any status</option>
+    {% for s in data.statuses %}
+    <option value="{{ s }}" {{ 'selected' if status == s }}>{{ s }}</option>
+    {% endfor %}
+  </select>
+  <select name="priced">
+    <option value="">Any price</option>
+    <option value="yes" {{ 'selected' if priced == 'yes' }}>Price visible</option>
+    <option value="no" {{ 'selected' if priced == 'no' }}>Call for price</option>
+  </select>
+  {% if data.experiments %}
+  <select name="experiment">
+    <option value="">No experiment</option>
+    {% for e in data.experiments %}
+    <option value="{{ e.id }}" {{ 'selected' if experiment == e.id | string }}>{{ e.name }}</option>
+    {% endfor %}
+  </select>
+  <select name="cohort">
+    <option value="">Both cohorts</option>
+    <option value="treatment" {{ 'selected' if cohort == 'treatment' }}>Treatment</option>
+    <option value="control" {{ 'selected' if cohort == 'control' }}>Control</option>
+  </select>
+  {% endif %}
+  <select name="order">
+    {% for value, label in [('clicks','Most clicks'), ('impressions','Most impressions'),
+                            ('movers','Biggest risers'), ('fallers','Biggest fallers'),
+                            ('position','Best position'), ('price','Highest price'),
+                            ('title','Title A-Z')] %}
+    <option value="{{ value }}" {{ 'selected' if order == value }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="window">
+    {% for w in [7, 14, 28, 90] %}
+    <option value="{{ w }}" {{ 'selected' if window == w }}>{{ w }} days</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Apply</button>
+  <a href="/products" class="muted small">Reset</a>
+</form>
+
+<section class="panel">
+  {% if data.rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>Product</th>
+        <th class="num">Price</th>
+        <th class="num">Clicks</th>
+        <th class="num">Δ</th>
+        <th class="num">Impressions</th>
+        <th class="num">CTR</th>
+        <th class="num">Position</th>
+        {% if experiment %}<th>Cohort</th>{% endif %}
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in data.rows %}
+      {% set p = row.product %}
+      <tr>
+        <td class="page-cell">
+          {% if p.online_url %}
+          <a href="{{ p.online_url }}" target="_blank" rel="noopener noreferrer">{{ p.title }}</a>
+          {% else %}{{ p.title }}{% endif %}
+          <div class="muted small">
+            {{ p.handle }}
+            {% if p.status and p.status != 'ACTIVE' %}
+            · <span class="warn-text">{{ p.status }}</span>
+            {% endif %}
+          </div>
+        </td>
+        <td class="num">
+          {% if p.has_visible_price %}
+            {{ p.price_min | money }}
+          {% else %}
+            {# 0.00 isn't missing data — it's the Orichi hide-price app doing
+               its job, and it's what the show-price rollout will change. #}
+            <span class="muted small" title="Price hidden by the Orichi app">call</span>
+          {% endif %}
+        </td>
+        <td class="num">{{ row.current.clicks | int_ }}</td>
+        <td class="num {{ 'good' if row.clicks_delta > 0 else 'bad' if row.clicks_delta < 0 }}">
+          {% if row.clicks_delta %}{{ '+' if row.clicks_delta > 0 }}{{ row.clicks_delta | int_ }}{% endif %}
+        </td>
+        <td class="num">{{ row.current.impressions | int_ }}</td>
+        <td class="num">{{ (row.current.ctr * 100) | pct }}</td>
+        <td class="num">
+          {% if row.current.impressions %}{{ row.current.position | num }}
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        {% if experiment %}
+        <td>
+          {% if row.cohort %}<span class="pill {{ 'ok' if row.cohort == 'treatment' }}">{{ row.cohort }}</span>{% endif %}
+        </td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if pages > 1 %}
+  <div class="pager">
+    {% if page > 1 %}
+    <a href="/products?{{ query_base }}&page={{ page - 1 }}">‹ Previous</a>
+    {% endif %}
+    <span class="muted">Page {{ page }} of {{ pages }}</span>
+    {% if page < pages %}
+    <a href="/products?{{ query_base }}&page={{ page + 1 }}">Next ›</a>
+    {% endif %}
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="muted">
+    No products match. If the catalogue is empty entirely, run the
+    <a href="/jobs">Shopify catalogue snapshot</a>.
+  </p>
+  {% endif %}
+</section>
+
+<p class="muted small">
+  Cohort membership lives in <a href="/experiments">Experiments</a>, not in
+  Shopify tags — a tag is public surface that can leak into a storefront
+  filter, and anyone editing the product in admin can remove it without
+  knowing what it meant.
+</p>
+{% include "_advisor.html" %}
+{% endblock %}

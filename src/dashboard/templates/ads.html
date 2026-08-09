@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}Google Ads{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Google Ads</h1>
+  <form method="get" class="inline-form">
+    <label>Compare
+      <select name="window" onchange="this.form.submit()">
+        {% for w in [7, 14, 28, 90] %}
+        <option value="{{ w }}" {{ 'selected' if window == w }}>{{ w }} days</option>
+        {% endfor %}
+      </select>
+    </label>
+  </form>
+</div>
+
+{% if not windsor_configured %}
+<div class="notice">
+  <strong>Windsor isn't connected to the app yet.</strong>
+  Add <code>WINDSOR_API_KEY</code> to <code>.env</code> — get it from
+  <a href="https://onboard.windsor.ai/app/data-preview" target="_blank" rel="noopener noreferrer">onboard.windsor.ai</a>
+  — then run the <a href="/jobs">Google Ads sync</a>.
+  <p class="muted small">
+    Connecting Windsor's MCP connector isn't enough on its own: that runs
+    inside Claude, and a job scheduled on this machine can't reach it. Same
+    account, different door.
+  </p>
+</div>
+{% elif not ads.has_data %}
+<div class="notice">
+  <strong>No campaign data yet.</strong>
+  Run the <a href="/jobs">Google Ads sync</a>.
+  {% if last_sync and last_sync.status == 'error' %}
+  <p class="bad">Last attempt failed: {{ last_sync.error }}</p>
+  {% endif %}
+</div>
+{% endif %}
+
+<p class="muted window-note">
+  {{ ads.window[0] }} → {{ ads.window[1] }}
+  vs {{ ads.previous_window[0] }} → {{ ads.previous_window[1] }}.
+</p>
+
+<section class="cards">
+  {% for d in ads.deltas %}
+  <div class="card">
+    <div class="card-label">{{ d.label }}</div>
+    <div class="card-value">
+      {% if d.label == 'Spend' %}{{ d.current | money }}
+      {% elif d.kind == 'float' %}{{ d.current | num }}
+      {% else %}{{ d.current | int_ }}{% endif %}
+    </div>
+    <div class="card-delta {{ 'good' if d.good else 'bad' if d.good is false else 'flat' }}">
+      {% if d.direction == 'flat' %}no change
+      {% else %}
+        {{ '▲' if d.direction == 'up' else '▼' }}
+        {% if d.label == 'Spend' %}{{ d.change | abs | money }}
+        {% elif d.kind == 'float' %}{{ d.change | abs | num }}
+        {% else %}{{ d.change | abs | int_ }}{% endif %}
+        {% if d.change_pct is not none %}
+        <span class="muted">({{ d.change_pct | abs | num }}%)</span>
+        {% endif %}
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+</section>
+
+{% if ads.calls_baseline_incomplete %}
+<p class="muted window-note">
+  <strong>Ignore the change figure on call events.</strong> The GTM conversion
+  tags only start producing data on {{ ads.first_event_day }}, which is after
+  the comparison window begins — so that percentage measures when tracking was
+  installed, not how the business did. It becomes meaningful once both windows
+  sit entirely after that date.
+</p>
+{% endif %}
+
+<section class="panel">
+  <h2>Paid next to organic</h2>
+  <table>
+    <tbody>
+      <tr>
+        <td>Paid clicks (Google Ads)</td>
+        <td class="num">{{ ads.clicks | int_ }}</td>
+        <td class="muted small">cost {{ ads.spend | money }}{% if ads.cpc %}, {{ ads.cpc | money }}/click{% endif %}</td>
+      </tr>
+      <tr>
+        <td>Organic clicks (Search Console)</td>
+        <td class="num">{{ ads.organic_clicks | int_ }}</td>
+        <td class="muted small">cost nothing per click</td>
+      </tr>
+      <tr>
+        <td>Call / WhatsApp / directions events (GA4)</td>
+        <td class="num">{{ ads.calls | int_ }}</td>
+        <td class="muted small">the store's actual conversions — no checkout happens on this site</td>
+      </tr>
+      <tr>
+        <td>Ads-reported conversions</td>
+        <td class="num">{{ ads.conversions | num }}</td>
+        <td class="muted small">
+          {% if ads.cost_per_conversion %}{{ ads.cost_per_conversion | money }} each{% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="legend">{{ ads.attribution_note }}</p>
+</section>
+
+<section class="panel">
+  <h2>Campaigns <span class="muted">· last {{ window }} days</span></h2>
+  {% if ads.campaigns %}
+  <table>
+    <thead>
+      <tr>
+        <th>Campaign</th>
+        <th>Type</th>
+        <th class="num">Spend</th>
+        <th class="num">Clicks</th>
+        <th class="num">Impressions</th>
+        <th class="num">CPC</th>
+        <th class="num">Conv.</th>
+        <th class="num">Cost/conv.</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in ads.campaigns %}
+      <tr>
+        <td>
+          {{ c.campaign }}
+          {% if c.status and c.status != 'ENABLED' %}
+          <span class="pill idle">{{ c.status | lower }}</span>
+          {% endif %}
+        </td>
+        <td class="muted small">{{ (c.campaign_type or '') | replace('_', ' ') | title }}</td>
+        <td class="num">{{ c.spend | money }}</td>
+        <td class="num">{{ c.clicks | int_ }}</td>
+        <td class="num">{{ c.impressions | int_ }}</td>
+        <td class="num">{{ c.cpc | money if c.cpc else '—' }}</td>
+        <td class="num">{{ c.conversions | num }}</td>
+        <td class="num {{ 'bad' if c.conversions == 0 and c.spend > 0 }}">
+          {% if c.cost_per_conversion %}{{ c.cost_per_conversion | money }}
+          {% elif c.spend > 0 %}no conversions
+          {% else %}—{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">Nothing synced for this window.</p>
+  {% endif %}
+</section>
+{% include "_advisor.html" %}
+{% endblock %}

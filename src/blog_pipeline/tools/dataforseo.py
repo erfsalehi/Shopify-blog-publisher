@@ -22,6 +22,11 @@ class DataForSEOClient:
         s = get_settings()
         self.login = login or s.dataforseo_login
         self.password = password or s.dataforseo_password
+        # Why the last call returned nothing. Every method still degrades to
+        # [] so a missing key can't fail the weekly refresh, but "no data" and
+        # "your account is unverified" are different problems and a caller
+        # that can only see [] cannot tell the owner which one it hit.
+        self.last_error: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -32,15 +37,41 @@ class DataForSEOClient:
         return {"Authorization": f"Basic {token}", "Content-Type": "application/json"}
 
     def _post(self, path: str, payload: list) -> dict | None:
+        self.last_error = None
         if not self.enabled:
+            self.last_error = "DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD not set"
             return None
         try:
             resp = httpx.post(
                 f"{BASE}{path}", headers=self._auth_header(), json=payload, timeout=60.0
             )
+            data = resp.json() if resp.content else {}
+            # DataForSEO reports failures in the body with HTTP 200 as often
+            # as with a 4xx, so the status code alone is not the answer.
+            code = data.get("status_code")
+            if code and code != 20000:
+                self.last_error = f"{code}: {data.get('status_message')}"
+                return None
             resp.raise_for_status()
-            return resp.json()
-        except Exception:
+            # The envelope succeeding (20000, "Ok.") only means the request
+            # was accepted — it says nothing about whether the task inside it
+            # ran. A single malformed keyword (DataForSEO rejects certain
+            # punctuation, e.g. "?") fails the whole task with its own
+            # status_code while the envelope still reports 20000, so a caller
+            # that only checked the top level would see success with an empty
+            # result and no explanation. Surface the task's own message
+            # instead of leaving that silent.
+            tasks = data.get("tasks") or []
+            if tasks and all(t.get("status_code") != 20000 for t in tasks):
+                failed = tasks[0]
+                self.last_error = (
+                    f"{failed.get('status_code')}: {failed.get('status_message')}"
+                )
+                return None
+            return data
+        except Exception as e:
+            if not self.last_error:
+                self.last_error = f"{type(e).__name__}: {e}"
             return None
 
     def keyword_data(

@@ -1,0 +1,129 @@
+{% extends "base.html" %}
+{% block title %}Keywords{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Search terms</h1>
+  <span class="muted small">
+    {{ data.total | int_ }} terms · market data on {{ data.with_market_data | int_ }}
+  </span>
+</div>
+
+<form method="get" class="filters">
+  <input type="search" name="q" value="{{ q }}" placeholder="Filter terms">
+  <select name="order">
+    {% for value, label in [('opportunity','Biggest opportunity'),
+                            ('impressions','Most impressions'),
+                            ('clicks','Most clicks'),
+                            ('position','Best position'),
+                            ('volume','Highest search volume'),
+                            ('movers','Biggest risers')] %}
+    <option value="{{ value }}" {{ 'selected' if order == value }}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="striking">
+    <option value="1" {{ 'selected' if striking }}>Striking distance only</option>
+    <option value="0" {{ 'selected' if not striking }}>All terms</option>
+  </select>
+  <select name="window">
+    {% for w in [7, 28, 90] %}
+    <option value="{{ w }}" {{ 'selected' if window == w }}>{{ w }} days</option>
+    {% endfor %}
+  </select>
+  <button type="submit">Apply</button>
+  <a href="/keywords" class="muted small">Reset</a>
+</form>
+
+<div class="notice {{ 'bad-box' if dfs_error }}">
+  {% if dfs_error %}
+  <strong>DataForSEO isn't answering.</strong> {{ dfs_error }}
+  {% else %}
+  <strong>Market data:</strong> {{ data.terms_known | int_ }} terms looked up ·
+  ${{ '%.2f' | format(data.spend.spent) }} spent ·
+  ${{ '%.2f' | format(data.spend.remaining) }} of budget left ·
+  ${{ '%.2f' | format(data.spend.per_request) }} per refresh
+  {% endif %}
+  <p class="muted small">
+    DataForSEO bills per <em>request</em>, not per keyword, and takes up to
+    1,000 terms at once — so one ${{ '%.2f' | format(data.spend.per_request) }}
+    call covers hundreds of terms. Volume comes back as a 12-month average, so
+    terms already looked up are skipped for 45 days rather than re-bought.
+    <a href="/jobs">Run the keyword market data job</a> to fill the volume
+    column.
+  </p>
+</div>
+
+<p class="muted window-note">
+  <strong>Striking distance</strong> is terms at positions 5&ndash;40 with at
+  least 20 impressions: Google already considers the site relevant to them, so
+  they're a far shorter path to page one than a high-volume term with no
+  history. <em>Opportunity</em> ranks by impressions the site already earns
+  weighted by the click-through it's leaving behind — computed from your own
+  Search Console data, not market volume, so it works before anything has been
+  paid for.
+  {{ data.window[0] }} → {{ data.window[1] }}.
+</p>
+
+<section class="panel">
+  {% if data.rows %}
+  <table>
+    <thead>
+      <tr>
+        <th>Search term</th>
+        <th class="num">Clicks</th>
+        <th class="num">Δ</th>
+        <th class="num">Impressions</th>
+        <th class="num">CTR</th>
+        <th class="num">Position</th>
+        <th class="num">Volume/mo</th>
+        <th class="num">CPC</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in data.rows %}
+      <tr>
+        <td class="page-cell">{{ row.query }}</td>
+        <td class="num">{{ row.current.clicks | int_ }}</td>
+        <td class="num {{ 'good' if row.clicks_delta > 0 else 'bad' if row.clicks_delta < 0 }}">
+          {% if row.clicks_delta %}{{ '+' if row.clicks_delta > 0 }}{{ row.clicks_delta | int_ }}{% endif %}
+        </td>
+        <td class="num">{{ row.current.impressions | int_ }}</td>
+        <td class="num {{ 'warn-text' if row.current.ctr < 0.005 and row.current.impressions > 200 }}">
+          {{ (row.current.ctr * 100) | pct }}
+        </td>
+        <td class="num">
+          {{ row.current.position | num }}
+          {% if row.position_delta is not none and row.position_delta | abs > 0.5 %}
+          <span class="{{ 'good' if row.position_delta < 0 else 'bad' }}">
+            {{ '▲' if row.position_delta < 0 else '▼' }}{{ row.position_delta | abs | num }}
+          </span>
+          {% endif %}
+        </td>
+        <td class="num">
+          {% if row.volume is not none %}{{ row.volume | int_ }}
+          {% else %}<span class="muted" title="Not looked up yet">?</span>{% endif %}
+        </td>
+        <td class="num">
+          {% if row.cpc %}{{ row.cpc | money }}
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">
+    A CTR under 0.5% on more than 200 impressions is highlighted: the page is
+    being shown and not clicked, which is usually a title problem rather than a
+    ranking one — and the cheapest thing on this page to fix.
+  </p>
+  {% else %}
+  <p class="muted">
+    No terms match. If the table is empty entirely, run the
+    <a href="/jobs">Search Console sync</a> — it now pulls search terms as well
+    as pages.
+  </p>
+  {% endif %}
+</section>
+
+{% include "_advisor.html" %}
+{% endblock %}

@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Jobs{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Sync jobs</h1>
+  {% if not scheduler_on %}
+  <span class="pill warn">Scheduler off — manual runs only</span>
+  {% endif %}
+</div>
+
+<p class="muted window-note">
+  These are the only things here that talk to an external API. Everything on
+  every other page is read back out of the database, so a job that hasn't run
+  is the single explanation for stale numbers.
+</p>
+
+<section class="panel">
+  <table class="jobs-table">
+    <thead>
+      <tr>
+        <th>Job</th>
+        <th>Last run</th>
+        <th>Status</th>
+        <th class="num">Rows</th>
+        <th class="num">Took</th>
+        <th>Next</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for row in jobs %}
+      <tr data-job="{{ row.spec.name }}">
+        <td>
+          <div class="job-name">{{ row.spec.title }}</div>
+          <div class="muted small">{{ row.spec.description }}</div>
+        </td>
+        <td class="nowrap">{{ row.last.started_at | when if row.last else 'never' }}</td>
+        <td class="status-cell">
+          {% if row.running %}
+            <span class="pill running">running</span>
+          {% elif row.last %}
+            <span class="pill {{ row.last.status }}">{{ row.last.status }}</span>
+          {% else %}
+            <span class="pill idle">—</span>
+          {% endif %}
+        </td>
+        <td class="num">{{ row.last.rows | int_ if row.last else '—' }}</td>
+        <td class="num">{{ row.last.duration_ms | duration if row.last else '—' }}</td>
+        <td class="nowrap muted">
+          {% if row.next %}{{ row.next | when }}
+          {% elif not scheduler_on %}scheduler off
+          {% elif not row.scheduled %}manual only
+          {% else %}—{% endif %}
+        </td>
+        <td>
+          <button class="run-btn" data-job="{{ row.spec.name }}">Run now</button>
+        </td>
+      </tr>
+      {% if row.last and row.last.error %}
+      <tr class="detail-row">
+        <td colspan="7">
+          <div class="{{ 'bad-box' if row.last.status == 'error' else 'note-box' }}">
+            {{ row.last.error }}
+          </div>
+        </td>
+      </tr>
+      {% endif %}
+      {% if row.last and row.last.detail %}
+      <tr class="detail-row">
+        <td colspan="7">
+          <dl class="kv">
+            {% for k, v in row.last.detail.items() %}
+            <div><dt>{{ k }}</dt><dd>{{ v if v not in (None, [], {}) else '—' }}</dd></div>
+            {% endfor %}
+          </dl>
+        </td>
+      </tr>
+      {% endif %}
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Run history</h2>
+  {% if history %}
+  <table>
+    <thead>
+      <tr>
+        <th>Started</th><th>Job</th><th>Trigger</th><th>Status</th>
+        <th class="num">Rows</th><th class="num">Tries</th><th class="num">Took</th>
+        <th>Note</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in history %}
+      <tr>
+        <td class="nowrap">{{ run.started_at | when }}</td>
+        <td>{{ run.job }}</td>
+        <td class="muted">{{ run.trigger }}</td>
+        <td><span class="pill {{ run.status }}">{{ run.status }}</span></td>
+        <td class="num">{{ run.rows | int_ }}</td>
+        <td class="num {{ 'warn-text' if run.attempts > 1 }}">{{ run.attempts }}</td>
+        <td class="num">{{ run.duration_ms | duration }}</td>
+        <td class="muted truncate">{{ run.error or '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">
+    A <em>tries</em> count above 1 on a successful run is the local proxy
+    rate-limiting us and the retry working. Worth noticing, not worth acting on.
+  </p>
+  {% else %}
+  <p class="muted">No runs recorded yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

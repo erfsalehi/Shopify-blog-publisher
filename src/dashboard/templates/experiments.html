@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block title %}Experiments{% endblock %}
+
+{% block content %}
+<div class="page-head"><h1>Experiments</h1></div>
+
+{% if error %}<div class="notice bad-box">{{ error }}</div>{% endif %}
+
+<p class="muted window-note">
+  <strong>These are not A/B tests, and the design says so.</strong> Per-visitor
+  splitting is impossible here — search shows one title to everyone, and
+  Shopify can't show different prices to different visitors. What works, and
+  what SEO practitioners actually do, is a treatment group against a matched
+  control group over the same dates, scored by difference-in-differences. The
+  control group absorbs whatever happened to the whole site — a seasonal dip,
+  an algorithm update — so what's left is attributable to the change.
+</p>
+
+<section class="panel">
+  <h2>Running and past</h2>
+  {% if experiments %}
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th><th>Variable</th><th>Status</th>
+        <th class="num">Treatment</th><th class="num">Control</th><th>Started</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for e in experiments %}
+      <tr>
+        <td>
+          <a href="/experiments/{{ e.id }}">{{ e.name }}</a>
+          {% if e.hypothesis %}<div class="muted small">{{ e.hypothesis }}</div>{% endif %}
+        </td>
+        <td class="muted">{{ e.variable }}</td>
+        <td><span class="pill {{ 'ok' if e.status == 'running' }}">{{ e.status }}</span></td>
+        <td class="num">{{ counts[e.id].treatment }}</td>
+        <td class="num">{{ counts[e.id].control }}</td>
+        <td class="nowrap muted">{{ e.started_on or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">None yet.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>New experiment</h2>
+  <form method="post" action="/experiments">
+    <div class="field">
+      <label for="name">Name</label>
+      <input type="text" id="name" name="name" class="wide" required
+             placeholder="seo-title-accessories-2026-08">
+    </div>
+    <div class="field">
+      <label for="variable">Variable</label>
+      <select id="variable" name="variable">
+        {% for v in variables %}<option value="{{ v }}">{{ v }}</option>{% endfor %}
+      </select>
+      <p class="help">
+        <code>title</code> and <code>description</code> are written to Shopify
+        by this app. <code>price</code> and <code>strategy</code> are applied
+        by hand in admin — the app records the event and scores it, but does
+        not drive your price field.
+      </p>
+    </div>
+    <div class="field">
+      <label for="hypothesis">Hypothesis</label>
+      <input type="text" id="hypothesis" name="hypothesis" class="wide"
+             placeholder="Adding the price to the SEO title raises CTR on accessories">
+      <p class="help">
+        Write it before you look at the result. A hypothesis recorded
+        afterwards is a description.
+      </p>
+    </div>
+    <div class="field">
+      <label for="baseline_days">Baseline window (days)</label>
+      <input type="number" id="baseline_days" name="baseline_days" value="28"
+             min="7" max="180">
+      <p class="help">
+        History frozen as "before" when the experiment starts. Frozen once and
+        never recomputed — a baseline that moves lets a test produce whichever
+        answer was hoped for.
+      </p>
+    </div>
+    <div class="actions"><button type="submit" class="primary">Create</button></div>
+  </form>
+</section>
+{% include "_advisor.html" %}
+{% endblock %}

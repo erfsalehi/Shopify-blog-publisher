@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block title %}{{ experiment.name }}{% endblock %}
+
+{% block content %}
+<div class="page-head"><a href="/experiments" class="muted small">‹ Experiments</a></div>
+<h1 class="article-title">{{ experiment.name }}</h1>
+<p class="muted small">
+  {{ experiment.variable }} experiment ·
+  <span class="pill {{ 'ok' if experiment.status == 'running' }}">{{ experiment.status }}</span>
+  {% if experiment.started_on %}· started {{ experiment.started_on }}{% endif %}
+  · baseline {{ experiment.baseline_days }} days
+</p>
+{% if experiment.hypothesis %}
+<p class="note-box" style="max-width:70ch">{{ experiment.hypothesis }}</p>
+{% endif %}
+
+{% if error %}<div class="notice bad-box">{{ error }}</div>{% endif %}
+{% if saved %}<div class="notice ok">Saved.</div>{% endif %}
+
+<!-- ── Verdict ────────────────────────────────────────────────── -->
+<section class="panel">
+  <h2>Result</h2>
+  {% if not result.scorable %}
+  <div class="note-box">{{ result.reason }}</div>
+  {% else %}
+  <div class="cards" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-label">Treatment change</div>
+      <div class="card-value">
+        {{ '%+.2f' | format(result.treatment_delta) }}{{ 'pp' if result.metric == 'ctr' }}
+      </div>
+      <div class="card-delta muted">per product, vs its own baseline</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Control change</div>
+      <div class="card-value">
+        {{ '%+.2f' | format(result.control_delta) }}{{ 'pp' if result.metric == 'ctr' }}
+      </div>
+      <div class="card-delta muted">what happened anyway</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Difference</div>
+      <div class="card-value {{ 'good' if result.difference > 0 else 'bad' }}">
+        {{ '%+.2f' | format(result.difference) }}{{ 'pp' if result.metric == 'ctr' }}
+      </div>
+      <div class="card-delta muted">treatment − control</div>
+    </div>
+    <div class="card">
+      <div class="card-label">Chance of this by luck</div>
+      <div class="card-value">{{ '%.1f' | format(result.p_value * 100) }}%</div>
+      <div class="card-delta {{ 'good' if result.significant else 'muted' }}">
+        {{ 'below the 5% bar' if result.significant else 'not significant' }}
+      </div>
+    </div>
+  </div>
+
+  <div class="{{ 'note-box' if not result.significant else 'notice' }}">
+    {{ result.verdict }}
+  </div>
+
+  <p class="muted small" style="margin-top:10px">
+    Measured on {{ 'click-through rate' if result.metric == 'ctr' else 'clicks' }},
+    {{ result.test_window[0] }} → {{ result.test_window[1] }}
+    ({{ result.days_running }} days).
+    The p-value comes from a permutation test — the group labels are shuffled
+    5,000 times to see how often chance alone produces an effect this large.
+    No normal distribution is assumed, because with
+    {{ result.groups.treatment.products }} products against
+    {{ result.groups.control.products }} there's no reason to believe in one.
+  </p>
+  {% endif %}
+</section>
+
+<!-- ── Cohorts ────────────────────────────────────────────────── -->
+<section class="panel">
+  <h2>Cohorts</h2>
+  <table>
+    <thead>
+      <tr><th>Group</th><th class="num">Products</th><th class="num">Clicks before → after</th>
+      <th class="num">Impressions before → after</th><th class="num">CTR before → after</th></tr>
+    </thead>
+    <tbody>
+      {% for name in ['treatment', 'control'] %}
+      {% set g = result.groups[name] if result.groups is defined else none %}
+      <tr>
+        <td>{{ name }}</td>
+        {% if g %}
+        <td class="num {{ 'bad' if g.products < min_group }}">{{ g.products }}</td>
+        <td class="num">{{ g.before.clicks | int_ }} → {{ g.after.clicks | int_ }}</td>
+        <td class="num">{{ g.before.impressions | int_ }} → {{ g.after.impressions | int_ }}</td>
+        <td class="num">{{ (g.before.ctr * 100) | pct }} → {{ (g.after.ctr * 100) | pct }}</td>
+        {% else %}
+        <td class="num">{{ (treatment if name == 'treatment' else control) | length }}</td>
+        <td colspan="3" class="muted">not started</td>
+        {% endif %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  {% if experiment.status == 'draft' %}
+  <p class="muted small" style="margin-top:12px">
+    Both groups need at least {{ min_group }} products before a result can be
+    offered. A difference measured across fewer than that is a story about
+    those products.
+  </p>
+
+  <form method="post" action="/experiments/{{ experiment.id }}/members" class="row-form">
+    <select name="cohort">
+      <option value="treatment">treatment</option>
+      <option value="control">control</option>
+    </select>
+    <input name="handles" placeholder="product handles, comma or newline separated" required>
+    <button type="submit">Add products</button>
+  </form>
+
+  <form method="post" action="/experiments/{{ experiment.id }}/suggest-controls" class="row-form">
+    <input type="number" name="count" value="50" min="1" max="200" style="width:90px">
+    <button type="submit">Auto-fill controls, matched on impressions</button>
+    <span class="muted small">
+      Matched rather than random: a product nobody sees can't show a seasonal
+      dip, so invisible controls quietly turn this back into a
+      before-and-after.
+    </span>
+  </form>
+
+  <form method="post" action="/experiments/{{ experiment.id }}/start"
+        style="margin-top:16px"
+        onsubmit="return confirm('Freeze the baseline and start? Membership can no longer change after this.');">
+    <button type="submit" class="primary">Freeze baseline &amp; start</button>
+  </form>
+  {% endif %}
+</section>
+
+<!-- ── Apply ──────────────────────────────────────────────────── -->
+{% if experiment.status == 'running' and experiment.variable in ('title', 'description') %}
+<section class="panel">
+  <h2>Apply the treatment</h2>
+  <p class="muted small">
+    Writes the new SEO {{ experiment.variable }} to each product in Shopify.
+    Shopify replaces the whole <code>seo</code> object on write, so the field
+    you're not changing is read first and sent back unchanged — and an SEO
+    title identical to the product title is silently discarded by Shopify, so
+    that's rejected here rather than reported as applied.
+  </p>
+  <form method="post" action="/experiments/{{ experiment.id }}/apply"
+        onsubmit="return confirm('Write these values to live products on drflooring.ca?');">
+    <table>
+      <thead><tr><th>Product</th><th>New {{ experiment.variable }}</th><th>Applied</th></tr></thead>
+      <tbody>
+        {% for m in treatment %}
+        {% set p = products.get(m.product_gid) %}
+        <tr>
+          <td class="page-cell">
+            {{ p.title if p else m.product_gid }}
+            <div class="muted small">{{ p.handle if p else '' }}</div>
+          </td>
+          <td><input type="text" name="value-{{ m.product_gid }}" class="wide"
+                     value="{{ m.after_value or '' }}"></td>
+          <td class="muted small nowrap">
+            {% if m.applied_at %}{{ m.applied_at | when }}
+            {% elif m.apply_error %}<span class="bad">failed</span>
+            {% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <div class="actions" style="margin-top:14px">
+      <button type="submit" class="primary">Write to Shopify</button>
+    </div>
+  </form>
+  {% set failures = treatment | selectattr('apply_error') | list %}
+  {% if failures %}
+  <div class="bad-box">
+    {% for m in failures %}{{ products.get(m.product_gid).handle if products.get(m.product_gid) else m.product_gid }}: {{ m.apply_error }}
+{% endfor %}
+  </div>
+  {% endif %}
+</section>
+{% elif experiment.status == 'running' %}
+<section class="panel">
+  <h2>Apply the treatment</h2>
+  <p class="muted">
+    <strong>{{ experiment.variable }} changes are made by hand.</strong>
+    Set the prices in Shopify admin (and tag the products <code>show-price</code>
+    — see <code>docs/show-price.md</code>), then come back: the baseline is
+    already frozen, so scoring works from the start date regardless of how the
+    change was made.
+  </p>
+</section>
+{% endif %}
+
+<!-- ── Members ────────────────────────────────────────────────── -->
+<section class="panel">
+  <h2>Products <span class="muted">· {{ members | length }}</span></h2>
+  <table>
+    <thead>
+      <tr><th>Product</th><th>Cohort</th><th class="num">Baseline clicks</th>
+      <th class="num">Baseline impressions</th></tr>
+    </thead>
+    <tbody>
+      {% for m in members %}
+      {% set p = products.get(m.product_gid) %}
+      <tr>
+        <td class="page-cell">
+          {% if p and p.online_url %}
+          <a href="{{ p.online_url }}" target="_blank" rel="noopener noreferrer">{{ p.title }}</a>
+          {% else %}{{ p.title if p else m.product_gid }}{% endif %}
+        </td>
+        <td><span class="pill {{ 'ok' if m.cohort == 'treatment' }}">{{ m.cohort }}</span></td>
+        <td class="num">{{ m.baseline_clicks | int_ }}</td>
+        <td class="num">{{ m.baseline_impressions | int_ }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

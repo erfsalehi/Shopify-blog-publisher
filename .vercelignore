@@ -1,0 +1,40 @@
+# What the Vercel CLI uploads for a deploy. Separate from vercel.json's
+# `excludeFiles` (which trims the built function bundle) — this trims what
+# ever leaves this machine in the first place, which matters most for the
+# things that must never leave it at all.
+
+.venv/
+data/
+keys/
+.env
+.env.*
+!.env.example
+
+.git/
+.github/
+.claude/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+tests/
+docs/
+node_modules/
+
+PLAN.md
+README.md
+PRD Topic Research to Publish Pipeline.md
+railway.json
+Dockerfile
+.dockerignore
+
+# Excluded deliberately, not an oversight: Vercel's Python build detects
+# dependencies from requirements.txt OR pyproject.toml, and if both are
+# present it isn't documented which wins. pyproject.toml's base
+# `dependencies` list pulls in langgraph, fastembed (+ ~45MB onnxruntime),
+# textstat, rich (already covered explicitly in requirements.txt) and typer —
+# none reachable from any dashboard code path (traced import-by-import before
+# writing requirements.txt). Excluding this file is what guarantees
+# requirements.txt is the only manifest Vercel can see.
+pyproject.toml
+

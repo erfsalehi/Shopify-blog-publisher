@@ -54,12 +54,36 @@ gsc = [
     "google-auth>=2.30",
     "requests>=2.32",
 ]
+# The Control Center dashboard, local (`python -m dashboard`) or on Vercel
+# (see api/index.py). Implies [gsc], since the only Phase 0 sync job is
+# Search Console and a dashboard installed without it has nothing to show.
+# Implies psycopg too: SQLite is the local default, but Vercel's functions
+# have no persistent disk, so a deployed dashboard is Postgres from the start
+# rather than a second driver bolted on later.
+dashboard = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jinja2>=3.1",
+    "apscheduler>=3.10",
+    # FastAPI needs this to parse the settings form posts.
+    "python-multipart>=0.0.9",
+    "google-auth>=2.30",
+    "requests>=2.32",
+    "psycopg[binary]>=3.1",
+    # Session cookies for the login page (itsdangerous signs them).
+    "itsdangerous>=2.1",
+]
 
 [project.scripts]
 blog-pipeline = "blog_pipeline.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Templates and CSS/JS are loaded from disk at runtime, so a non-editable
+# install has to carry them.
+[tool.setuptools.package-data]
+dashboard = ["templates/*.html", "static/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

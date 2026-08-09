@@ -14,7 +14,7 @@ Implements the full PRD (`PRD Topic Research to Publish Pipeline.md`).
 · [Performance data](docs/search-console.md) · [Refreshing old posts](#refreshing-old-posts)
 · [AI SEO / GEO](#ai-seo-geo) · [WhatsApp trigger](docs/whatsapp-setup.md)
 · [Railway deploy](docs/railway-deploy.md) · [robots.txt for AI crawlers](docs/robots.txt.liquid)
-· [llms.txt](docs/llms.txt)
+· [llms.txt](docs/llms.txt) · [Control Center dashboard](docs/dashboard.md)
 
 ## Architecture
 
