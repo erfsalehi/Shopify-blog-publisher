@@ -204,3 +204,67 @@ def test_no_city_data_says_so_instead_of_rendering_zeroes(dashboard_db):
 
     assert data["has_city_data"] is False
     assert data["has_ranks"] is False
+
+
+# ── Fitting inside a serverless function ────────────────────────────
+
+
+def test_a_run_is_capped_so_it_fits_in_the_function_ceiling(dashboard_db, monkeypatch):
+    """Each live SERP takes 4-8 seconds against a 60 second Vercel ceiling,
+    so the full keyword x city grid does not fit — the first production run
+    was killed mid-flight doing 24 of them. The cap is wall-clock, not money;
+    the money cap is separate and far larger."""
+    from dashboard import store
+    from dashboard.jobs import local_serp as job
+
+    store.set(store.LOCAL_CITIES, "Langley:9226804,Surrey:1001964")
+    store.set(store.LOCAL_SEEDS, "a flooring,b flooring,c flooring,d flooring,"
+                                 "e flooring,f flooring")
+    store.set(store.LOCAL_MAX_KEYWORDS, 6)
+
+    calls: list[tuple] = []
+
+    class _Client:
+        enabled = True
+        last_error = None
+
+        def local_serp(self, keyword, *, location_code, **kw):
+            calls.append((keyword, location_code))
+            return {"items": [], "cost": 0.002}
+
+    result = job.sync_local_serp(client=_Client(), today=TODAY)
+
+    # 6 keywords x 2 cities = 12 pairs, capped at 8.
+    assert result.detail["pairs_total"] == 12
+    assert len(calls) == job._MAX_SERPS_PER_RUN == 8
+
+
+def test_the_stalest_pairs_are_measured_first(dashboard_db, monkeypatch):
+    """Rotation, same as the competitor collectors: every pair is covered
+    within a few days and a keyword added today is measured tomorrow rather
+    than pushing an existing one out."""
+    from dashboard import store
+    from dashboard.jobs import local_serp as job
+
+    store.set(store.LOCAL_CITIES, "Langley:9226804")
+    store.set(store.LOCAL_SEEDS, "fresh flooring,stale flooring")
+    store.set(store.LOCAL_MAX_KEYWORDS, 2)
+    monkeypatch.setattr(job, "_MAX_SERPS_PER_RUN", 1)
+
+    with get_session() as s:
+        # Measured today; the other keyword has never been measured at all.
+        s.add(_rank("fresh flooring", "Langley", 3))
+
+    calls: list[str] = []
+
+    class _Client:
+        enabled = True
+        last_error = None
+
+        def local_serp(self, keyword, *, location_code, **kw):
+            calls.append(keyword)
+            return {"items": [], "cost": 0.002}
+
+    job.sync_local_serp(client=_Client(), today=TODAY)
+
+    assert calls == ["stale flooring"]

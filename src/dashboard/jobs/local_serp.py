@@ -59,6 +59,12 @@ OUR_DOMAIN = "drflooring.ca"
 #: pre-flight estimate used to decide whether to call at all.
 ESTIMATED_COST = 0.002
 
+#: SERPs per run. Each live request takes 4-8 seconds against a 60 second
+#: Vercel function ceiling, so this is a wall-clock budget, not a money one —
+#: the money cap is separate and much larger. Eight leaves headroom for a
+#: slow response and the writes afterwards.
+_MAX_SERPS_PER_RUN = 8
+
 
 def _cities() -> list[tuple[str, int]]:
     """(name, DataForSEO location_code) pairs to search from.
@@ -172,64 +178,83 @@ def sync_local_serp(
             detail=detail,
         )
 
-    # One SERP per keyword per city, cheapest-first ordering so a budget that
-    # runs out mid-run has spent it on the terms the owner named.
+    # ── What to measure this run ────────────────────────────────────
+    # Every (keyword, city) pair is a separate SERP request taking 4-8
+    # seconds, so the full grid does NOT fit in a Vercel function: 6 keywords
+    # across 4 cities is 24 requests and roughly two minutes, against a 60
+    # second ceiling. Found the hard way — the first production run was
+    # killed mid-flight.
+    #
+    # So the pairs rotate, stalest first, exactly like the competitor
+    # collectors. Every pair is covered within a few days, no run approaches
+    # the limit, and a keyword added today is measured tomorrow rather than
+    # pushing something else out.
+    pairs = [(k, name, code) for k in keywords for name, code in cities]
+    with get_session() as session:
+        seen = {
+            (row.keyword, row.city): row.date
+            for row in session.query(LocalSerpRank).all()
+        }
+    pairs.sort(key=lambda p: (seen.get((p[0], p[1])) or date.min, p[0], p[1]))
+    pairs = pairs[:_MAX_SERPS_PER_RUN]
+    detail["pairs_this_run"] = len(pairs)
+    detail["pairs_total"] = len(keywords) * len(cities)
+
     now = datetime.now(timezone.utc)
     calls = written = in_pack = 0
     cost_total = 0.0
     failures: list[str] = []
 
-    for keyword in keywords:
-        for city_name, code in cities:
-            if (remaining - cost_total) < ESTIMATED_COST:
-                break
-            result = client.local_serp(keyword, location_code=code)
-            calls += 1
-            if result is None:
-                failures.append(f"{keyword} @ {city_name}: {client.last_error}")
-                continue
-            cost_total += float(result.get("cost") or 0.0) or ESTIMATED_COST
+    for keyword, city_name, code in pairs:
+        if (remaining - cost_total) < ESTIMATED_COST:
+            break
+        result = client.local_serp(keyword, location_code=code)
+        calls += 1
+        if result is None:
+            failures.append(f"{keyword} @ {city_name}: {client.last_error}")
+            continue
+        cost_total += float(result.get("cost") or 0.0) or ESTIMATED_COST
 
-            items = result.get("items") or []
-            organic = [i for i in items if i.get("type") == "organic"]
-            pack = [i for i in items if i.get("type") == "local_pack"]
+        items = result.get("items") or []
+        organic = [i for i in items if i.get("type") == "organic"]
+        pack = [i for i in items if i.get("type") == "local_pack"]
 
-            ours = next(
-                (i for i in organic if OUR_DOMAIN in (i.get("domain") or "")), None
-            )
-            ours_pack = next(
-                (i for i in pack if OUR_DOMAIN in json.dumps(i).lower()), None
-            )
-            if ours_pack:
-                in_pack += 1
+        ours = next(
+            (i for i in organic if OUR_DOMAIN in (i.get("domain") or "")), None
+        )
+        ours_pack = next(
+            (i for i in pack if OUR_DOMAIN in json.dumps(i).lower()), None
+        )
+        if ours_pack:
+            in_pack += 1
 
-            with get_session() as session:
-                session.query(LocalSerpRank).filter(
-                    LocalSerpRank.date == today,
-                    LocalSerpRank.keyword == keyword,
-                    LocalSerpRank.city == city_name,
-                ).delete(synchronize_session=False)
-                session.add(LocalSerpRank(
-                    date=today,
-                    keyword=keyword,
-                    city=city_name,
-                    # None, not a big number: "not in the results" is a
-                    # different fact from "ranked 100th", and averaging a
-                    # placeholder would invent a position we never held.
-                    position=ours.get("rank_group") if ours else None,
-                    pack_position=(
-                        ours_pack.get("rank_group") if ours_pack else None
-                    ),
-                    top_domains_json=json.dumps(
-                        [i.get("domain") for i in organic[:5] if i.get("domain")]
-                    ),
-                    pack_names_json=json.dumps(
-                        [str(i.get("title") or "")[:120] for i in pack[:3]]
-                    ),
-                    results_seen=len(organic),
-                    fetched_at=now,
-                ))
-                written += 1
+        with get_session() as session:
+            session.query(LocalSerpRank).filter(
+                LocalSerpRank.date == today,
+                LocalSerpRank.keyword == keyword,
+                LocalSerpRank.city == city_name,
+            ).delete(synchronize_session=False)
+            session.add(LocalSerpRank(
+                date=today,
+                keyword=keyword,
+                city=city_name,
+                # None, not a big number: "not in the results" is a
+                # different fact from "ranked 100th", and averaging a
+                # placeholder would invent a position we never held.
+                position=ours.get("rank_group") if ours else None,
+                pack_position=(
+                    ours_pack.get("rank_group") if ours_pack else None
+                ),
+                top_domains_json=json.dumps(
+                    [i.get("domain") for i in organic[:5] if i.get("domain")]
+                ),
+                pack_names_json=json.dumps(
+                    [str(i.get("title") or "")[:120] for i in pack[:3]]
+                ),
+                results_seen=len(organic),
+                fetched_at=now,
+            ))
+            written += 1
 
     if cost_total > 0:
         with get_session() as session:
