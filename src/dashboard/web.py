@@ -28,7 +28,7 @@ from dashboard import (
     advisor, alerts, auth, charts, cron, diffing, experiments, refresh,
     reporting, scheduler, store,
 )
-from blog_pipeline.tools.shopify import ShopifyError
+from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
 from dashboard.config import get_settings, is_serverless, pipeline
 from dashboard.db import init_db, init_pipeline_db
@@ -551,6 +551,65 @@ def create_app() -> FastAPI:
             client.close()
         except LinearError:
             log.exception("Linear sync failed for countered topic %r", topic)
+
+    @app.post("/blog/{article_id}/send-to-shopify")
+    def send_draft_to_shopify(article_id: int):
+        """Create the article in Shopify as an UNPUBLISHED draft.
+
+        For articles QA held back: they have a finished body sitting in the
+        database and no presence in Shopify at all, so there is nowhere to
+        review them except a Linear description. This puts the real thing in
+        the real editor, still hidden, and the publish decision stays a human
+        click in Shopify admin.
+
+        `published=False` always, regardless of SHOPIFY_PUBLISH_LIVE. That
+        setting governs what the automated pipeline may do on its own; this
+        is a person asking for a draft, and answering it by publishing live
+        would be the single worst way to misread the request.
+        """
+        from blog_pipeline.db.models import Article as PipelineArticle
+        from blog_pipeline.db.session import get_session as pipeline_session
+
+        with pipeline_session() as session:
+            row = session.get(PipelineArticle, article_id)
+            if row is None:
+                return JSONResponse({"error": "unknown article"}, status_code=404)
+            if row.shopify_article_id:
+                # Already there. Never create a second copy of a post.
+                return RedirectResponse(
+                    f"/blog/{article_id}?already=1", status_code=303
+                )
+            if not (row.draft_html or "").strip():
+                return RedirectResponse(
+                    f"/blog/{article_id}?nobody=1", status_code=303
+                )
+            payload = {
+                "title": row.title or row.topic,
+                "body_html": row.draft_html,
+                "summary": row.seo_description,
+                "seo_title": row.seo_title,
+                "seo_description": row.seo_description,
+                "handle": row.handle,
+            }
+
+        try:
+            client = ShopifyClient()
+            try:
+                result = client.create_article(published=False, **payload)
+            finally:
+                client.close()
+        except ShopifyError as e:
+            log.exception("sending article %s to Shopify failed", article_id)
+            return RedirectResponse(
+                f"/blog/{article_id}?error={quote(str(e)[:200])}", status_code=303
+            )
+
+        with pipeline_session() as session:
+            row = session.get(PipelineArticle, article_id)
+            if row is not None:
+                row.shopify_article_id = result.article_id
+                row.shopify_url = result.url
+        return RedirectResponse(f"/blog/{article_id}?drafted=1", status_code=303)
 
     # ── Competitors ─────────────────────────────────────────────────
     @app.get("/competitors", response_class=HTMLResponse)

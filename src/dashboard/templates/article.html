@@ -6,6 +6,17 @@
 <div class="page-head">
   <a href="/blog" class="muted small">‹ Blog</a>
 </div>
+{% if request.query_params.get('drafted') %}
+<div class="notice"><strong>Created in Shopify as a hidden draft.</strong>
+  Open it there to review and publish — nothing is public yet.</div>
+{% elif request.query_params.get('already') %}
+<div class="notice">Already in Shopify — not creating a second copy.</div>
+{% elif request.query_params.get('nobody') %}
+<div class="notice bad-box">This article has no stored body to send.</div>
+{% elif request.query_params.get('error') %}
+<div class="notice bad-box"><strong>Shopify refused it.</strong>
+  {{ request.query_params.get('error') }}</div>
+{% endif %}
 <h1 class="article-title">{{ a.title }}</h1>
 <p class="muted small">
   {{ a.status or 'unknown' }}
@@ -17,6 +28,95 @@
   {% endif %}
   {% if a.published_at %}· published {{ a.published_at | when }}{% endif %}
 </p>
+
+{% if detail.draft %}
+{% set d = detail.draft %}
+{# The article itself. Reading a draft used to mean opening Linear — a second
+   tool, a second login, and a place none of the numbers on this page are. #}
+<section class="panel draft-panel">
+  <div class="draft-head">
+    <h2>The article</h2>
+    <span class="muted small">
+      {{ d.words | int_ }} words
+      {%- if d.seo_score %} · SEO {{ '%.0f' | format(d.seo_score) }}{% endif %}
+      {%- if d.confidence is not none %} · confidence {{ '%.2f' | format(d.confidence) }}{% endif %}
+      {%- if d.verdict %} · QA {{ d.verdict }}{% endif %}
+      {%- if d.cost_usd %} · ${{ '%.2f' | format(d.cost_usd) }} to write{% endif %}
+    </span>
+  </div>
+
+  {% if d.keywords %}
+  <p class="muted small">Target keywords: {{ d.keywords | join(', ') }}</p>
+  {% endif %}
+
+  {# What Google shows. Worth seeing before publishing, because the title and
+     description are what decide the click — and on this site the pages with
+     the most impressions are losing on exactly this. #}
+  <div class="serp-preview">
+    <div class="serp-url">drflooring.ca › blogs › news › {{ d.handle or '…' }}</div>
+    <div class="serp-title">{{ d.seo_title or d.title }}</div>
+    <div class="serp-desc">{{ d.seo_description or '(no meta description set)' }}</div>
+  </div>
+
+  {% if d.qa_notes or d.unverifiable_claims or d.brand_safety_issues %}
+  <details class="qa-notes" {{ 'open' if d.verdict and d.verdict != 'pass' }}>
+    <summary>What QA said</summary>
+    {% if d.qa_notes %}<p>{{ d.qa_notes }}</p>{% endif %}
+    {% if d.unverifiable_claims %}
+    <p class="small"><strong>Unverifiable claims</strong> — figures the model
+      couldn't ground, so check them before this goes out:</p>
+    <ul>{% for c in d.unverifiable_claims %}<li>{{ c }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if d.brand_safety_issues %}
+    <p class="small bad"><strong>Brand safety</strong></p>
+    <ul>{% for c in d.brand_safety_issues %}<li>{{ c }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% if d.duplicate_of %}
+    <p class="small">Flagged as a possible duplicate of: {{ d.duplicate_of }}</p>
+    {% endif %}
+  </details>
+  {% endif %}
+
+  {% if d.failure_reason %}
+  <p class="bad small">{{ d.failure_reason }}</p>
+  {% endif %}
+
+  {% if d.body_html %}
+  <details class="draft-body" open>
+    <summary>Read the full article</summary>
+    <article class="draft-html">{{ d.body_html | safe }}</article>
+  </details>
+  {% else %}
+  <p class="muted small">No body stored for this article.</p>
+  {% endif %}
+
+  {% if d.status != 'published' %}
+  <div class="draft-actions">
+    {% if a.shopify_url %}
+    <p class="muted small">
+      In Shopify already, unpublished —
+      <a href="{{ a.shopify_url }}" target="_blank" rel="noopener">open it</a>
+      and click Publish when you're happy.
+    </p>
+    {% else %}
+    <form method="post" action="/blog/{{ a.pipeline_id }}/send-to-shopify"
+          onsubmit="return confirm('Create this in Shopify as a hidden draft? Nothing goes public — you publish it yourself in Shopify admin.');">
+      <button type="submit" class="primary">Send to Shopify as a draft</button>
+      <span class="muted small">
+        Creates it unpublished. Nothing goes live until you say so there.
+      </span>
+    </form>
+    {% endif %}
+    {% if d.linear_url %}
+    <p class="muted small">
+      <a href="{{ d.linear_url }}" target="_blank" rel="noopener">Linear issue</a>
+      is still there if you want the discussion thread.
+    </p>
+    {% endif %}
+  </div>
+  {% endif %}
+</section>
+{% endif %}
 
 {% if request.query_params.get('applied') %}
 <div class="notice ok">Published. The live article now shows the approved version.</div>

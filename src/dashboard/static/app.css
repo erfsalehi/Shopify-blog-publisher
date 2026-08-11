@@ -350,3 +350,39 @@ ul.tight li { margin: 2px 0; }
 .price-chart .legend { font-size: 11px; font-weight: 600; }
 .price-chart .ours-key { fill: var(--accent); }
 .price-chart .theirs-key { fill: var(--warn); }
+
+/* ── The article's own text, on the page that has its numbers ────── */
+/* Generated HTML from the pipeline. Ours, not third-party — but it's the one
+   place a large HTML blob reaches a page here, so it's boxed: constrained
+   width, its own type scale, and no ability to escape the container. */
+.draft-panel { padding: 18px 20px; margin: 16px 0; }
+.draft-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.draft-head h2 { margin: 0; }
+.draft-body summary, .qa-notes summary { cursor: pointer; font-weight: 600; }
+.qa-notes { margin: 10px 0; }
+.qa-notes ul { margin: 6px 0 0 18px; }
+.draft-html {
+  display: block; max-width: 68ch; margin-top: 14px;
+  padding-top: 14px; border-top: 1px solid var(--line);
+  line-height: 1.65; overflow-wrap: break-word;
+}
+.draft-html img { max-width: 100%; height: auto; }
+.draft-html h2 { font-size: 20px; margin: 22px 0 8px; }
+.draft-html h3 { font-size: 16px; margin: 18px 0 6px; }
+.draft-html table { display: block; overflow-x: auto; max-width: 100%; }
+
+/* How the post will look in Google. The titles on this site's biggest pages
+   are what's losing the click, so seeing them as a result — not as a form
+   field — is the point. */
+.serp-preview {
+  margin: 14px 0; padding: 12px 14px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--bg);
+  max-width: 600px;
+}
+.serp-url { font-size: 12px; color: var(--muted); }
+.serp-title {
+  color: var(--running); font-size: 18px; line-height: 1.3; margin: 2px 0 3px;
+}
+.serp-desc { font-size: 13px; color: var(--muted); line-height: 1.45; }
+.draft-actions { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.draft-actions form { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }

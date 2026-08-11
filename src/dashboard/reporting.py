@@ -579,6 +579,7 @@ def article_detail(
     was = previous.get(key, Metrics())
     return {
         "article": article,
+        "draft": article_draft(article_id),
         "current": now,
         "previous": was,
         "clicks_delta": now.clicks - was.clicks,
@@ -1428,3 +1429,57 @@ def price_visibility_gaps(*, limit: int = 12) -> list[dict]:
         if len(kept) >= limit:
             break
     return kept
+
+
+def article_draft(article_id: int) -> dict | None:
+    """The article's own text, straight from the pipeline.
+
+    Reading a draft meant opening Linear, which is a second tool, a second
+    login, and a place the numbers aren't. The body already exists in the
+    pipeline's `article.draft_html` — 11,000 to 20,000 characters of finished
+    HTML per post — and nothing was showing it.
+
+    Returned as the stored HTML, rendered inside a sandboxed container by the
+    template. It is our own generated content, not third-party input, but it
+    is still the one place on this dashboard where a large HTML blob reaches
+    a page, so it gets the same treatment untrusted markup would.
+    """
+    try:
+        from blog_pipeline.db.models import Article as PipelineArticle
+        from blog_pipeline.db.session import get_session as pipeline_session
+    except Exception:  # noqa: BLE001
+        return None
+
+    try:
+        with pipeline_session() as session:
+            row = session.get(PipelineArticle, article_id)
+            if row is None:
+                return None
+            report = row.qa_report or {}
+            return {
+                "title": row.title or row.topic,
+                "seo_title": row.seo_title,
+                "seo_description": row.seo_description,
+                "handle": row.handle,
+                "body_html": row.draft_html or "",
+                "words": len((row.draft_html or "").split()),
+                "keywords": list(row.target_keywords or []),
+                "seo_score": row.seo_score,
+                "confidence": row.qa_confidence_score,
+                "verdict": report.get("verdict"),
+                # `notes` is prose, not a list. Treating it as a list renders
+                # "What QA flagged (261)" and then iterates the string one
+                # character at a time — 261 being its length.
+                "qa_notes": (report.get("notes") or "").strip() or None,
+                # These two genuinely are lists, and they're the specific,
+                # checkable objections — worth separating from the prose.
+                "unverifiable_claims": list(report.get("unverifiable_claims") or []),
+                "brand_safety_issues": list(report.get("brand_safety_issues") or []),
+                "duplicate_of": report.get("duplicate_of"),
+                "status": getattr(row.status, "name", None) or str(row.status),
+                "failure_reason": row.failure_reason,
+                "linear_url": row.linear_url,
+                "cost_usd": row.cost_usd or 0.0,
+            }
+    except Exception:  # noqa: BLE001 - an unreadable pipeline DB is a message
+        return None
