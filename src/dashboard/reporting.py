@@ -32,11 +32,13 @@ from dashboard.models import (
     CompetitorPost,
     CompetitorProduct,
     CompetitorProductPrice,
+    Ga4CityDaily,
     Ga4EventDaily,
     GscPageDaily,
     GscQueryDaily,
     GscSiteDaily,
     KeywordMetric,
+    LocalSerpRank,
     Experiment,
     ExperimentProduct,
     MatchStatus,
@@ -1483,3 +1485,149 @@ def article_draft(article_id: int) -> dict | None:
             }
     except Exception:  # noqa: BLE001 - an unreadable pipeline DB is a message
         return None
+
+
+# ── Local SEO ───────────────────────────────────────────────────────
+
+#: Cities that count as "home" for this business. Langley appears twice in
+#: GA4 because Google reports the City of Langley and Langley Township as
+#: separate places; a local report that shows one and not the other
+#: understates the home market by roughly a third.
+HOME_CITIES = ("Langley", "Langley Township")
+
+
+def local_seo(*, days: int = 90, today: date | None = None) -> dict:
+    """Everything the Local SEO page shows.
+
+    The organising question is narrow on purpose: *how are we doing in
+    Langley, and what would move us up*. Site-wide numbers are deliberately
+    absent — they're on the Overview, and mixing them in here is how a local
+    report ends up reassuring you with national traffic.
+    """
+    today = today or date.today()
+    since = today - timedelta(days=days - 1)
+
+    with get_session() as session:
+        rows = (
+            session.query(
+                Ga4CityDaily.city,
+                Ga4CityDaily.region,
+                func.sum(Ga4CityDaily.sessions),
+                func.sum(Ga4CityDaily.conversions),
+            )
+            .filter(Ga4CityDaily.date >= since)
+            .group_by(Ga4CityDaily.city, Ga4CityDaily.region)
+            .order_by(func.sum(Ga4CityDaily.sessions).desc())
+            .all()
+        )
+        latest_rank_day = session.query(func.max(LocalSerpRank.date)).scalar()
+        ranks = (
+            session.query(LocalSerpRank)
+            .filter(LocalSerpRank.date == latest_rank_day)
+            .order_by(LocalSerpRank.keyword, LocalSerpRank.city)
+            .all()
+            if latest_rank_day else []
+        )
+        for row in ranks:
+            session.expunge(row)
+
+        # Local-intent search terms from Search Console. Free, and the only
+        # demand signal that is genuinely ours rather than an estimate.
+        end = settled_through(today)
+        start = end - timedelta(days=27)
+        queries = (
+            session.query(
+                GscQueryDaily.query,
+                func.sum(GscQueryDaily.clicks),
+                func.sum(GscQueryDaily.impressions),
+                func.sum(GscQueryDaily.position * GscQueryDaily.impressions),
+            )
+            .filter(GscQueryDaily.date >= start, GscQueryDaily.date <= end)
+            .group_by(GscQueryDaily.query)
+            .all()
+        )
+
+    total_sessions = sum(int(s or 0) for _, _, s, _ in rows)
+    total_conversions = sum(int(c or 0) for _, _, _, c in rows)
+
+    cities = []
+    for city, region, sessions, conversions in rows:
+        sessions = int(sessions or 0)
+        conversions = int(conversions or 0)
+        cities.append({
+            "city": city,
+            "region": region,
+            "sessions": sessions,
+            "conversions": conversions,
+            "share": (sessions / total_sessions * 100) if total_sessions else 0.0,
+            # Sessions per conversion is the honest framing: with 144 events
+            # across a year, a "conversion rate" to two decimals would imply
+            # a precision this sample cannot carry.
+            "per_conversion": (sessions / conversions) if conversions else None,
+            "home": city in HOME_CITIES,
+        })
+
+    home = [c for c in cities if c["home"]]
+    home_sessions = sum(c["sessions"] for c in home)
+    home_conversions = sum(c["conversions"] for c in home)
+
+    # Local-intent queries: those naming a place we care about.
+    places = tuple(p.lower() for p in HOME_CITIES) + (
+        "surrey", "abbotsford", "cloverdale", "fraser valley", "near me",
+    )
+    local_queries = []
+    for query, clicks, impressions, weight in queries:
+        text = (query or "").lower()
+        if not any(place in text for place in places):
+            continue
+        impressions = int(impressions or 0)
+        if impressions < 3:
+            continue
+        local_queries.append({
+            "query": query,
+            "clicks": int(clicks or 0),
+            "impressions": impressions,
+            "position": (float(weight or 0.0) / impressions) if impressions else 0.0,
+        })
+    local_queries.sort(key=lambda q: -q["impressions"])
+
+    # Rank tracking, grouped by keyword so the cities read across.
+    by_keyword: dict[str, list] = {}
+    for row in ranks:
+        by_keyword.setdefault(row.keyword, []).append(row)
+    pack_absent = [r for r in ranks if r.pack_position is None]
+    # Who holds the pack, counted across every keyword and city measured.
+    pack_holders: dict[str, int] = {}
+    for row in ranks:
+        for name in row.pack_names:
+            pack_holders[name] = pack_holders.get(name, 0) + 1
+    rivals: dict[str, int] = {}
+    for row in ranks:
+        for domain in row.top_domains[:3]:
+            if domain and "drflooring" not in domain:
+                rivals[domain] = rivals.get(domain, 0) + 1
+
+    return {
+        "days": days,
+        "cities": cities[:25],
+        "total_sessions": total_sessions,
+        "total_conversions": total_conversions,
+        "home_cities": HOME_CITIES,
+        "home_sessions": home_sessions,
+        "home_conversions": home_conversions,
+        "home_share": (
+            home_sessions / total_sessions * 100 if total_sessions else 0.0
+        ),
+        "has_city_data": bool(rows),
+        "local_queries": local_queries[:25],
+        "ranks_by_keyword": by_keyword,
+        "rank_day": latest_rank_day,
+        "has_ranks": bool(ranks),
+        "pack_absent_count": len(pack_absent),
+        "pack_measured": len(ranks),
+        "pack_holders": sorted(
+            pack_holders.items(), key=lambda kv: -kv[1]
+        )[:6],
+        "top_rivals": sorted(rivals.items(), key=lambda kv: -kv[1])[:6],
+        "today": today,
+    }

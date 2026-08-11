@@ -462,6 +462,58 @@ Two findings from wiring this up:
   DataForSEO's own message instead of a guess. Verify at
   <https://app.dataforseo.com/> to turn the volume column on.
 
+## Local SEO
+
+One market: Langley. Site-wide numbers are deliberately absent — they're on
+the Overview, and mixing them in is how a local report reassures you with
+national traffic.
+
+**Two traps this page exists to avoid**, both of which produce a number that
+looks fine and is wrong:
+
+- **Search Console has no city dimension.** Its position is a single national
+  average. Measured live, `flooring langley` sat at **position 16 nationally
+  and position 2 inside Langley**. Acting on the 16 would mean rewriting a
+  page that is already nearly first where it matters.
+- **GA4 reports Langley as two cities** — the City of Langley and Langley
+  Township. Counting one understates the home market by about a third (156
+  sessions vs 57 over the same period on the real property).
+
+### Where the data comes from
+
+| Source | Gives | Cost |
+|---|---|---|
+| `ga4_city` | Sessions and phone/WhatsApp conversions per city per day | free |
+| `local_serp` | Organic rank **and local pack**, searched from inside each city | ~$0.002 per term per city |
+| Search Console | Local-intent queries the site appears for (national position) | free |
+
+`local_serp` reads DataForSEO's advanced SERP with a city `location_code`,
+on the mobile SERP because local intent is overwhelmingly phone traffic and
+the pack sits higher there. Codes are confirmed against DataForSEO's own CA
+list rather than guessed — a wrong code silently returns a SERP for somewhere
+else, which is the kind of error that looks exactly like data.
+
+It has its own budget cap, separate from the keyword job's. Sharing one would
+let a keyword refresh quietly consume the month's rank tracking.
+
+**"Not in the results" is stored as null, never as a large number.** A
+placeholder rank would average into a position the site never held, and the
+average is the figure anyone would quote.
+
+### What the first live run found
+
+Organic **#2** in Langley for "flooring langley" (Nufloors is #1), #5–6 for
+"flooring store langley" — and **absent from the local pack on every term in
+every city**. Those two facts point at completely different work. The pack is
+ranked largely on proximity, review count and rating, and Google Business
+Profile completeness; none of that is on the website, so no page edit moves
+it. The advisor's `local` scope is told this explicitly so it doesn't
+recommend content changes as a route into the pack.
+
+**No Google Business Profile is connected to this project**, so reviews and
+profile completeness can't be measured here at all. That's the single largest
+gap between the current position and being first in Langley.
+
 ## Competitors
 
 Add competitors on the Settings page — a name and their website. Everything

@@ -686,6 +686,95 @@ class ExperimentProduct(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class Ga4CityDaily(Base):
+    """Sessions and conversion events for one city on one day.
+
+    The only city-level data this business already owns. Search Console has
+    no city dimension at all (country is as fine as it gets), so without this
+    every "how are we doing in Langley" question is unanswerable from the
+    other tables — and Langley is where the showroom is.
+
+    Conversions are on the same row as sessions rather than in a second
+    table: the question is always the ratio, and a city with traffic and no
+    calls is the finding. Splitting them would make the interesting number a
+    join.
+    """
+
+    __tablename__ = "ga4_city_daily"
+    __table_args__ = (
+        UniqueConstraint("date", "city", name="uq_ga4_city_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    city: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    region: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    country: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    sessions: Mapped[int] = mapped_column(Integer, default=0)
+    users: Mapped[int] = mapped_column(Integer, default=0)
+    engaged_sessions: Mapped[int] = mapped_column(Integer, default=0)
+    #: call_click + whatsapp_click + directions_click, summed. The store's
+    #: actual outcome — nothing is checked out on this site.
+    conversions: Mapped[int] = mapped_column(Integer, default=0)
+
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class LocalSerpRank(Base):
+    """Where we rank for one keyword, searched from inside one city.
+
+    Search Console reports a single national average position, which for a
+    business with one showroom is close to meaningless: "flooring langley" at
+    position 16 nationally says nothing about position *in Langley*, and
+    Langley is the only place the answer matters.
+
+    `pack_position` is tracked separately because the local pack is a
+    different competition from the blue links — a business can be absent from
+    one and first in the other, and for a flooring showroom the pack is
+    usually the one that produces the phone call.
+    """
+
+    __tablename__ = "local_serp_rank"
+    __table_args__ = (
+        UniqueConstraint("date", "keyword", "city", name="uq_local_rank_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    keyword: Mapped[str] = mapped_column(String(300), index=True, nullable=False)
+    city: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+
+    #: Null means "not in the results at all", which is different from a bad
+    #: position and must not be stored as a large number — averaging those
+    #: together would invent a rank we never held.
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pack_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: Who did hold the top spots, so "why aren't we there" has an answer on
+    #: the same row. JSON list of domains, best first.
+    top_domains_json: Mapped[str] = mapped_column(Text, default="[]")
+    pack_names_json: Mapped[str] = mapped_column(Text, default="[]")
+    results_seen: Mapped[int] = mapped_column(Integer, default=0)
+
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    @property
+    def top_domains(self) -> list[str]:
+        try:
+            loaded = json.loads(self.top_domains_json)
+        except ValueError:
+            return []
+        return loaded if isinstance(loaded, list) else []
+
+    @property
+    def pack_names(self) -> list[str]:
+        try:
+            loaded = json.loads(self.pack_names_json)
+        except ValueError:
+            return []
+        return loaded if isinstance(loaded, list) else []
+
+
 class CompetitorPlatform(str, enum.Enum):
     """How a competitor's site gives up its data.
 

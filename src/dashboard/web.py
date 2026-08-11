@@ -193,6 +193,7 @@ _ADVICE_GUARD = threading.Lock()
 _SCOPE_PATHS = {
     "overview": "", "products": "products", "blog": "blog",
     "keywords": "keywords", "ads": "ads", "experiments": "experiments",
+    "competitors": "competitors", "local": "local",
 }
 
 
@@ -610,6 +611,17 @@ def create_app() -> FastAPI:
                 row.shopify_article_id = result.article_id
                 row.shopify_url = result.url
         return RedirectResponse(f"/blog/{article_id}?drafted=1", status_code=303)
+
+    # ── Local SEO ───────────────────────────────────────────────────
+    @app.get("/local", response_class=HTMLResponse)
+    def local_page(request: Request, window: int = 90):
+        window = max(28, min(window, 365))
+        return render(
+            request, "local.html",
+            data=reporting.local_seo(days=window),
+            window=window,
+            advisor_scope="local",
+        )
 
     # ── Competitors ─────────────────────────────────────────────────
     @app.get("/competitors", response_class=HTMLResponse)

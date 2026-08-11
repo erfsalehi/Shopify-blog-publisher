@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+{% block title %}Local SEO{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Local SEO <span class="muted small">Langley</span></h1>
+  <span class="muted small">last {{ data.days }} days</span>
+</div>
+
+<p class="muted window-note">
+  Everything here is about <strong>one market</strong>. Site-wide numbers live
+  on the Overview and are deliberately absent — mixing them in is how a local
+  report reassures you with national traffic. Search Console has no city
+  dimension at all, so the two sources that can answer local questions are
+  GA4's city breakdown and rankings measured from inside each city.
+</p>
+
+{% if not data.has_city_data %}
+<div class="notice">
+  <strong>No city data yet.</strong>
+  Run <a href="/jobs">Analytics by city</a> — it's free, and GA4 has been
+  recording this all along.
+</div>
+{% else %}
+
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Langley sessions</div>
+    <div class="card-value">{{ data.home_sessions | int_ }}</div>
+    <div class="card-delta {{ 'bad' if data.home_share < 10 }}">
+      {{ '%.1f' | format(data.home_share) }}% of all traffic
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">Langley conversions</div>
+    <div class="card-value">{{ data.home_conversions | int_ }}</div>
+    <div class="card-delta muted">calls, WhatsApp, directions</div>
+  </div>
+  {% if data.has_ranks %}
+  <div class="card">
+    <div class="card-label">In the local pack</div>
+    <div class="card-value {{ 'bad' if data.pack_absent_count == data.pack_measured }}">
+      {{ data.pack_measured - data.pack_absent_count }}/{{ data.pack_measured }}
+    </div>
+    <div class="card-delta muted">searches measured</div>
+  </div>
+  {% endif %}
+  <div class="card">
+    <div class="card-label">Local search terms</div>
+    <div class="card-value">{{ data.local_queries | length | int_ }}</div>
+    <div class="card-delta muted">naming a place we serve</div>
+  </div>
+</section>
+
+{% if data.has_ranks and data.pack_absent_count == data.pack_measured %}
+<div class="notice bad-box">
+  <strong>You are not in the local pack for anything measured.</strong>
+  The pack is the three-business box with the map, and for a showroom it is
+  usually what produces the phone call — a different competition from the blue
+  links below, which you are already near the top of. It is ranked mostly on
+  proximity, reviews and Google Business Profile completeness, none of which
+  live on your website.
+  {% if data.pack_holders %}
+  Currently held by
+  {% for name, n in data.pack_holders[:3] %}<strong>{{ name }}</strong>{% if not loop.last %}, {% endif %}{% endfor %}.
+  {% endif %}
+  <p class="muted small">
+    This project has no Google Business Profile connected, so none of that is
+    measurable here yet. It's the single largest gap between where you are and
+    being first in Langley.
+  </p>
+</div>
+{% endif %}
+
+{% if data.has_ranks %}
+<h2>Where you rank, searched from each city
+  <span class="muted small">{{ data.rank_day }}</span></h2>
+<p class="muted small">
+  Google shows a different result page inside each city. Search Console
+  reports one national average, which for a single showroom hides the
+  answer — measured live, one term sat at position 16 nationally and
+  <strong>position 2 inside Langley</strong>.
+  <em>Organic</em> is the blue links; <em>pack</em> is the map box.
+</p>
+<table>
+  <thead>
+    <tr><th>Search term</th><th>City</th><th class="n">Organic</th>
+        <th class="n">Pack</th><th>Who is above you</th></tr>
+  </thead>
+  <tbody>
+    {% for keyword, rows in data.ranks_by_keyword.items() %}
+      {% for row in rows %}
+      <tr>
+        <td>{% if loop.first %}{{ keyword }}{% endif %}</td>
+        <td class="muted small">{{ row.city }}</td>
+        <td class="n {{ 'good' if row.position and row.position <= 3 }}">
+          {% if row.position %}{{ row.position }}
+          {% else %}<span class="muted">not in top 20</span>{% endif %}
+        </td>
+        <td class="n {{ 'bad' if not row.pack_position }}">
+          {% if row.pack_position %}{{ row.pack_position }}
+          {% else %}<span class="muted">absent</span>{% endif %}
+        </td>
+        <td class="muted small">
+          {% for domain in row.top_domains[:3] if 'drflooring' not in domain
+          %}{{ domain }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}
+        </td>
+      </tr>
+      {% endfor %}
+    {% endfor %}
+  </tbody>
+</table>
+{% if data.top_rivals %}
+<p class="muted small">
+  Most often ahead of you:
+  {% for domain, n in data.top_rivals %}<strong>{{ domain }}</strong> ({{ n }}){% if not loop.last %} · {% endif %}{% endfor %}
+</p>
+{% endif %}
+{% else %}
+<div class="notice">
+  <strong>No rank tracking yet.</strong>
+  Run <a href="/jobs">Local rank tracking</a> — about $0.002 per search term
+  per city, so a full run across four cities costs a few cents.
+</div>
+{% endif %}
+
+<h2>Who visits, and who calls</h2>
+<p class="muted small">
+  Sessions per conversion rather than a percentage: across the whole property
+  this is a small number of events, and a rate to two decimals would imply a
+  precision the sample can't carry. Home cities are marked.
+</p>
+<table>
+  <thead>
+    <tr><th>City</th><th class="n">Sessions</th><th class="n">Share</th>
+        <th class="n">Conversions</th><th class="n">Sessions per conversion</th></tr>
+  </thead>
+  <tbody>
+    {% for row in data.cities %}
+    <tr class="{{ 'us' if row.home }}">
+      <td>
+        {% if row.home %}<strong>{{ row.city }}</strong>{% else %}{{ row.city }}{% endif %}
+        {% if row.region %}<span class="muted small">{{ row.region }}</span>{% endif %}
+      </td>
+      <td class="n">{{ row.sessions | int_ }}</td>
+      <td class="n muted">{{ '%.1f' | format(row.share) }}%</td>
+      <td class="n {{ 'good' if row.conversions }}">{{ row.conversions | int_ }}</td>
+      <td class="n muted">
+        {% if row.per_conversion %}{{ '%.0f' | format(row.per_conversion) }}
+        {% else %}—{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if data.local_queries %}
+<h2>Local searches you already appear for</h2>
+<p class="muted small">
+  From Search Console, so these are real impressions rather than an estimate —
+  but the position is a <strong>national</strong> average. Where a term also
+  appears in the rank table above, trust that number instead.
+</p>
+<table>
+  <thead>
+    <tr><th>Search term</th><th class="n">Impressions</th><th class="n">Clicks</th>
+        <th class="n">Position (national)</th></tr>
+  </thead>
+  <tbody>
+    {% for q in data.local_queries %}
+    <tr>
+      <td>{{ q.query }}</td>
+      <td class="n">{{ q.impressions | int_ }}</td>
+      <td class="n">{{ q.clicks | int_ }}</td>
+      <td class="n muted">{{ '%.1f' | format(q.position) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% endif %}
+
+{% include "_advisor.html" %}
+{% endblock %}

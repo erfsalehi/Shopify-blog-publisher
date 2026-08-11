@@ -123,3 +123,45 @@ class DataForSEOClient:
                             }
                         )
         return results
+
+    def local_serp(
+        self,
+        keyword: str,
+        *,
+        location_code: int,
+        language_code: str = "en",
+        depth: int = 20,
+    ) -> dict | None:
+        """One SERP as Google shows it *inside* a given city.
+
+        This is the only way to answer "where do we rank in Langley". Search
+        Console reports a single national average position, which for a
+        business with one showroom is close to meaningless — "flooring
+        langley" at position 16 nationally says nothing about position 16 in
+        Langley, and Langley is the only place the answer matters.
+
+        `advanced` rather than `regular` because it returns the local pack
+        (`local_pack` items) alongside the organic list. For a flooring
+        showroom the pack is usually the thing that produces the phone call,
+        and it's a separate competition from the blue links — you can be
+        absent from one and first in the other.
+
+        Returns the raw first result, or None with `last_error` set.
+        """
+        data = self._post(
+            "/serp/google/organic/live/advanced",
+            [{
+                "keyword": keyword,
+                "location_code": location_code,
+                "language_code": language_code,
+                "depth": depth,
+                # Ask Google for the mobile SERP: local intent is
+                # overwhelmingly phone traffic, and the pack sits higher there.
+                "device": "mobile",
+            }],
+        )
+        if not data:
+            return None
+        tasks = data.get("tasks") or []
+        results = (tasks[0].get("result") or []) if tasks else []
+        return results[0] if results else None

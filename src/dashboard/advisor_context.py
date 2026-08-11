@@ -491,6 +491,83 @@ def _competitors(today: date) -> str:
     return "\n".join(lines)
 
 
+def _local(today: date) -> str:
+    data = reporting.local_seo(days=90, today=today)
+    if not data["has_city_data"]:
+        return (
+            "No city-level analytics has been synced yet, so nothing can be "
+            "said about local performance. Run the 'Analytics by city' job."
+        )
+
+    lines = [
+        f"LOCAL SEARCH, Langley BC, last {data['days']} days:",
+        f"- Home cities ({', '.join(data['home_cities'])}): "
+        f"{data['home_sessions']:,} sessions "
+        f"({data['home_share']:.1f}% of all traffic) and "
+        f"{data['home_conversions']} conversions.",
+        f"- Whole property: {data['total_sessions']:,} sessions, "
+        f"{data['total_conversions']} conversions.",
+        "",
+        "SESSIONS BY CITY (top):",
+    ]
+    for row in data["cities"][:12]:
+        mark = " [HOME]" if row["home"] else ""
+        lines.append(
+            f"- {row['city']}{mark}: {row['sessions']:,} sessions "
+            f"({row['share']:.1f}%), {row['conversions']} conversions"
+        )
+
+    if data["has_ranks"]:
+        lines += ["", f"RANKINGS MEASURED INSIDE EACH CITY ({data['rank_day']}):"]
+        for keyword, rows in data["ranks_by_keyword"].items():
+            for row in rows:
+                organic = row.position if row.position else "not in top 20"
+                pack = f"#{row.pack_position}" if row.pack_position else "ABSENT"
+                above = [d for d in row.top_domains[:3] if "drflooring" not in d]
+                lines.append(
+                    f"- '{keyword}' in {row.city}: organic {organic}, "
+                    f"local pack {pack}."
+                    + (f" Above us: {', '.join(above)}." if above else "")
+                )
+        if data["pack_holders"]:
+            held = ", ".join(f"{n} ({c})" for n, c in data["pack_holders"][:5])
+            lines += ["", f"WHO HOLDS THE LOCAL PACK: {held}."]
+        lines += [
+            "",
+            "IMPORTANT: the local pack is a different competition from the "
+            "organic links. It is ranked largely on proximity, review count "
+            "and rating, and Google Business Profile completeness — none of "
+            "which are on the website. Website edits cannot move it, so do "
+            "not recommend page changes as a way into the pack.",
+        ]
+    else:
+        lines += [
+            "",
+            "No in-city rank tracking has run yet, so where the site ranks "
+            "inside Langley is unknown. Do not infer it from Search Console: "
+            "that reports a single national average.",
+        ]
+
+    if data["local_queries"]:
+        lines += ["", "LOCAL SEARCH TERMS THE SITE APPEARS FOR (28 days, "
+                      "position is a NATIONAL average):"]
+        for q in data["local_queries"][:12]:
+            lines.append(
+                f"- '{q['query']}': {q['impressions']:,} impressions, "
+                f"{q['clicks']} clicks, national position {q['position']:.1f}"
+            )
+
+    lines += [
+        "",
+        "IMPORTANT: no Google Business Profile is connected to this project, "
+        "so reviews, profile completeness and map-pack impressions cannot be "
+        "measured here. Say so plainly rather than guessing at them.",
+        "The business is a flooring retailer and installer with one showroom "
+        "in Langley. A phone call is the outcome; nothing is bought online.",
+    ]
+    return "\n".join(lines)
+
+
 _BUILDERS = {
     "overview": _overview,
     "products": _products,
@@ -499,6 +576,7 @@ _BUILDERS = {
     "ads": _ads,
     "experiments": _experiments,
     "competitors": _competitors,
+    "local": _local,
 }
 
 

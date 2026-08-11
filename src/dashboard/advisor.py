@@ -45,7 +45,7 @@ log = logging.getLogger(__name__)
 
 SCOPES = (
     "overview", "products", "blog", "keywords", "ads", "experiments",
-    "competitors",
+    "competitors", "local",
 )
 
 SCOPE_TITLES = {
@@ -55,6 +55,8 @@ SCOPE_TITLES = {
     "keywords": "Search terms and market opportunity",
     "ads": "Google Ads against organic and calls",
     "experiments": "Running experiments",
+    "competitors": "Competitor catalogues, prices and blogs",
+    "local": "Local search visibility in Langley",
     "competitors": "Competitors' catalogues, prices and blogs",
 }
 

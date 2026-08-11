@@ -46,6 +46,11 @@ GA4_BACKFILL_DAYS = "ga4.backfill_days"
 GA4_RECENT_DAYS = "ga4.recent_days"
 GA4_EVENTS = "ga4.conversion_events"
 
+LOCAL_CITIES = "local.cities"
+LOCAL_SEEDS = "local.seed_keywords"
+LOCAL_BUDGET_USD = "local.budget_usd"
+LOCAL_MAX_KEYWORDS = "local.max_keywords_per_run"
+
 ADS_BACKFILL_DAYS = "ads.backfill_days"
 ADS_RECENT_DAYS = "ads.recent_days"
 
@@ -351,6 +356,83 @@ SPECS: tuple[Spec, ...] = (
     ),
 )
 
+LOCAL_SPECS: tuple[Spec, ...] = (
+    Spec(
+        key=LOCAL_CITIES,
+        # Location codes confirmed against DataForSEO's own CA list, not
+        # guessed. A wrong code silently returns a SERP for somewhere else,
+        # which is the kind of error that looks exactly like data.
+        default=[
+            "Langley:9226804",
+            "Langley Township:9072429",
+            "Surrey:1001964",
+            "Abbotsford:1001861",
+        ],
+        label="Cities to track rankings in",
+        help=(
+            "Name:location_code pairs, comma separated. Google shows a "
+            "different SERP inside each city, and Search Console only ever "
+            "reports one national average — so this is the only way to know "
+            "where the site actually stands in Langley. Codes come from "
+            "DataForSEO's /serp/google/locations/ca list."
+        ),
+        group="Local SEO",
+        kind="str",
+        coerce=_as_csv,
+    ),
+    Spec(
+        key=LOCAL_SEEDS,
+        default=[
+            "flooring langley",
+            "flooring store langley",
+            "laminate flooring langley",
+            "vinyl plank flooring langley",
+            "hardwood flooring langley",
+        ],
+        label="Local keywords to always track",
+        help=(
+            "Tracked every run regardless of what Search Console reports, "
+            "because the terms worth owning are often the ones the site "
+            "doesn't rank for yet — and those have no impressions to be "
+            "discovered from."
+        ),
+        group="Local SEO",
+        kind="str",
+        coerce=_as_csv,
+    ),
+    Spec(
+        key=LOCAL_MAX_KEYWORDS,
+        default=6,
+        label="Keywords per rank-tracking run",
+        help=(
+            "Each keyword costs one SERP request per city, so this times the "
+            "city count is the per-run bill. Six keywords across four cities "
+            "is 24 requests, roughly $0.05."
+        ),
+        group="Local SEO",
+        kind="int",
+        coerce=_as_int,
+        minimum=1,
+        maximum=50,
+    ),
+    Spec(
+        key=LOCAL_BUDGET_USD,
+        default=2.0,
+        label="Local rank tracking budget (USD, lifetime)",
+        help=(
+            "Its own cap, separate from the keyword budget — sharing one "
+            "would let a keyword refresh quietly eat the month's rank "
+            "tracking. The job refuses to call once this is reached."
+        ),
+        group="Local SEO",
+        kind="int",
+        coerce=_as_float,
+    ),
+)
+
+SPECS = SPECS + LOCAL_SPECS
+
+
 def _schedule_specs() -> tuple[Spec, ...]:
     """An enabled-toggle and an hour for every scheduled job.
 
@@ -363,6 +445,8 @@ def _schedule_specs() -> tuple[Spec, ...]:
         ("gsc_daily", "Search Console sync", 6),
         ("shopify_catalog", "Shopify catalogue snapshot", 5),
         ("ga4_daily", "Analytics sync", 6),
+        ("ga4_city", "Analytics by city", 6),
+        ("local_serp", "Local rank tracking", 5),
         ("ads_windsor", "Google Ads sync (Windsor)", 7),
         ("blog_articles", "Blog article index", 5),
         ("alerts", "Alert rules", 8),

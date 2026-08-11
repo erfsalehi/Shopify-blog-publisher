@@ -20,6 +20,8 @@ from dashboard.jobs.registry import JobResult, JobSpec, all_jobs, get_job, regis
 from dashboard.jobs import shopify_catalog as _shopify  # noqa: F401,E402
 from dashboard.jobs import gsc as _gsc  # noqa: F401,E402
 from dashboard.jobs import ga4 as _ga4  # noqa: F401,E402
+from dashboard.jobs import ga4_city as _ga4_city  # noqa: F401,E402
+from dashboard.jobs import local_serp as _local_serp  # noqa: F401,E402
 from dashboard.jobs import ads_windsor as _ads  # noqa: F401,E402
 from dashboard.jobs import blog_articles as _blog  # noqa: F401,E402
 from dashboard.jobs import dataforseo_keywords as _dfs  # noqa: F401,E402
