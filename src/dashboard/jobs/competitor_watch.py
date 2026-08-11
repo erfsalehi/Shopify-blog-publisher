@@ -102,6 +102,13 @@ def _platform_of(competitor_id: int) -> str:
         return row.platform if row else CompetitorPlatform.unknown.value
 
 
+def _selector_of(competitor_id: int) -> str | None:
+    """The owner's price CSS selector for this site, if they set one."""
+    with get_session() as session:
+        row = session.get(Competitor, competitor_id)
+        return (row.price_selector or None) if row else None
+
+
 # ── Catalogue ────────────────────────────────────────────────────────
 
 
@@ -119,19 +126,16 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
         if platform != CompetitorPlatform.shopify.value:
             platform = fetchers.probe_platform(base)
             _set_platform(cid, platform)
-        if platform != CompetitorPlatform.shopify.value:
-            reason = (
-                "Not a Shopify storefront — nothing machine-readable at "
-                "/products.json. Prices for this one would need per-page "
-                "scraping, which isn't built."
+        if platform == CompetitorPlatform.shopify.value:
+            fetched = fetchers.fetch_shopify_catalog(base)
+        else:
+            # No /products.json, so fall back to reading product pages one at
+            # a time out of the sitemap. Far more expensive per product,
+            # which is why it's capped and why the Shopify path is tried
+            # first — not because this one is unreliable.
+            fetched = fetchers.fetch_generic_catalog(
+                base, price_selector=_selector_of(cid)
             )
-            _record_failure(cid, reason)
-            return JobResult(
-                skipped=True,
-                skip_reason=f"{name}: {reason}",
-                detail={"competitor": name, "platform": platform},
-            )
-        fetched = fetchers.fetch_shopify_catalog(base)
     except FetchError as e:
         _record_failure(cid, str(e))
         return JobResult(
@@ -204,19 +208,36 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
 
         competitor = session.get(Competitor, cid)
         if competitor is not None:
-            competitor.last_error = None
+            # "0 products showing a price" is ambiguous and the page can't
+            # tell the two apart on its own: either they hide prices like we
+            # do, or the extraction chain couldn't read them. Only the second
+            # is a problem, and only the collector knows which happened.
+            if fetched.products and priced == 0 and fetched.price_sources:
+                competitor.last_error = (
+                    f"Read {len(fetched.products)} products but no prices — "
+                    "this site publishes neither JSON-LD nor OpenGraph "
+                    "prices. Set a price CSS selector for it below if it "
+                    "does show prices on the page."
+                )
+            else:
+                competitor.last_error = None
 
-    return JobResult(
-        rows=created + updated,
-        detail={
-            "competitor": name,
-            "pages": fetched.pages,
-            "new_products": created,
-            "updated_products": updated,
-            "with_visible_price": priced,
-            "no_longer_listed": gone,
-        },
-    )
+    detail = {
+        "competitor": name,
+        "platform": platform,
+        "pages": fetched.pages,
+        "new_products": created,
+        "updated_products": updated,
+        "with_visible_price": priced,
+        "no_longer_listed": gone,
+    }
+    if fetched.price_sources:
+        # Which extraction step actually produced the prices. A site that
+        # quietly stops emitting JSON-LD and starts depending on the owner's
+        # CSS selector is one theme update from producing nothing, and this
+        # is where that shows up first.
+        detail["price_sources"] = fetched.price_sources
+    return JobResult(rows=created + updated, detail=detail)
 
 
 # ── Blog ─────────────────────────────────────────────────────────────
@@ -450,14 +471,39 @@ def propose_competitor_matches() -> JobResult:
                 detail={"note": "no undecided competitor products with a price"},
             )
 
-        ours = session.query(ShopifyProduct).all()
-        if not ours:
+        every_product = session.query(ShopifyProduct).all()
+        if not every_product:
             return JobResult(
                 skipped=True,
                 skip_reason=(
                     "No products of our own to match against — run the "
                     "Shopify catalogue snapshot first."
                 ),
+            )
+
+        # PLAN.md's watchlist: products carrying a visible price or the
+        # `show-price` tag. A confirmed match on a product whose price we
+        # hide can never fire an undercut alert (the rule skips price <= 0),
+        # so proposing one costs the owner a review decision that buys
+        # nothing. With ~94% of this catalogue hidden, matching against all
+        # of it would bury the useful proposals under thirty times as many
+        # dead ones.
+        ours = [
+            p for p in every_product
+            if p.price_min > 0 or "show-price" in p.tags
+        ]
+        if not ours:
+            return JobResult(
+                rows=0,
+                detail={
+                    "our_catalogue": len(every_product),
+                    "note": (
+                        "None of our products carry a visible price or the "
+                        "show-price tag, so a price comparison has nothing "
+                        "to compare. Tag products for the show-price "
+                        "rollout first."
+                    ),
+                },
             )
 
         proposals = matching.propose(ours, theirs)
@@ -471,13 +517,15 @@ def propose_competitor_matches() -> JobResult:
                     reason=reason,
                 )
             )
-        counts = (len(theirs), len(ours), len(proposals))
+        counts = (len(theirs), len(ours), len(proposals), len(every_product))
 
     return JobResult(
         rows=counts[2],
         detail={
             "their_products_considered": counts[0],
-            "our_catalogue": counts[1],
+            "our_watchlist": counts[1],
+            "our_catalogue": counts[3],
+            "watchlist_note": "priced or show-price tagged only",
             "proposed": counts[2],
             "min_score": matching.MIN_SCORE,
         },

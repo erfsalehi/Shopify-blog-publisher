@@ -10,10 +10,22 @@ The order of preference is the whole design:
      Shopify publishes the entire catalogue at `/products.json` and the blog
      as Atom. That's a documented, stable, paginated feed — no HTML parsing,
      nothing that breaks when they change themes.
-  2. **JSON-LD.** Sites that aren't Shopify usually still emit
-     `schema.org/Product` for Google's benefit. Same data, more work.
-  3. **Nothing.** Recorded as `platform=other` and left alone rather than
-     retried nightly as though it might start working.
+  2. **Sitemap + JSON-LD.** Sites that aren't Shopify usually still emit
+     `schema.org/Product` for Google's benefit. Same data, one request per
+     product instead of one per 250 — so it's capped per run and the
+     rotation picks up where it left off.
+  3. **OpenGraph** (`product:price:amount`), which storefronts emit for
+     Facebook when they emit nothing else.
+  4. **A CSS selector the owner sets**, for the site that publishes neither.
+     Two minutes with a browser inspector beats a scraping arms race.
+  5. **Nothing.** Recorded on the competitor with the reason, and reported
+     on the job, rather than retried nightly as though it might start
+     working.
+
+Each step is tried only when the one before it found no price, so a site
+with good markup never reaches the fragile path — and `price_sources` on the
+result says which step actually paid, so a silent slide down to step 4 is
+visible before it breaks.
 
 Politeness is not decoration here. `_PAUSE` between requests, a real
 identifying User-Agent, and a page cap per run — a competitor's server
@@ -31,6 +43,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import unescape
+from urllib.robotparser import RobotFileParser
 
 import httpx
 
@@ -87,6 +100,10 @@ class Fetched:
     products: list[RawProduct] = field(default_factory=list)
     posts: list[RawPost] = field(default_factory=list)
     pages: int = 0
+    #: Which extraction step produced each price, for the non-Shopify path.
+    #: Reported on the job so a site quietly falling back to the fragile
+    #: selector route is visible before it breaks, rather than after.
+    price_sources: dict = field(default_factory=dict)
 
 
 def normalize_base(url: str) -> str:
@@ -105,6 +122,82 @@ def _client() -> httpx.Client:
         follow_redirects=True,
         headers={"User-Agent": USER_AGENT, "Accept": "*/*"},
     )
+
+
+# ── robots.txt ───────────────────────────────────────────────────────
+
+#: One parser per host, for the life of the process. A serverless invocation
+#: reads one competitor, so this is fetched once per run rather than once per
+#: request — which is the point: checking politeness shouldn't itself be the
+#: impolite part.
+_ROBOTS: dict[str, RobotFileParser | None] = {}
+
+#: The name a site would write in its robots.txt to address this
+#: specifically. Matched by urllib's parser as a prefix of the full UA above.
+ROBOTS_AGENT = "DRFlooringControlCenter"
+
+
+def _robots_for(base: str, client: httpx.Client | None = None) -> RobotFileParser | None:
+    """The site's robots.txt, parsed. None when it has none, or it's
+    unreadable — both of which mean "no stated restrictions".
+
+    Deliberately fetched with httpx rather than `RobotFileParser.read()`:
+    that method uses urllib, which ignores this module's timeout, its
+    User-Agent, and this machine's proxy behaviour. A robots fetch that hangs
+    for 60s would take the whole job with it.
+    """
+    host = base.rstrip("/")
+    if host in _ROBOTS:
+        return _ROBOTS[host]
+
+    own = client is None
+    client = client or _client()
+    parser: RobotFileParser | None = None
+    try:
+        resp = client.get(f"{host}/robots.txt")
+        if resp.status_code == 200 and resp.text.strip():
+            parser = RobotFileParser()
+            parser.parse(resp.text.splitlines())
+        # 4xx means no robots.txt, which permits everything. A 5xx arguably
+        # means "unknown", but treating a competitor's flaky server as a
+        # blanket ban would silently stop collecting with no explanation.
+    except Exception as e:  # noqa: BLE001 - unreadable robots is not a block
+        log.info("robots.txt for %s unreadable (%s); proceeding", host, e)
+    finally:
+        if own:
+            client.close()
+
+    _ROBOTS[host] = parser
+    return parser
+
+
+def may_fetch(base: str, path: str, client: httpx.Client | None = None) -> bool:
+    """Whether robots.txt permits fetching `path` on this host.
+
+    PLAN.md asks for this explicitly, and it matters more here than the usual
+    hand-wave: these are small local businesses' sites, and the difference
+    between reading a public catalogue and ignoring a site's stated wishes is
+    exactly this check.
+    """
+    parser = _robots_for(base, client=client)
+    if parser is None:
+        return True
+    url = path if path.startswith("http") else base.rstrip("/") + path
+    return parser.can_fetch(ROBOTS_AGENT, url)
+
+
+def _require_allowed(base: str, path: str, client: httpx.Client | None = None) -> None:
+    if not may_fetch(base, path, client=client):
+        raise FetchError(
+            f"robots.txt on this site disallows {path}. Not fetched — that's "
+            "the site's decision to make."
+        )
+
+
+def reset_robots_cache() -> None:
+    """For tests, and for a long-lived local process that shouldn't hold a
+    site's robots.txt from last week."""
+    _ROBOTS.clear()
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -188,6 +281,7 @@ def fetch_shopify_catalog(base: str, client: httpx.Client | None = None) -> Fetc
     client = client or _client()
     out = Fetched()
     try:
+        _require_allowed(base, "/products.json", client=client)
         for page in range(1, _MAX_PAGES + 1):
             resp = client.get(
                 f"{base}/products.json", params={"limit": 250, "page": page}
@@ -259,6 +353,7 @@ def fetch_shopify_bestsellers(
     own = client is None
     client = client or _client()
     try:
+        _require_allowed(base, "/collections/all", client=client)
         resp = client.get(f"{base}/collections/all", params={"sort_by": "best-selling"})
         if resp.status_code != 200:
             raise FetchError(
@@ -380,6 +475,11 @@ def fetch_posts(base: str, client: httpx.Client | None = None) -> Fetched:
     out = Fetched()
     try:
         for path in _FEED_PATHS:
+            # Per-path rather than one check up front: these are candidate
+            # guesses, and a site disallowing /feed shouldn't stop us trying
+            # the one it does publish.
+            if not may_fetch(base, path, client=client):
+                continue
             try:
                 resp = client.get(base + path)
             except Exception:  # noqa: BLE001 - try the next candidate
@@ -463,3 +563,255 @@ def _iter_ld_nodes(data):
             yield from _iter_ld_nodes(data["@graph"])
         else:
             yield data
+
+
+# ── Sites that aren't Shopify ────────────────────────────────────────
+#
+# Everything above this line reads one documented feed. Below it is the
+# fallback: discover product URLs from the sitemap, fetch each page, and pull
+# a price out of whatever the page publishes for machines. That's a request
+# per product instead of 250, so it is deliberately capped and deliberately
+# slow, and it is only reached when /products.json isn't there.
+
+#: Product pages fetched per run for a non-Shopify site. At `_PAUSE` a second
+#: that's ~40s of wall clock, which fits a 60s function with room to write.
+#: The rotation means the next run continues where this one stopped.
+_MAX_PRODUCT_PAGES = 40
+
+_SITEMAP_PATHS = ("/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml")
+_LOC = re.compile(r"<loc>\s*([^<\s]+)\s*</loc>", re.I)
+#: Sitemaps that are themselves lists of sitemaps.
+_SITEMAP_LIKE = re.compile(r"sitemap.*\.xml", re.I)
+#: What a product URL tends to look like across Woo, BigCommerce, Magento and
+#: hand-rolled sites. Not exhaustive — it doesn't need to be, because a miss
+#: costs one skipped product and a false positive costs one wasted fetch that
+#: yields no price and is dropped.
+_PRODUCT_URL = re.compile(r"/(product|products|shop|item|p)/", re.I)
+
+_OG_PRICE = re.compile(
+    r'<meta[^>]+property=["\'](?:product:price:amount|og:price:amount)["\']'
+    r'[^>]+content=["\']([^"\']+)["\']',
+    re.I,
+)
+_OG_PRICE_REVERSED = re.compile(
+    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+'
+    r'property=["\'](?:product:price:amount|og:price:amount)["\']',
+    re.I,
+)
+_OG_CURRENCY = re.compile(
+    r'<meta[^>]+property=["\'](?:product:price:currency|og:price:currency)["\']'
+    r'[^>]+content=["\']([^"\']+)["\']',
+    re.I,
+)
+_OG_TITLE = re.compile(
+    r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']*)["\']', re.I
+)
+_TITLE_TAG = re.compile(r"<title[^>]*>(.*?)</title>", re.S | re.I)
+
+#: A price inside whatever element the owner's CSS selector points at. Only
+#: the class/id form is supported — see `price_from_selector`.
+_MONEY_IN_TEXT = re.compile(r"[$£€]?\s*([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
+
+
+def discover_product_urls(
+    base: str, limit: int = _MAX_PRODUCT_PAGES, client: httpx.Client | None = None
+) -> list[str]:
+    """Product page URLs from the site's sitemap.
+
+    Sitemaps are how a site tells crawlers what it wants found, which makes
+    them the right door for this and not merely the convenient one. One level
+    of sitemap-index nesting is followed; deeper than that is rare and the
+    cap would truncate it anyway.
+    """
+    own = client is None
+    client = client or _client()
+    found: list[str] = []
+    try:
+        roots: list[str] = []
+        for path in _SITEMAP_PATHS:
+            if not may_fetch(base, path, client=client):
+                continue
+            try:
+                resp = client.get(base + path)
+            except Exception:  # noqa: BLE001 - try the next candidate
+                continue
+            if resp.status_code == 200 and "<" in resp.text:
+                roots.append(resp.text)
+                break
+            time.sleep(_PAUSE)
+        if not roots:
+            raise FetchError(
+                "No sitemap found. Tried: " + ", ".join(_SITEMAP_PATHS) + "."
+            )
+
+        locs = _LOC.findall(roots[0])
+        nested = [u for u in locs if _SITEMAP_LIKE.search(u)][:10]
+        direct = [u for u in locs if not _SITEMAP_LIKE.search(u)]
+
+        for url in nested:
+            if len(found) >= limit:
+                break
+            if not may_fetch(base, url, client=client):
+                continue
+            try:
+                resp = client.get(url)
+            except Exception:  # noqa: BLE001
+                continue
+            time.sleep(_PAUSE)
+            if resp.status_code == 200:
+                direct.extend(_LOC.findall(resp.text))
+
+        seen: set[str] = set()
+        for url in direct:
+            if len(found) >= limit:
+                break
+            if url in seen or not _PRODUCT_URL.search(url):
+                continue
+            seen.add(url)
+            found.append(url)
+        if not found:
+            raise FetchError(
+                "The sitemap listed no URLs that look like product pages "
+                "(no /product/, /shop/ or /item/ path)."
+            )
+    finally:
+        if own:
+            client.close()
+    return found
+
+
+def price_from_opengraph(html: str) -> tuple[float, str | None]:
+    """`product:price:amount`, which most storefronts emit for Facebook.
+
+    Two patterns because attribute order isn't fixed and a single regex that
+    allowed either order would also match a `content` from one tag paired
+    with a `property` from the next.
+    """
+    match = _OG_PRICE.search(html) or _OG_PRICE_REVERSED.search(html)
+    if not match:
+        return 0.0, None
+    currency = _OG_CURRENCY.search(html)
+    return _money(match.group(1)), (currency.group(1) if currency else None)
+
+
+def price_from_selector(html: str, selector: str) -> float:
+    """A price from the element the owner pointed at.
+
+    Supports `.class` and `#id`, which is what a price element realistically
+    is, and is what someone can read off their browser's inspector in the two
+    minutes PLAN.md budgets for this. Deliberately not a CSS engine: pulling
+    in a parser to support `div > span:nth-child(2)` would be a dependency
+    and a maintenance burden for a selector nobody can write reliably from
+    memory anyway.
+
+    Returns 0.0 when the selector matches nothing, which the caller treats as
+    "no price" rather than as free.
+    """
+    selector = (selector or "").strip()
+    if not selector:
+        return 0.0
+    kind, name = selector[0], re.escape(selector[1:])
+    if kind == ".":
+        attr = rf'class=["\'][^"\']*\b{name}\b[^"\']*["\']'
+    elif kind == "#":
+        attr = rf'id=["\']{name}["\']'
+    else:
+        return 0.0
+
+    # The element's own text, up to its closing tag. Non-greedy so a matching
+    # <span> doesn't swallow the rest of the page.
+    element = re.search(rf"<([a-z0-9]+)[^>]*{attr}[^>]*>(.*?)</\1>", html, re.S | re.I)
+    if not element:
+        return 0.0
+    text = unescape(re.sub(r"<[^>]+>", " ", element.group(2)))
+    money = _MONEY_IN_TEXT.search(text)
+    return _money(money.group(1)) if money else 0.0
+
+
+def _title_from(html: str, url: str) -> str:
+    og = _OG_TITLE.search(html)
+    if og and og.group(1).strip():
+        return unescape(og.group(1)).strip()[:600]
+    tag = _TITLE_TAG.search(html)
+    if tag:
+        text = unescape(re.sub(r"<[^>]+>", " ", tag.group(1)))
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            return text[:600]
+    return url.rstrip("/").rsplit("/", 1)[-1][:600] or url[:600]
+
+
+def fetch_generic_catalog(
+    base: str,
+    *,
+    price_selector: str | None = None,
+    limit: int = _MAX_PRODUCT_PAGES,
+    client: httpx.Client | None = None,
+) -> Fetched:
+    """Products from a non-Shopify site, one page at a time.
+
+    Extraction order is PLAN.md's, and the order matters: JSON-LD is
+    structured and unambiguous, OpenGraph is structured but flatter, and the
+    owner's CSS selector is a last resort that only exists because some sites
+    publish neither. Each is tried only if the one before it found nothing,
+    so a site with good markup never reaches the fragile path.
+    """
+    own = client is None
+    client = client or _client()
+    out = Fetched()
+    sources = {"json-ld": 0, "opengraph": 0, "selector": 0, "none": 0}
+    try:
+        urls = discover_product_urls(base, limit=limit, client=client)
+        for url in urls:
+            if not may_fetch(base, url, client=client):
+                continue
+            try:
+                resp = client.get(url)
+            except Exception as e:  # noqa: BLE001 - one bad page, not the run
+                log.info("competitor page %s failed: %s", url, e)
+                continue
+            out.pages += 1
+            time.sleep(_PAUSE)
+            if resp.status_code != 200:
+                continue
+            html = resp.text
+
+            products = extract_jsonld_products(html, url)
+            product = products[0] if products else None
+            if product and product.price_min > 0:
+                sources["json-ld"] += 1
+            else:
+                price, currency = price_from_opengraph(html)
+                if price > 0:
+                    sources["opengraph"] += 1
+                elif price_selector:
+                    price = price_from_selector(html, price_selector)
+                    if price > 0:
+                        sources["selector"] += 1
+                if product is None:
+                    product = RawProduct(
+                        handle=url.rstrip("/").rsplit("/", 1)[-1] or url,
+                        title=_title_from(html, url),
+                        url=url,
+                    )
+                if price > 0:
+                    product.price_min = product.price_max = price
+                    product.currency = product.currency or currency
+            if product is None:
+                continue
+            if product.price_min <= 0:
+                sources["none"] += 1
+            product.url = product.url or url
+            out.products.append(product)
+
+        if not out.products:
+            raise FetchError(
+                f"Fetched {out.pages} product pages and could not read a "
+                "product from any of them. If this site shows prices, set a "
+                "price CSS selector for it on the Settings page."
+            )
+    finally:
+        if own:
+            client.close()
+    out.price_sources = sources
+    return out

@@ -478,12 +478,43 @@ or revenue, and this doesn't pretend otherwise. What is public:
 | Brands they carry | derived from the catalogue | Medium — the assortment gap |
 
 Most local flooring retailers run Shopify, which publishes the first three for
-machines. Sites that don't are recorded as `platform=other` and left alone
-rather than retried nightly; per-page JSON-LD scraping for them isn't built.
+machines. Sites that don't go down the fallback chain below.
 
 Requests go at one per second with a User-Agent that says what this is and
-links to drflooring.ca. A competitor who wants to block it can — that's their
-call to make, and hiding would be the wrong answer to their having made it.
+links to drflooring.ca, and **robots.txt is checked before every fetch**. A
+competitor who wants to block it can — that's their call to make, and hiding
+would be the wrong answer to their having made it.
+
+### Reading a site that isn't Shopify
+
+No `/products.json` means one request per product instead of one per 250, so
+this path is capped at 40 pages a run and the rotation resumes where it
+stopped. Product URLs come from the sitemap — that's how a site tells crawlers
+what it wants found, which makes it the right door and not merely the
+convenient one.
+
+Each page is then read in this order, each step tried only when the one before
+found no price:
+
+1. **JSON-LD** `schema.org/Product` — structured, unambiguous, and emitted by
+   most storefronts for Google's benefit.
+2. **OpenGraph** `product:price:amount` — flatter, but present when JSON-LD
+   isn't, because storefronts emit it for Facebook.
+3. **A CSS selector the owner sets** on the Settings page. Last resort, and
+   only `.class` / `#id` — what someone can read off a browser inspector in
+   two minutes. Deliberately not a CSS engine: supporting
+   `div > span:nth-child(2)` would be a dependency and a maintenance burden
+   for a selector nobody writes reliably from memory anyway.
+
+The job reports `price_sources` — how many prices each step produced. A site
+that quietly stops emitting JSON-LD and starts depending on the owner's
+selector is one theme update from producing nothing, and that's where it shows
+up first.
+
+A competitor whose products are read but whose prices are not gets that said
+on their row. "0 products showing a price" is otherwise ambiguous: it could
+mean they hide prices like we do, or that the chain above couldn't read them,
+and only the second is a problem to fix.
 
 ### The best-seller trap
 
@@ -516,6 +547,30 @@ a proposal the next run makes all over again.
 **Only confirmed matches reach the price comparison.** A proposed match is a
 guess, and a guess in a price table becomes "they're undercutting us on X"
 about a product that isn't X.
+
+**The queue is limited to products carrying a visible price or the
+`show-price` tag.** A confirmed match on a hidden-price product can never fire
+an undercut alert — that rule skips `price <= 0` — so proposing one costs a
+review decision and buys nothing. With ~94% of the catalogue hidden, matching
+everything buried the useful proposals under thirty times as many dead ones.
+
+### Price history
+
+Every catalogue sync writes one `competitor_product_price` row per product per
+day, so "are they discounting?" is a question about a line rather than about
+today. Each confirmed match gets a **History** link to a per-product chart of
+their price against ours, with their best-seller rank over the same window.
+
+Two things the chart states rather than implies:
+
+- **Our line is today's price held flat, not measured history.** The catalogue
+  snapshot overwrites `price_min` in place and keeps no per-day price of its
+  own. A flat line that looked measured would read as "we held our price",
+  which this data cannot support.
+- **The y-axis is not zero-based.** Flooring prices sit in a narrow band
+  ($2–6/sqft) and a zero-based axis flattens both series into one
+  indistinguishable strip, hiding the exact movement the chart exists to show.
+  Both bounds are labelled so the scale can't be misread as a collapse.
 
 PLAN.md originally specified fastembed title embeddings here. Dropped
 deliberately: it pulls ~45MB of onnxruntime into the serverless bundle, and

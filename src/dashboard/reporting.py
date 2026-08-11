@@ -31,6 +31,7 @@ from dashboard.models import (
     CompetitorMatch,
     CompetitorPost,
     CompetitorProduct,
+    CompetitorProductPrice,
     Ga4EventDaily,
     GscPageDaily,
     GscQueryDaily,
@@ -1255,3 +1256,71 @@ def content_pipeline(*, limit: int = 60, today: date | None = None) -> dict:
         ],
         "today": today,
     }
+
+
+def competitor_price_history(
+    competitor_product_id: int, *, days: int = 90, today: date | None = None
+) -> dict:
+    """One matched product's price over time, theirs and ours.
+
+    Ours comes from `shopify_product.price_min` as it stands today, repeated
+    across the window rather than read from history — the catalogue snapshot
+    overwrites in place and keeps no per-day price of its own. Stated here
+    because a flat line that looks like "we never moved" would otherwise be
+    read as measured, and it isn't: it's the only value we have.
+    """
+    today = today or date.today()
+    since = today - timedelta(days=days)
+
+    with get_session() as session:
+        theirs_row = session.get(CompetitorProduct, competitor_product_id)
+        if theirs_row is None:
+            return {"found": False}
+
+        snapshots = (
+            session.query(CompetitorProductPrice)
+            .filter(
+                CompetitorProductPrice.competitor_product_id
+                == competitor_product_id,
+                CompetitorProductPrice.date >= since,
+            )
+            .order_by(CompetitorProductPrice.date.asc())
+            .all()
+        )
+        match = (
+            session.query(CompetitorMatch)
+            .filter(
+                CompetitorMatch.competitor_product_id == competitor_product_id,
+                CompetitorMatch.status == MatchStatus.confirmed.value,
+            )
+            .first()
+        )
+        ours_row = (
+            session.get(ShopifyProduct, match.shopify_product_id)
+            if match else None
+        )
+        site = session.get(Competitor, theirs_row.competitor_id)
+
+        theirs = [(s.date, s.price_min) for s in snapshots if s.price_min > 0]
+        our_price = ours_row.price_min if ours_row else 0.0
+        ours = (
+            [(day, our_price) for day, _ in theirs] if our_price > 0 else []
+        )
+
+        ranks = [
+            (s.date, s.best_seller_rank)
+            for s in snapshots
+            if s.best_seller_rank is not None
+        ]
+
+        return {
+            "found": True,
+            "theirs": theirs,
+            "ours": ours,
+            "their_product": theirs_row,
+            "our_product": ours_row,
+            "competitor": site,
+            "our_price_is_current_only": bool(ours),
+            "ranks": ranks,
+            "days": days,
+        }

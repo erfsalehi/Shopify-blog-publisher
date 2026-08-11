@@ -16,6 +16,7 @@ muted, with the boundary marked.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from html import escape
 
 from markupsafe import Markup
@@ -243,3 +244,90 @@ def _wrap(note: str, limit: int = 30) -> str:
     """SVG text doesn't wrap. Truncate rather than overflow into the
     neighbouring block, where it would read as that block's label."""
     return note if len(note) <= limit else note[: limit - 1] + "…"
+
+
+# ── Price history: ours against theirs ──────────────────────────────
+
+_PRICE_W = 720
+_PRICE_H = 190
+
+
+def price_chart(
+    ours: list[tuple[date, float]],
+    theirs: list[tuple[date, float]],
+    *,
+    our_label: str = "Ours",
+    their_label: str = "Theirs",
+) -> Markup:
+    """Two price lines over the same dates.
+
+    Separate from `line_chart` rather than an option on it: that one draws a
+    single series with a provisional tail, and the interesting thing here is
+    the *gap* between two series — which needs a shared y-axis anchored so
+    the comparison is honest.
+
+    The y-axis deliberately does **not** start at zero. Prices here live in a
+    narrow band ($2–6/sqft) and a zero-based axis flattens both lines into
+    one indistinguishable strip, hiding exactly the movement worth seeing.
+    Instead it's padded around the observed range, and both endpoints are
+    labelled so the scale can't be misread as "they halved their price".
+    """
+    if not ours and not theirs:
+        return Markup('<p class="chart-empty">No price history yet.</p>')
+
+    days = sorted({d for d, _ in ours} | {d for d, _ in theirs})
+    if len(days) < 2:
+        return Markup(
+            '<p class="chart-empty">Only one day of price history so far — '
+            "a line needs a second day.</p>"
+        )
+
+    values = [v for _, v in ours] + [v for _, v in theirs]
+    low, high = min(values), max(values)
+    if high - low < 0.01:
+        # A perfectly flat pair would divide by zero below; give it a band.
+        low, high = low - 1, high + 1
+    pad = (high - low) * 0.15
+    low, high = low - pad, high + pad
+
+    index = {day: i for i, day in enumerate(days)}
+    plot_w = _PRICE_W - _PAD_L - _PAD_R
+    plot_h = _PRICE_H - _PAD_T - _PAD_B
+
+    def x_of(day: date) -> float:
+        return _PAD_L + plot_w * index[day] / (len(days) - 1)
+
+    def y_of(value: float) -> float:
+        return _PAD_T + plot_h * (1 - (value - low) / (high - low))
+
+    def path(series) -> str:
+        return " ".join(f"{x_of(d):.1f},{y_of(v):.1f}" for d, v in sorted(series))
+
+    parts = [
+        f'<svg class="chart price-chart" viewBox="0 0 {_PRICE_W} {_PRICE_H}" '
+        f'role="img" aria-label="Price history, ours against theirs">'
+    ]
+    for value in (low + pad, high - pad):
+        y = y_of(value)
+        parts.append(
+            f'<line class="grid" x1="{_PAD_L}" y1="{y:.1f}" '
+            f'x2="{_PRICE_W - _PAD_R}" y2="{y:.1f}"/>'
+            f'<text class="axis" x="{_PAD_L - 6}" y="{y + 4:.1f}" '
+            f'text-anchor="end">${value:,.2f}</text>'
+        )
+    if theirs:
+        parts.append(f'<polyline class="theirs" points="{path(theirs)}"/>')
+    if ours:
+        parts.append(f'<polyline class="ours" points="{path(ours)}"/>')
+
+    parts.append(
+        f'<text class="axis" x="{_PAD_L}" y="{_PRICE_H - 6}">{days[0]}</text>'
+        f'<text class="axis" x="{_PRICE_W - _PAD_R}" y="{_PRICE_H - 6}" '
+        f'text-anchor="end">{days[-1]}</text>'
+        f'<text class="legend ours-key" x="{_PAD_L + 90}" y="{_PRICE_H - 6}">'
+        f"— {escape(our_label)}</text>"
+        f'<text class="legend theirs-key" x="{_PAD_L + 190}" y="{_PRICE_H - 6}">'
+        f"— {escape(their_label)}</text>"
+        "</svg>"
+    )
+    return Markup("".join(parts))

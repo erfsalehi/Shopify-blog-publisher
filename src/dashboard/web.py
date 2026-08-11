@@ -570,6 +570,30 @@ def create_app() -> FastAPI:
             advisor_scope="competitors",
         )
 
+    @app.get("/competitors/product/{product_id}", response_class=HTMLResponse)
+    def competitor_product_page(
+        request: Request, product_id: int, window: int = 90
+    ):
+        """One matched product's price over time, theirs against ours."""
+        window = max(14, min(window, 365))
+        history = reporting.competitor_price_history(product_id, days=window)
+        if not history["found"]:
+            return HTMLResponse("Competitor product not found", status_code=404)
+        return render(
+            request, "competitor_product.html",
+            nav="competitors",
+            history=history,
+            window=window,
+            chart=charts.price_chart(
+                history["ours"],
+                history["theirs"],
+                our_label="Our price",
+                their_label=(
+                    history["competitor"].name if history["competitor"] else "Theirs"
+                ),
+            ),
+        )
+
     @app.post("/competitors/match/{match_id}")
     def decide_match(match_id: int, decision: str = Form(...)):
         """Confirm or reject one proposed product match.

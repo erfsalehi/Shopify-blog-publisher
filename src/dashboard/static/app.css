@@ -334,3 +334,19 @@ ul.tight li { margin: 2px 0; }
    shrinking into illegibility or pushing the page sideways. */
 .funnel-scroll { overflow-x: auto; max-width: 100%; }
 .funnel-scroll .funnel { min-width: 780px; }
+
+/* ── Price history, ours vs theirs ───────────────────────────────── */
+/* Two series on one axis. They must stay distinguishable without colour
+   alone — the dash pattern carries the same information for anyone who
+   can't separate the two hues. */
+.price-chart .theirs {
+  fill: none; stroke: var(--warn); stroke-width: 2.5;
+}
+.price-chart .ours {
+  fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 6 4;
+}
+.price-chart .grid { stroke: var(--line); stroke-width: 1; }
+.price-chart .axis { font-size: 11px; fill: var(--muted); }
+.price-chart .legend { font-size: 11px; font-weight: 600; }
+.price-chart .ours-key { fill: var(--accent); }
+.price-chart .theirs-key { fill: var(--warn); }

@@ -326,6 +326,31 @@ live store rather than reasoning about it:
 
 Collector B (Google CSE) stays dead — see the warning box below.
 
+**Everything in Collector A is now built**, including the parts the first
+pass skipped:
+
+- **The full extraction chain.** Shopify's `/products.json` where it exists;
+  otherwise the sitemap is walked and each product page read for JSON-LD →
+  OpenGraph `product:price:amount` → the CSS selector the owner sets in the
+  app. Each step runs only when the one before found no price, and the job
+  reports which step paid — so a site sliding down to the fragile route is
+  visible before it breaks rather than after.
+- **robots.txt is respected** on every fetch, per-path, cached per host.
+- **Price history** is drawn per matched product, ours against theirs, with
+  their best-seller rank over the same window. Our line is labelled as *not*
+  measured: the catalogue snapshot overwrites price in place, so it's today's
+  number held flat, and a flat line that looked measured would read as "we
+  held our price".
+- **The watchlist is priced or `show-price` tagged products**, as the notes
+  below ask. A confirmed match on a hidden-price product can never fire an
+  undercut alert, so with ~94% of the catalogue hidden, matching everything
+  buried the useful proposals under thirty times as many dead ones.
+
+One deliberate gap: a competitor with no readable price gets that recorded on
+their row, because "0 products showing a price" otherwise reads as "they hide
+prices like we do" when it may mean "we couldn't read them" — and only the
+second is a problem.
+
 ## Phase 5 — original design notes (free path)
 
 Two collectors, one comparison engine, all config in-app.

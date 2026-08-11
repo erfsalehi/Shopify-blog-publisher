@@ -227,20 +227,33 @@ def test_a_site_that_always_fails_does_not_starve_the_others(
 
 def test_a_failure_reason_is_recorded_on_the_competitor(dashboard_db, monkeypatch):
     """So the page can say "this one is not readable" next to the competitor
-    it's about, rather than only in a job log nobody opens."""
+    it's about, rather than only in a job log nobody opens.
+
+    A non-Shopify site is no longer a dead end — it falls through to the
+    sitemap path — so what's asserted here is that whatever *does* go wrong
+    lands on the competitor row, not the particular thing that went wrong.
+    """
     from dashboard.jobs import competitor_watch as watch
 
     with get_session() as session:
         session.add(Competitor(name="Wordpress Co", base_url="https://wp.example"))
 
     monkeypatch.setattr(fetchers, "probe_platform", lambda base, client=None: "other")
+    # No network from the test suite: wp.example doesn't resolve, and a test
+    # whose speed depends on a DNS timeout is a test that flakes.
+    monkeypatch.setattr(
+        fetchers, "fetch_generic_catalog",
+        lambda *a, **k: (_ for _ in ()).throw(
+            fetchers.FetchError("No sitemap found.")
+        ),
+    )
 
     result = watch.sync_competitor_catalog(today=TODAY)
 
     assert result.skipped
     with get_session() as session:
         row = session.query(Competitor).one()
-        assert "Shopify" in row.last_error
+        assert "No sitemap found." in row.last_error
         assert row.last_checked_at is not None
 
 

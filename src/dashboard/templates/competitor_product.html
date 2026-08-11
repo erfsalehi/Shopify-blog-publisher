@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% block title %}{{ history.their_product.title | truncate(48) }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>{{ history.their_product.title }}</h1>
+  <span class="muted small">
+    {{ history.competitor.name if history.competitor }} · last {{ window }} days
+  </span>
+</div>
+
+<p class="muted small">
+  <a href="/competitors">← Competitors</a>
+  {% if history.their_product.url %}
+  · <a href="{{ history.their_product.url }}" target="_blank" rel="noopener nofollow">
+      their page</a>
+  {% endif %}
+  {% if history.our_product and history.our_product.online_url %}
+  · <a href="{{ history.our_product.online_url }}" target="_blank" rel="noopener">
+      our page</a>
+  {% endif %}
+</p>
+
+<section class="cards">
+  <div class="card">
+    <div class="card-label">Their price today</div>
+    <div class="card-value">
+      {% if history.their_product.price_min > 0 %}
+        ${{ '%.2f' | format(history.their_product.price_min) }}
+      {% else %}<span class="muted">not shown</span>{% endif %}
+    </div>
+    <div class="card-delta muted">{{ history.theirs | length }} days recorded</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Our price</div>
+    <div class="card-value">
+      {% if history.our_product and history.our_product.price_min > 0 %}
+        ${{ '%.2f' | format(history.our_product.price_min) }}
+      {% else %}<span class="muted">hidden</span>{% endif %}
+    </div>
+    <div class="card-delta muted">
+      {{ 'matched' if history.our_product else 'no confirmed match' }}
+    </div>
+  </div>
+  {% if history.ranks %}
+  <div class="card">
+    <div class="card-label">Their best-seller rank</div>
+    <div class="card-value">#{{ history.ranks[-1][1] }}</div>
+    <div class="card-delta muted">
+      {% set first = history.ranks[0][1] %}
+      {% set last = history.ranks[-1][1] %}
+      {% if first == last %}unchanged
+      {% elif last < first %}up from #{{ first }}
+      {% else %}down from #{{ first }}{% endif %}
+    </div>
+  </div>
+  {% endif %}
+</section>
+
+<h2>Price over time</h2>
+{{ chart }}
+
+<p class="muted small">
+  {% if history.our_price_is_current_only %}
+  <strong>Our line is today's price held flat</strong>, not measured history —
+  the catalogue snapshot overwrites each product in place and keeps no
+  per-day price of its own. Only their line is a real series. A flat line
+  here means "we have one number", not "we never moved".
+  {% elif history.our_product %}
+  Our price is hidden on this product, so there is nothing to draw against
+  theirs. That's the <a href="/experiments">show-price</a> question, not a
+  pricing one.
+  {% else %}
+  No confirmed match, so there is no price of ours to compare. Confirm the
+  match on the <a href="/competitors">Competitors page</a> first.
+  {% endif %}
+  The vertical axis is padded around the observed range rather than starting
+  at zero — flooring prices sit in a narrow band and a zero-based axis would
+  flatten both lines into one strip.
+</p>
+
+{% if history.theirs | length > 1 %}
+{% set lowest = history.theirs | map(attribute=1) | min %}
+{% set highest = history.theirs | map(attribute=1) | max %}
+{% if highest - lowest > 0.005 %}
+<div class="notice">
+  <strong>They have moved this price.</strong>
+  Between ${{ '%.2f' | format(lowest) }} and ${{ '%.2f' | format(highest) }}
+  over the window — a
+  {{ '%.0f' | format((highest - lowest) / highest * 100) }}% swing. A
+  competitor who discounts is a competitor whose price you can't check once
+  and forget.
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

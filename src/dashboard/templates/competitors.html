@@ -112,6 +112,7 @@
     <tr>
       <th>Our product</th><th>Theirs</th><th>Competitor</th>
       <th class="n">Ours</th><th class="n">Theirs</th><th class="n">Difference</th>
+      <th></th>
     </tr>
   </thead>
   <tbody>
@@ -136,6 +137,8 @@
         {% if row.delta is none %}—
         {% else %}{{ '%+.2f' | format(row.delta) }}{% endif %}
       </td>
+      <td><a href="/competitors/product/{{ row.theirs.id }}"
+             class="small">History</a></td>
     </tr>
     {% endfor %}
   </tbody>
