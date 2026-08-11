@@ -462,6 +462,63 @@ Two findings from wiring this up:
   DataForSEO's own message instead of a guess. Verify at
   <https://app.dataforseo.com/> to turn the volume column on.
 
+## Strategy
+
+The advisor panels read the present and suggest things. This is the other
+half: a goal, a plan made of steps the app can carry out, and a weekly
+measurement against the numbers as they stood when the work started.
+
+State a goal (optionally narrowed to a city or product) and the model gets
+**every scope's context at once** — search, products, blog, keywords, ads,
+competitors and local. A strategist that could only see one tab would
+recommend blog work for a pricing problem. The cost is a long prompt; the
+alternative is worse.
+
+### Steps either run or say they can't
+
+| Kind | What happens |
+|---|---|
+| `blog_topic` | Queues a topic into the pipeline's own calendar — the same path `add-topic` takes |
+| `article_refresh` | Runs the refresh agent and produces a diff. **Never publishes on its own** |
+| `product_seo` | Writes SEO fields through the same `productUpdate` path the Products page uses |
+| `page_content`, `ads`, `gbp`, `manual` | Tracked only, with somewhere to record what happened |
+
+Nothing in this project has write access to Google Business Profile or Google
+Ads, so those come back as tracked steps and the runner refuses them by name.
+A button that quietly did nothing would be the worst available answer, and a
+progress bar counting steps nobody did is a progress bar that lies.
+
+`gbp` is its own kind rather than folded into `manual` because the local pack
+is ranked on Google Business Profile and nothing here can touch it — naming it
+keeps the single biggest local lever visible instead of buried in a to-do.
+
+The system prompt states that no content change moves the local pack. Verified
+on the first real generation: asked to improve Langley rankings, the model
+produced a `gbp` step for the pack and content steps only for the organic
+listings, rather than proposing pages as a route into the map box.
+
+### The baseline is frozen at activation
+
+Not at generation, and not at the first checkpoint. A baseline taken after the
+work started absorbs the change and reports that nothing happened. Activating
+twice does not move it — re-activating mid-strategy would replace the "before"
+numbers with "during" ones and erase the evidence.
+
+`strategy_weekly` then measures each active strategy against it and writes one
+row per week, plus a short read of what moved. The narrative is optional: if
+the model is rate-limited the numbers are still stored, because losing a week
+of measurement to a 429 would be the wrong trade.
+
+The reports are written under instruction to say plainly when nothing moved or
+when it is too early to tell. The first live checkpoint did exactly that:
+*"Every metric remains identical to the baseline... It is too early to tell if
+the strategy is working."*
+
+Plans get the same grounding check as advisor notes — a figure in the plan
+that isn't in the brief is flagged as unverified rather than displayed as
+fact, and the full brief is kept on the row so any step can be traced back to
+the numbers behind it.
+
 ## Local SEO
 
 One market: Langley. Site-wide numbers are deliberately absent — they're on

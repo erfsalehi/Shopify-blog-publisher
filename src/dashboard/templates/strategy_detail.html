@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}{{ strategy.goal | truncate(46) }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>{{ strategy.goal }}</h1>
+  <span class="stage-tag {{ strategy.status }}">{{ strategy.status }}</span>
+</div>
+
+<p class="muted small">
+  <a href="/strategy">← Strategy</a>
+  {% if strategy.target %} · Target: <strong>{{ strategy.target }}</strong>{% endif %}
+  · {{ strategy.model or 'no model' }}
+  · created {{ strategy.created_at | when }}
+</p>
+
+{% if strategy.error %}
+<div class="notice bad-box">
+  <strong>The plan couldn't be written.</strong> {{ strategy.error }}
+</div>
+{% endif %}
+
+{% if strategy.summary %}
+<div class="notice">
+  <strong>{{ strategy.summary }}</strong>
+  {% if strategy.reading %}<p>{{ strategy.reading }}</p>{% endif %}
+</div>
+{% endif %}
+
+{% if strategy.unverified %}
+<div class="notice bad-box">
+  <strong>Unverified figures:</strong> {{ strategy.unverified | join(', ') }}.
+  These don't appear in the data the model was given — it may have derived
+  them, or it may have made them up. Check before acting on them.
+</div>
+{% endif %}
+
+{% if strategy.status == 'draft' %}
+<form method="post" action="/strategy/{{ strategy.id }}/activate" class="inline">
+  <button type="submit" class="primary">Activate and freeze the baseline</button>
+</form>
+<p class="muted small">
+  Until this is activated there is no baseline, so nothing can be measured.
+  Activating captures today's numbers — do it before starting the work, not
+  after, or the change gets absorbed into the baseline and the report says
+  nothing happened.
+</p>
+{% endif %}
+
+<h2>Steps <span class="muted small">{{ done }}/{{ steps | length }} done</span></h2>
+<p class="muted small">
+  Steps marked <strong>Run</strong> are carried out by this app through the
+  same machinery the rest of it uses — queuing a topic goes through the
+  pipeline's calendar, a refresh produces a diff for you to review and never
+  publishes on its own. The others are tracked: nothing here can write to
+  Google Business Profile or Google Ads, and a button that quietly did nothing
+  would be worse than saying so.
+</p>
+
+<table>
+  <thead>
+    <tr><th>Step</th><th>Kind</th><th>Status</th><th></th></tr>
+  </thead>
+  <tbody>
+    {% for step in steps %}
+    <tr>
+      <td>
+        <strong>{{ step.title }}</strong>
+        {% if step.rationale %}<div class="muted small">{{ step.rationale }}</div>{% endif %}
+        {% if step.result %}
+        <div class="{{ 'bad' if step.status == 'failed' else 'muted' }} small">
+          {{ step.result }}
+        </div>
+        {% endif %}
+        {% if step.payload and step.kind == 'page_content' and step.payload.url %}
+        <div class="muted small">Page: <code>{{ step.payload.url }}</code></div>
+        {% endif %}
+      </td>
+      <td class="muted small">{{ step.kind }}</td>
+      <td>
+        <span class="stage-tag {{ step.status }}">{{ step.status }}</span>
+      </td>
+      <td class="row-actions">
+        {% if step.status in ('proposed', 'failed') %}
+          {% if step.executable %}
+          <form method="post" action="/strategy/step/{{ step.id }}/run" class="inline">
+            <button type="submit" class="small-btn">Run</button>
+          </form>
+          {% endif %}
+          <form method="post" action="/strategy/step/{{ step.id }}/status" class="inline">
+            <input type="hidden" name="status" value="done">
+            <button type="submit" class="small-btn muted">Mark done</button>
+          </form>
+          <form method="post" action="/strategy/step/{{ step.id }}/status" class="inline">
+            <input type="hidden" name="status" value="skipped">
+            <button type="submit" class="small-btn muted">Skip</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+{% if strategy.status == 'active' %}
+<h2>Did it work?</h2>
+{% if not checkpoints %}
+<div class="notice">
+  <strong>No checkpoint yet.</strong>
+  Baseline frozen {{ strategy.baseline_at | when }}. The
+  <a href="/jobs">strategy checkpoints</a> job measures against it — give the
+  work a week or two before reading anything into the first one.
+</div>
+{% else %}
+<table>
+  <thead>
+    <tr><th>Metric</th><th class="n">Baseline</th>
+      {% for cp in checkpoints %}<th class="n">{{ cp.date }}</th>{% endfor %}
+    </tr>
+  </thead>
+  <tbody>
+    {% for key in metric_keys %}
+    <tr>
+      <td>{{ key.replace('_', ' ') }}</td>
+      <td class="n muted">{{ strategy.baseline.get(key, '—') }}</td>
+      {% for cp in checkpoints %}
+      {% set now = cp.metrics.get(key) %}
+      {% set before = strategy.baseline.get(key) %}
+      <td class="n {{ 'good' if now is not none and before is not none and now > before
+                      else ('bad' if now is not none and before is not none and now < before) }}">
+        {{ now if now is not none else '—' }}
+      </td>
+      {% endfor %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted small">
+  Green is simply "higher than baseline" — for <em>position</em> metrics lower
+  is better, so read those the other way round. Direction is not judged here
+  because a metric's meaning depends on which one it is.
+</p>
+{% for cp in checkpoints %}
+  {% if cp.narrative %}
+  <div class="notice">
+    <strong>{{ cp.date }}</strong> · {{ cp.steps_done }}/{{ cp.steps_total }} steps done
+    <p>{{ cp.narrative }}</p>
+  </div>
+  {% endif %}
+{% endfor %}
+{% endif %}
+{% endif %}
+
+<details style="margin-top:20px;">
+  <summary class="muted small">The brief the model was given</summary>
+  <pre class="context-dump">{{ strategy.context_md }}</pre>
+</details>
+{% endblock %}

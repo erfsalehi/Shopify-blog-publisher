@@ -386,3 +386,25 @@ ul.tight li { margin: 2px 0; }
 .serp-desc { font-size: 13px; color: var(--muted); line-height: 1.45; }
 .draft-actions { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .draft-actions form { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+
+/* ── Strategy ────────────────────────────────────────────────────── */
+/* Status colours read at a glance across the list and the step table.
+   "proposed" is deliberately neutral, not a warning: an unstarted step is
+   the normal state of a fresh plan, and colouring it would make every new
+   strategy look like a problem. */
+.stage-tag.draft    { background: var(--accent-soft); color: var(--accent); }
+.stage-tag.active   { background: var(--running); color: #fff; }
+.stage-tag.done     { background: var(--good); color: #fff; }
+.stage-tag.abandoned,
+.stage-tag.skipped  { background: var(--line); color: var(--muted); }
+.stage-tag.proposed { background: var(--line); color: var(--muted); }
+.stage-tag.failed   { background: var(--bad); color: #fff; }
+
+/* The brief is long by design — it's every tab's context — so it collapses
+   and scrolls rather than burying the plan it produced. */
+.context-dump {
+  max-height: 420px; overflow: auto; white-space: pre-wrap;
+  font-size: 12px; line-height: 1.45; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 6px; padding: 12px;
+  color: var(--muted);
+}

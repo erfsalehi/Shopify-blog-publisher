@@ -686,6 +686,181 @@ class ExperimentProduct(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class StepKind(str, enum.Enum):
+    """What a strategy step actually does.
+
+    Split into the ones this app can *perform* and the ones it can only
+    *track*, because a plan that presents both identically is a plan whose
+    progress bar lies. Only the first three run code:
+
+      * `blog_topic` — queues a topic into the pipeline's calendar, exactly
+        as `blog-pipeline add-topic` does, Linear issue and all.
+      * `article_refresh` — runs the existing refresh agent on one article
+        and produces a diff for review. Never publishes on its own.
+      * `product_seo` — writes a title/description through the same
+        `productUpdate` path the Products page uses.
+
+    Everything else is a checklist item with a due date and a place to record
+    what happened. `gbp` exists as its own kind rather than folding into
+    `manual` because the local pack is ranked on Google Business Profile and
+    nothing in this app can touch it — naming it keeps that visible instead
+    of burying the single biggest local lever in a generic to-do.
+    """
+
+    blog_topic = "blog_topic"
+    article_refresh = "article_refresh"
+    product_seo = "product_seo"
+    page_content = "page_content"
+    ads = "ads"
+    gbp = "gbp"
+    manual = "manual"
+
+
+#: Kinds this app can carry out itself. Everything else is tracked only.
+EXECUTABLE_KINDS = frozenset({
+    StepKind.blog_topic.value,
+    StepKind.article_refresh.value,
+    StepKind.product_seo.value,
+})
+
+
+class StrategyStatus(str, enum.Enum):
+    draft = "draft"        # generated, not committed to
+    active = "active"      # baseline captured, being measured
+    done = "done"
+    abandoned = "abandoned"
+
+
+class Strategy(Base):
+    """A goal, a plan to reach it, and the measurement of whether it worked.
+
+    The point of this table rather than another advisor note: a note is a
+    read of the present, and this is a commitment with a baseline. The
+    baseline is captured at the moment the owner activates it, which is what
+    makes "did this work" answerable later — measuring against numbers taken
+    after the work started would quietly absorb the change into the baseline.
+    """
+
+    __tablename__ = "strategy"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    #: Optional narrowing, e.g. a city. Free text the model is told about and
+    #: the measurement uses to pick which metrics matter.
+    target: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    status: Mapped[str] = mapped_column(
+        String(20), default=StrategyStatus.draft.value, index=True
+    )
+    model: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reading: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The brief the model was given, verbatim — the same contract the
+    #: advisor keeps. Without it a plan is an assertion; with it it's
+    #: checkable against the numbers that produced it.
+    context_md: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unverified_json: Mapped[str] = mapped_column(Text, default="[]")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    #: Metrics as they stood when the strategy was activated, JSON.
+    baseline_json: Mapped[str] = mapped_column(Text, default="{}")
+    baseline_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+
+    @property
+    def baseline(self) -> dict:
+        try:
+            loaded = json.loads(self.baseline_json)
+        except ValueError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    @property
+    def unverified(self) -> list:
+        try:
+            loaded = json.loads(self.unverified_json)
+        except ValueError:
+            return []
+        return loaded if isinstance(loaded, list) else []
+
+
+class StrategyStep(Base):
+    """One thing to do, and what came of it."""
+
+    __tablename__ = "strategy_step"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    kind: Mapped[str] = mapped_column(
+        String(30), default=StepKind.manual.value, index=True
+    )
+    title: Mapped[str] = mapped_column(String(400), nullable=False)
+    rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: Kind-specific arguments — the topic to queue, the article id to
+    #: refresh. Whatever `strategy.execute` needs to actually do it.
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    # proposed | done | skipped | failed
+    status: Mapped[str] = mapped_column(String(20), default="proposed", index=True)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    done_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    @property
+    def payload(self) -> dict:
+        try:
+            loaded = json.loads(self.payload_json)
+        except ValueError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    @property
+    def executable(self) -> bool:
+        return self.kind in EXECUTABLE_KINDS
+
+
+class StrategyCheckpoint(Base):
+    """One weekly measurement against the baseline.
+
+    Stored per week rather than recomputed, because the whole value is the
+    series: "clicks are up 12%" means nothing without the four weeks before
+    it, and a recomputed number can't show a week where things got worse and
+    then recovered.
+    """
+
+    __tablename__ = "strategy_checkpoint"
+    __table_args__ = (
+        UniqueConstraint("strategy_id", "date", name="uq_strategy_checkpoint"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    strategy_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    metrics_json: Mapped[str] = mapped_column(Text, default="{}")
+    #: A sentence on what moved, written by the model from the numbers on
+    #: this row and the baseline. Null when the model wasn't reachable — the
+    #: measurement is still worth keeping without it.
+    narrative: Mapped[str | None] = mapped_column(Text, nullable=True)
+    steps_done: Mapped[int] = mapped_column(Integer, default=0)
+    steps_total: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    @property
+    def metrics(self) -> dict:
+        try:
+            loaded = json.loads(self.metrics_json)
+        except ValueError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+
 class Ga4CityDaily(Base):
     """Sessions and conversion events for one city on one day.
 

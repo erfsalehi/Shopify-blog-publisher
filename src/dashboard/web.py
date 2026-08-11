@@ -26,7 +26,7 @@ from markupsafe import Markup, escape
 
 from dashboard import (
     advisor, alerts, auth, charts, cron, diffing, experiments, refresh,
-    reporting, scheduler, store,
+    reporting, scheduler, store, strategy,
 )
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
@@ -46,7 +46,8 @@ from dashboard.jobs.runner import (
 )
 from dashboard.models import (
     AlertRule, Competitor, CompetitorMatch, CompetitorPost, Experiment,
-    ExperimentProduct, MatchStatus, ShopifyProduct,
+    ExperimentProduct, MatchStatus, ShopifyProduct, Strategy,
+    StrategyCheckpoint, StrategyStep,
 )
 from dashboard.db import get_session
 
@@ -611,6 +612,116 @@ def create_app() -> FastAPI:
                 row.shopify_article_id = result.article_id
                 row.shopify_url = result.url
         return RedirectResponse(f"/blog/{article_id}?drafted=1", status_code=303)
+
+    # ── Strategy ────────────────────────────────────────────────────
+    @app.get("/strategy", response_class=HTMLResponse)
+    def strategy_page(request: Request):
+        with get_session() as session:
+            rows = (
+                session.query(Strategy)
+                .order_by(Strategy.created_at.desc())
+                .limit(30)
+                .all()
+            )
+            out = []
+            for row in rows:
+                steps = session.query(StrategyStep).filter(
+                    StrategyStep.strategy_id == row.id
+                ).all()
+                latest = (
+                    session.query(StrategyCheckpoint)
+                    .filter(StrategyCheckpoint.strategy_id == row.id)
+                    .order_by(StrategyCheckpoint.date.desc())
+                    .first()
+                )
+                out.append({
+                    "strategy": row,
+                    "total": len(steps),
+                    "done": sum(1 for s in steps if s.status == "done"),
+                    "latest": latest,
+                })
+            for item in out:
+                session.expunge(item["strategy"])
+                if item["latest"] is not None:
+                    session.expunge(item["latest"])
+        return render(request, "strategy.html", strategies=out)
+
+    @app.post("/strategy")
+    def create_strategy(goal: str = Form(...), target: str = Form("")):
+        """Generate a plan. Slow — a full brief plus a reasoning call — so it
+        runs on the request thread here for the same reason the advisor does
+        under Vercel: a background thread would be killed with the function."""
+        try:
+            row = strategy.generate(goal, target=target.strip() or None)
+        except ValueError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        return RedirectResponse(f"/strategy/{row.id}", status_code=303)
+
+    @app.get("/strategy/{strategy_id}", response_class=HTMLResponse)
+    def strategy_detail(request: Request, strategy_id: int):
+        with get_session() as session:
+            row = session.get(Strategy, strategy_id)
+            if row is None:
+                return HTMLResponse("Strategy not found", status_code=404)
+            steps = (
+                session.query(StrategyStep)
+                .filter(StrategyStep.strategy_id == strategy_id)
+                .order_by(StrategyStep.position, StrategyStep.id)
+                .all()
+            )
+            checkpoints = (
+                session.query(StrategyCheckpoint)
+                .filter(StrategyCheckpoint.strategy_id == strategy_id)
+                .order_by(StrategyCheckpoint.date.asc())
+                .all()
+            )
+            done = sum(1 for s in steps if s.status == "done")
+            # Union of baseline and every checkpoint's keys, so a metric that
+            # only started being collected later still gets a row.
+            keys = [k for k in row.baseline if k != "as_of"]
+            for cp in checkpoints:
+                for k in cp.metrics:
+                    if k != "as_of" and k not in keys:
+                        keys.append(k)
+            for obj in [row, *steps, *checkpoints]:
+                session.expunge(obj)
+        return render(
+            request, "strategy_detail.html",
+            nav="strategy",
+            strategy=row, steps=steps, checkpoints=checkpoints,
+            done=done, metric_keys=keys,
+        )
+
+    @app.post("/strategy/{strategy_id}/activate")
+    def activate_strategy(strategy_id: int):
+        strategy.activate(strategy_id)
+        return RedirectResponse(f"/strategy/{strategy_id}", status_code=303)
+
+    @app.post("/strategy/step/{step_id}/run")
+    def run_strategy_step(step_id: int):
+        try:
+            step = strategy.execute(step_id)
+        except strategy.StepError as e:
+            with get_session() as session:
+                row = session.get(StrategyStep, step_id)
+                if row is not None:
+                    row.result = str(e)[:2000]
+                    sid = row.strategy_id
+            return RedirectResponse(f"/strategy/{sid}", status_code=303)
+        except KeyError:
+            return JSONResponse({"error": "unknown step"}, status_code=404)
+        return RedirectResponse(f"/strategy/{step.strategy_id}", status_code=303)
+
+    @app.post("/strategy/step/{step_id}/status")
+    def set_strategy_step(step_id: int, status: str = Form(...)):
+        try:
+            strategy.set_step_status(step_id, status)
+        except (KeyError, ValueError) as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        with get_session() as session:
+            row = session.get(StrategyStep, step_id)
+            sid = row.strategy_id if row else 0
+        return RedirectResponse(f"/strategy/{sid}", status_code=303)
 
     # ── Local SEO ───────────────────────────────────────────────────
     @app.get("/local", response_class=HTMLResponse)

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}Strategy{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Strategy</h1>
+  <span class="muted small">{{ strategies | length }} total</span>
+</div>
+
+<p class="muted window-note">
+  State a goal and the model reads <strong>every tab's data at once</strong> —
+  search, products, blog, keywords, ads, competitors and local — then writes a
+  plan of specific steps. Steps this app can carry out have a button that runs
+  them; the rest are tracked with somewhere to record what happened. Activating
+  a strategy freezes today's numbers as its baseline, which is what makes
+  "did it work" answerable later.
+</p>
+
+<form method="post" action="/strategy" class="panel" style="padding:16px;">
+  <div class="field">
+    <label for="goal">What do you want to happen?</label>
+    <input type="text" id="goal" name="goal" class="wide" required
+           placeholder="Get ranked higher in Langley and turn that into phone calls">
+  </div>
+  <div class="field">
+    <label for="target">Narrow it to a place or product (optional)</label>
+    <input type="text" id="target" name="target" class="wide"
+           placeholder="Langley">
+    <p class="muted small">
+      A city here also picks that city's own numbers for the measurement, which
+      the aggregate can hide.
+    </p>
+  </div>
+  <button type="submit" class="primary">Write a strategy</button>
+  <span class="muted small">Takes 10-30 seconds — it reads everything first.</span>
+</form>
+
+{% if not strategies %}
+<div class="notice">
+  <strong>No strategies yet.</strong>
+  The advisor panels on each tab read the present and suggest things. This is
+  the other half: a commitment with a baseline and a plan that can be carried
+  out from here.
+</div>
+{% endif %}
+
+{% for row in strategies %}
+<section class="panel" style="padding:16px; margin-top:14px;">
+  <div class="page-head" style="margin:0 0 6px;">
+    <h2 style="margin:0;">
+      <a href="/strategy/{{ row.strategy.id }}">{{ row.strategy.goal }}</a>
+    </h2>
+    <span class="stage-tag {{ row.strategy.status }}">{{ row.strategy.status }}</span>
+  </div>
+  <p class="muted small">
+    {% if row.strategy.target %}Target: <strong>{{ row.strategy.target }}</strong> · {% endif %}
+    created {{ row.strategy.created_at | when }}
+    {%- if row.strategy.model %} · {{ row.strategy.model }}{% endif %}
+    · {{ row.done }}/{{ row.total }} steps done
+  </p>
+  {% if row.strategy.error %}
+  <p class="bad small">Generation failed: {{ row.strategy.error }}</p>
+  {% elif row.strategy.summary %}
+  <p>{{ row.strategy.summary }}</p>
+  {% endif %}
+  {% if row.latest and row.latest.narrative %}
+  <p class="muted small"><strong>Last checkpoint
+    ({{ row.latest.date }}):</strong> {{ row.latest.narrative }}</p>
+  {% endif %}
+</section>
+{% endfor %}
+{% endblock %}

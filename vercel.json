@@ -62,6 +62,10 @@
     {
       "path": "/api/cron/local_serp",
       "schedule": "0 20 * * *"
+    },
+    {
+      "path": "/api/cron/strategy_weekly",
+      "schedule": "0 21 * * *"
     }
   ]
 }

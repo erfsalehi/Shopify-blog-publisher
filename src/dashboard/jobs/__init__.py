@@ -30,5 +30,6 @@ from dashboard.jobs import publish_reconcile as _reconcile  # noqa: F401,E402
 # Last: these read what the others just wrote.
 from dashboard.jobs import alerts_job as _alerts  # noqa: F401,E402
 from dashboard.jobs import advisor_job as _advisor  # noqa: F401,E402
+from dashboard.jobs import strategy_weekly as _strategy  # noqa: F401,E402
 
 __all__ = ["JobResult", "JobSpec", "all_jobs", "get_job", "register"]
