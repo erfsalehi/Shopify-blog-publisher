@@ -453,6 +453,19 @@ def _competitors(today: date) -> str:
             )
             lines.append(f"- #{product.best_seller_rank} {product.title} ({price})")
 
+    if data.get("visibility_gaps"):
+        lines += [
+            "",
+            "RANGES WE STOCK BUT HIDE THE PRICE OF, THAT THEY PRICE OPENLY:",
+        ]
+        for gap in data["visibility_gaps"][:8]:
+            lines.append(
+                f"- {gap['phrase']}: {gap['ours_hidden']} of ours hidden "
+                f"({gap['ours_priced']} priced); they list "
+                f"{gap['theirs_priced']} at ${gap['their_low']:.2f}"
+                f"-${gap['their_high']:.2f} ({', '.join(gap['competitors'])})."
+            )
+
     if data["gaps"]:
         brands = ", ".join(
             f"{g['vendor']} ({g['products']})" for g in data["gaps"][:10]

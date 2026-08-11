@@ -110,6 +110,46 @@
 </div>
 {% endif %}
 
+{% if data.visibility_gaps %}
+<h2>Ranges they price and we hide</h2>
+<p class="muted small">
+  The sharpest thing in here, and the one place the match queue can't help:
+  it only looks at products whose price we show, and these are the ones we
+  don't. Grouped by the range name in the product titles, because our vendor
+  field says "D&amp;R Flooring" on almost everything — it names the shop, not
+  the range.
+</p>
+<table>
+  <thead>
+    <tr>
+      <th>Range</th><th class="n">Ours hidden</th><th class="n">Ours priced</th>
+      <th class="n">Theirs priced</th><th class="n">Their range</th><th>Who</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for g in data.visibility_gaps %}
+    <tr>
+      <td>{{ g.phrase }}</td>
+      <td class="n bad">{{ g.ours_hidden | int_ }}</td>
+      <td class="n muted">{{ g.ours_priced | int_ }}</td>
+      <td class="n">{{ g.theirs_priced | int_ }}</td>
+      <td class="n">
+        ${{ '%.2f' | format(g.their_low) }}&ndash;${{ '%.2f' | format(g.their_high) }}
+      </td>
+      <td class="muted small">{{ g.competitors | join(', ') }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted small">
+  Each row is a shopper comparing the same range on two sites and seeing a
+  number on one of them. Pick the row with the most hidden products and the
+  tightest competitor price band, tag those with <code>show-price</code>, and
+  the <a href="/experiments">experiment framework</a> will measure whether it
+  moves calls.
+</p>
+{% endif %}
+
 {% if data.comparisons %}
 <h2>Price comparison <span class="muted small">confirmed matches only</span></h2>
 <table>

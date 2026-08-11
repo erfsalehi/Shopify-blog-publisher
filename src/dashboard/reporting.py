@@ -973,6 +973,7 @@ def competitors(*, days: int = 90, today: date | None = None) -> dict:
 
     return {
         "overview": overview,
+        "visibility_gaps": price_visibility_gaps(),
         "ours": {
             "products": our_total,
             "priced": our_priced,
@@ -1324,3 +1325,106 @@ def competitor_price_history(
             "ranks": ranks,
             "days": days,
         }
+
+
+#: Two-word phrases are what identify a flooring range — "euro style",
+#: "la foret", "dark river". Single words are hopeless here: "oak", "grey"
+#: and "plank" appear in thousands of products across every catalogue and
+#: would group unrelated things together with total confidence.
+_PHRASE_STOP = frozenset(
+    """
+    the and for with in of a an by to
+    flooring floor floors plank planks board boards tile tiles
+    collection series colour color inch mm sqft sq ft
+    """.split()
+)
+_PHRASE_WORD = re.compile(r"[a-z][a-z0-9]{2,}")
+
+
+def _phrases(title: str) -> set[str]:
+    words = [w for w in _PHRASE_WORD.findall((title or "").lower())
+             if w not in _PHRASE_STOP]
+    return {f"{a} {b}" for a, b in zip(words, words[1:])}
+
+
+def price_visibility_gaps(*, limit: int = 12) -> list[dict]:
+    """Ranges we stock but hide the price of, that a competitor prices openly.
+
+    This is the sharpest thing the competitor data can say, and nothing else
+    on the page says it. The match queue can't: it only considers products
+    whose price we show, and the whole point here is the ones we don't. So
+    the overlap that matters most is invisible everywhere else — it looks
+    like "no matches found" rather than "you and they sell the same range
+    and only they show a number".
+
+    Grouped by two-word phrase from the product titles rather than by vendor,
+    because our vendor field says "D & R Flooring" on 2,702 of 2,796 products
+    — it identifies the shop, not the range.
+    """
+    with get_session() as session:
+        ours_hidden = session.query(
+            ShopifyProduct.title, ShopifyProduct.price_min
+        ).all()
+        theirs = (
+            session.query(
+                CompetitorProduct.title,
+                CompetitorProduct.price_min,
+                CompetitorProduct.competitor_id,
+            )
+            .filter(CompetitorProduct.price_min > 0)
+            .all()
+        )
+        names = {c.id: c.name for c in session.query(Competitor)}
+
+    hidden_by_phrase: dict[str, int] = {}
+    shown_by_phrase: dict[str, int] = {}
+    for title, price in ours_hidden:
+        target = hidden_by_phrase if (price or 0) <= 0 else shown_by_phrase
+        for phrase in _phrases(title):
+            target[phrase] = target.get(phrase, 0) + 1
+    if not hidden_by_phrase:
+        return []
+
+    theirs_by_phrase: dict[str, list] = {}
+    for title, price, competitor_id in theirs:
+        for phrase in _phrases(title):
+            if phrase in hidden_by_phrase:
+                theirs_by_phrase.setdefault(phrase, []).append(
+                    (price, competitor_id)
+                )
+
+    rows = []
+    for phrase, entries in theirs_by_phrase.items():
+        hidden = hidden_by_phrase.get(phrase, 0)
+        # A single product on either side is a coincidence, not a range.
+        if hidden < 2 or len(entries) < 2:
+            continue
+        prices = [p for p, _ in entries]
+        who = sorted({names.get(cid, "?") for _, cid in entries})
+        rows.append({
+            "phrase": phrase,
+            "ours_hidden": hidden,
+            "ours_priced": shown_by_phrase.get(phrase, 0),
+            "theirs_priced": len(entries),
+            "their_low": min(prices),
+            "their_high": max(prices),
+            "competitors": who,
+        })
+
+    # Most of our hidden products first — that's the size of the exposure.
+    rows.sort(key=lambda r: (-r["ours_hidden"], -r["theirs_priced"]))
+
+    # Sub-phrases of a phrase already shown add nothing ("style german" under
+    # "euro style"), so keep the first and drop anything sharing a word with
+    # an already-kept phrase.
+    kept: list[dict] = []
+    used: set[str] = set()
+    for row in rows:
+        words = set(row["phrase"].split())
+        if words & used:
+            continue
+        used |= words
+        kept.append(row)
+        if len(kept) >= limit:
+            break
+    return kept

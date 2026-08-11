@@ -554,6 +554,23 @@ an undercut alert — that rule skips `price <= 0` — so proposing one costs a
 review decision and buys nothing. With ~94% of the catalogue hidden, matching
 everything buried the useful proposals under thirty times as many dead ones.
 
+### Ranges they price and we hide
+
+The sharpest thing the competitor data says, and the one thing the match
+queue structurally cannot: that queue only considers products whose price we
+show, and these are the ones we don't. Without this section the overlap that
+matters most reads as "no matches found".
+
+Grouped by two-word phrase from the product titles, not by vendor — our
+vendor field says "D&R Flooring" on 2,702 of 2,796 products, so it names the
+shop rather than the range. Single words are useless here too: "oak", "grey"
+and "plank" appear across thousands of products in every catalogue and would
+group unrelated things with total confidence.
+
+On the live data the top rows are 156 stair-nose products of ours hidden
+against 204 of theirs priced, and 19 Euro Style hidden against 91 of theirs
+at $2.29-$7.49 — the same range, and only one side shows a number.
+
 ### Price history
 
 Every catalogue sync writes one `competitor_product_price` row per product per

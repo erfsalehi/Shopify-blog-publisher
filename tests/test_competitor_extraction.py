@@ -532,3 +532,77 @@ def test_the_fetcher_reports_the_end_of_the_feed(monkeypatch):
     )
     assert out.next_page is None
     assert len(out.products) == 260
+
+
+# ── Ranges they price and we hide ───────────────────────────────────
+
+
+def test_the_price_visibility_gap_is_found(dashboard_db):
+    """The match queue cannot surface this: it only considers products whose
+    price we show, and these are the ones we don't. On the real data our top
+    overlap is a range where 156 of ours are hidden and 204 of theirs carry a
+    price — invisible everywhere else on the page."""
+    from dashboard import reporting
+    from dashboard.db import get_session
+    from dashboard.models import Competitor, CompetitorProduct, ShopifyProduct
+
+    with get_session() as s:
+        s.add(Competitor(name="Rival", base_url="https://r.example", enabled=True))
+        for i in range(4):
+            s.add(ShopifyProduct(product_gid=f"g{i}", handle=f"h{i}",
+                                 title=f"Euro Style Atlantic {i}", price_min=0.0))
+        s.flush()
+        for i in range(3):
+            s.add(CompetitorProduct(competitor_id=1, handle=f"t{i}",
+                                    title=f"Euro Style La Foret {i}",
+                                    price_min=2.69 + i))
+
+    gaps = reporting.price_visibility_gaps()
+
+    assert gaps, "expected the euro style overlap to be found"
+    top = gaps[0]
+    assert top["phrase"] == "euro style"
+    assert top["ours_hidden"] == 4
+    assert top["theirs_priced"] == 3
+    assert top["their_low"] == 2.69
+    assert top["competitors"] == ["Rival"]
+
+
+def test_a_single_product_overlap_is_not_called_a_range(dashboard_db):
+    """One product on either side is a coincidence. Reporting it as a range
+    would fill this table with noise and make the real rows unfindable."""
+    from dashboard import reporting
+    from dashboard.db import get_session
+    from dashboard.models import Competitor, CompetitorProduct, ShopifyProduct
+
+    with get_session() as s:
+        s.add(Competitor(name="Rival", base_url="https://r.example", enabled=True))
+        s.add(ShopifyProduct(product_gid="g1", handle="h1",
+                             title="Lonely Range Oak", price_min=0.0))
+        s.flush()
+        s.add(CompetitorProduct(competitor_id=1, handle="t1",
+                                title="Lonely Range Oak", price_min=3.0))
+
+    assert reporting.price_visibility_gaps() == []
+
+
+def test_products_whose_price_we_show_are_not_counted_as_hidden(dashboard_db):
+    from dashboard import reporting
+    from dashboard.db import get_session
+    from dashboard.models import Competitor, CompetitorProduct, ShopifyProduct
+
+    with get_session() as s:
+        s.add(Competitor(name="Rival", base_url="https://r.example", enabled=True))
+        for i in range(3):
+            s.add(ShopifyProduct(product_gid=f"g{i}", handle=f"h{i}",
+                                 title=f"Euro Style Atlantic {i}",
+                                 price_min=0.0 if i < 2 else 5.0))
+        s.flush()
+        for i in range(2):
+            s.add(CompetitorProduct(competitor_id=1, handle=f"t{i}",
+                                    title=f"Euro Style Nordic {i}", price_min=3.0))
+
+    top = reporting.price_visibility_gaps()[0]
+
+    assert top["ours_hidden"] == 2
+    assert top["ours_priced"] == 1
