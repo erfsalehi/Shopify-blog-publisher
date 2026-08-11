@@ -142,6 +142,22 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
             skipped=True, skip_reason=f"{name}: {e}", detail={"competitor": name}
         )
 
+    # A feed can list the same handle twice — Shopify's `page` pagination
+    # overlaps when the catalogue changes mid-crawl, and the sitemap path can
+    # reach one product by two URLs. Both entries then resolve to the same
+    # row, and both try to write today's price snapshot for it, which
+    # violates uq_competitor_price_day. Seen for real against a live
+    # 3,800-product store. De-duplicated once, here, rather than guarded at
+    # each of the two places downstream that would otherwise need it.
+    seen: set[str] = set()
+    products = []
+    for raw in fetched.products:
+        if raw.handle in seen:
+            continue
+        seen.add(raw.handle)
+        products.append(raw)
+    duplicates = len(fetched.products) - len(products)
+
     # ── write ────────────────────────────────────────────────────────
     now = _utcnow()
     with get_session() as session:
@@ -152,7 +168,7 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
             )
         }
         created = updated = priced = 0
-        for raw in fetched.products:
+        for raw in products:
             row = existing.get(raw.handle)
             if row is None:
                 row = CompetitorProduct(
@@ -182,8 +198,7 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
         # One price row per product per day, upserted — the snapshot shape
         # every other table here uses. Without it, "are they discounting?"
         # can only ever be answered about today.
-        seen_handles = {r.handle for r in fetched.products}
-        ids = [row.id for h, row in existing.items() if h in seen_handles]
+        ids = [row.id for h, row in existing.items() if h in seen]
         todays = {
             p.competitor_product_id: p
             for p in session.query(CompetitorProductPrice).filter(
@@ -192,7 +207,7 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
             )
         } if ids else {}
 
-        for raw in fetched.products:
+        for raw in products:
             row = existing.get(raw.handle)
             if row is None:
                 continue
@@ -200,6 +215,11 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
             if snap is None:
                 snap = CompetitorProductPrice(competitor_product_id=row.id, date=today)
                 session.add(snap)
+                # Registered immediately, not just at the end: two rows for
+                # the same product and day is a unique-constraint violation,
+                # and a dict that only ever held pre-existing rows can't
+                # prevent one added moments ago in this same loop.
+                todays[row.id] = snap
             snap.price_min = raw.price_min
             snap.price_max = raw.price_max
             snap.available = raw.available

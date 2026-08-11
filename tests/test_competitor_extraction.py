@@ -318,3 +318,77 @@ def test_two_identical_prices_do_not_divide_by_zero():
     svg = str(charts.price_chart([], flat))
 
     assert 'class="theirs"' in svg
+
+
+# ── Duplicate handles in a feed ─────────────────────────────────────
+
+
+def test_a_handle_listed_twice_does_not_break_the_run(dashboard_db, monkeypatch):
+    """Shopify's `page` pagination overlaps when the catalogue changes
+    mid-crawl, and the sitemap path can reach one product by two URLs. Both
+    entries resolve to the same row, and before this each tried to write
+    today's price snapshot for it — a unique-constraint violation that failed
+    the whole 3,800-product run. Seen for real against a live store."""
+    from dashboard.db import get_session
+    from dashboard.jobs import competitor_watch as watch
+    from dashboard.models import (
+        Competitor, CompetitorProduct, CompetitorProductPrice,
+    )
+
+    with get_session() as s:
+        s.add(Competitor(name="Dupes", base_url="https://d.example",
+                         enabled=True, platform="shopify"))
+
+    twice = C.Fetched(products=[
+        C.RawProduct(handle="board", title="Board", price_min=2.89),
+        C.RawProduct(handle="board", title="Board (again)", price_min=2.89),
+        C.RawProduct(handle="other", title="Other", price_min=3.50),
+    ], pages=1)
+    monkeypatch.setattr(watch.fetchers, "probe_platform",
+                        lambda base, client=None: "shopify")
+    monkeypatch.setattr(watch.fetchers, "fetch_shopify_catalog",
+                        lambda base, client=None: twice)
+
+    result = watch.sync_competitor_catalog()
+
+    assert result.skipped is False
+    assert result.detail["new_products"] == 2      # not 3
+    with get_session() as s:
+        assert s.query(CompetitorProduct).count() == 2
+        assert s.query(CompetitorProductPrice).count() == 2
+
+
+def test_running_the_catalogue_twice_in_a_day_updates_one_snapshot(
+    dashboard_db, monkeypatch
+):
+    """The second run of the day must overwrite today's price row, not add a
+    second one — that's what makes the job safe to re-run and safe to retry."""
+    from dashboard.db import get_session
+    from dashboard.jobs import competitor_watch as watch
+    from dashboard.models import Competitor, CompetitorProductPrice
+
+    with get_session() as s:
+        s.add(Competitor(name="Twice", base_url="https://t.example",
+                         enabled=True, platform="shopify"))
+
+    monkeypatch.setattr(watch.fetchers, "probe_platform",
+                        lambda base, client=None: "shopify")
+
+    def feed(price):
+        return C.Fetched(
+            products=[C.RawProduct(handle="board", title="Board",
+                                   price_min=price)],
+            pages=1,
+        )
+
+    monkeypatch.setattr(watch.fetchers, "fetch_shopify_catalog",
+                        lambda base, client=None: feed(2.89))
+    watch.sync_competitor_catalog()
+    monkeypatch.setattr(watch.fetchers, "fetch_shopify_catalog",
+                        lambda base, client=None: feed(2.49))
+    watch.sync_competitor_catalog()
+
+    with get_session() as s:
+        snaps = s.query(CompetitorProductPrice).all()
+        assert len(snaps) == 1
+        assert snaps[0].price_min == 2.49
