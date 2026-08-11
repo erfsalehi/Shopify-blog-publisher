@@ -32,11 +32,23 @@ _COMMAND_EXTRAS = {
 }
 
 
-def _env(path: Path) -> dict[str, str]:
+def _env(path: Path, *, cli_steps_only: bool = False) -> dict[str, str]:
+    """Env set by the workflow's steps.
+
+    `cli_steps_only` narrows this to steps that actually invoke
+    `blog-pipeline`, which is the only place the Settings-field check makes
+    sense: a step whose shell reads the variable itself is not plumbing
+    config into Settings and has no reason to match a Settings field.
+    Without the distinction the check either misses real typos or blocks
+    legitimate plumbing — see migrate-to-neon.yml, which writes its
+    destination URL to a file with `printf`.
+    """
     doc = yaml.safe_load(path.read_text(encoding="utf-8"))
     env: dict[str, str] = {}
     for job in doc["jobs"].values():
         for step in job["steps"]:
+            if cli_steps_only and "blog-pipeline" not in str(step.get("run") or ""):
+                continue
             env.update(step.get("env") or {})
     return env
 
@@ -57,7 +69,9 @@ def test_workflows_were_found():
 @pytest.mark.parametrize("wf", _WORKFLOWS, ids=lambda p: p.name)
 def test_env_keys_are_real_settings_fields(wf):
     fields = set(Settings.model_fields)
-    unknown = sorted(k for k in _env(wf) if k.lower() not in fields)
+    unknown = sorted(
+        k for k in _env(wf, cli_steps_only=True) if k.lower() not in fields
+    )
     assert not unknown, f"{wf.name} sets env Settings ignores: {unknown}"
 
 
