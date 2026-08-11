@@ -732,6 +732,19 @@ class Competitor(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_checked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # Where the next catalogue run resumes. A 60-second function cannot page
+    # an unbounded catalogue — one competitor here has over 10,000 products
+    # and hit the cap at 57.5s, one bad second from being killed mid-write.
+    # So a run takes a slice and records where it stopped; the next run
+    # continues, and wraps back to 1 when the feed ends. Without this the cap
+    # isn't a limit, it's a permanent blind spot past page N.
+    catalog_page: Mapped[int] = mapped_column(Integer, default=1)
+    # True once a pass has reached the end of the feed at least once. Until
+    # then the product count on the page is "what we've seen so far", not
+    # their catalogue — and `not_seen_this_run` would be meaningless, since
+    # most of the catalogue simply wasn't in this slice.
+    catalog_complete: Mapped[bool] = mapped_column(Boolean, default=False)
+
     @property
     def host(self) -> str:
         """`drflooring.ca` — for display, and for building absolute URLs."""

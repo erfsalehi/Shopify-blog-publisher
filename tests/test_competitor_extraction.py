@@ -347,7 +347,7 @@ def test_a_handle_listed_twice_does_not_break_the_run(dashboard_db, monkeypatch)
     monkeypatch.setattr(watch.fetchers, "probe_platform",
                         lambda base, client=None: "shopify")
     monkeypatch.setattr(watch.fetchers, "fetch_shopify_catalog",
-                        lambda base, client=None: twice)
+                        lambda base, client=None, **kw: twice)
 
     result = watch.sync_competitor_catalog()
 
@@ -382,13 +382,153 @@ def test_running_the_catalogue_twice_in_a_day_updates_one_snapshot(
         )
 
     monkeypatch.setattr(watch.fetchers, "fetch_shopify_catalog",
-                        lambda base, client=None: feed(2.89))
+                        lambda base, client=None, **kw: feed(2.89))
     watch.sync_competitor_catalog()
     monkeypatch.setattr(watch.fetchers, "fetch_shopify_catalog",
-                        lambda base, client=None: feed(2.49))
+                        lambda base, client=None, **kw: feed(2.49))
     watch.sync_competitor_catalog()
 
     with get_session() as s:
         snaps = s.query(CompetitorProductPrice).all()
         assert len(snaps) == 1
         assert snaps[0].price_min == 2.49
+
+
+# ── Resuming a catalogue too big for one run ────────────────────────
+
+
+def test_a_truncated_pass_resumes_where_it_stopped(dashboard_db, monkeypatch):
+    """One real competitor has 10,000+ products and hit the old cap at 57.5s
+    against a 60s ceiling. Capping without resuming isn't a limit, it's a
+    permanent blind spot past page N."""
+    from dashboard.db import get_session
+    from dashboard.jobs import competitor_watch as watch
+    from dashboard.models import Competitor
+
+    with get_session() as s:
+        s.add(Competitor(name="Big", base_url="https://b.example",
+                         enabled=True, platform="shopify"))
+
+    seen_pages = []
+
+    def slice_(base, client=None, *, start_page=1, **kw):
+        seen_pages.append(start_page)
+        return C.Fetched(
+            products=[C.RawProduct(handle=f"p{start_page}", title="P",
+                                   price_min=1.0)],
+            pages=20,
+            next_page=start_page + 20,
+        )
+
+    monkeypatch.setattr(watch.fetchers, "probe_platform",
+                        lambda base, client=None: "shopify")
+    monkeypatch.setattr(watch.fetchers, "fetch_shopify_catalog", slice_)
+
+    first = watch.sync_competitor_catalog()
+    second = watch.sync_competitor_catalog()
+
+    assert seen_pages == [1, 21]
+    assert "partial" in first.detail["pass"]
+    assert "resuming at page 21" in first.detail["pass"]
+    assert "resuming at page 41" in second.detail["pass"]
+
+
+def test_a_partial_pass_never_claims_products_were_delisted(
+    dashboard_db, monkeypatch
+):
+    """On a partial slice almost every stored product has an older
+    `last_seen` simply because it wasn't in this slice. Reporting that as
+    "no longer listed" would claim the competitor delisted their whole
+    catalogue every night."""
+    from dashboard.db import get_session
+    from dashboard.jobs import competitor_watch as watch
+    from dashboard.models import Competitor, CompetitorProduct
+
+    with get_session() as s:
+        s.add(Competitor(name="Big", base_url="https://b.example",
+                         enabled=True, platform="shopify"))
+        s.flush()
+        s.add(CompetitorProduct(competitor_id=1, handle="old", title="Old",
+                                price_min=1.0))
+
+    monkeypatch.setattr(watch.fetchers, "probe_platform",
+                        lambda base, client=None: "shopify")
+    monkeypatch.setattr(
+        watch.fetchers, "fetch_shopify_catalog",
+        lambda base, client=None, **kw: C.Fetched(
+            products=[C.RawProduct(handle="new", title="New", price_min=2.0)],
+            pages=20, next_page=21,
+        ),
+    )
+
+    result = watch.sync_competitor_catalog()
+
+    assert "no_longer_listed" not in result.detail
+
+
+def test_a_complete_pass_wraps_back_to_page_one(dashboard_db, monkeypatch):
+    """Reaching the end means the next pass should re-read from the start to
+    pick up new and changed products — not keep walking off the end."""
+    from dashboard.db import get_session
+    from dashboard.jobs import competitor_watch as watch
+    from dashboard.models import Competitor
+
+    with get_session() as s:
+        s.add(Competitor(name="Small", base_url="https://s.example",
+                         enabled=True, platform="shopify", catalog_page=21))
+
+    monkeypatch.setattr(watch.fetchers, "probe_platform",
+                        lambda base, client=None: "shopify")
+    monkeypatch.setattr(
+        watch.fetchers, "fetch_shopify_catalog",
+        lambda base, client=None, **kw: C.Fetched(
+            products=[C.RawProduct(handle="x", title="X", price_min=1.0)],
+            pages=2, next_page=None,
+        ),
+    )
+
+    result = watch.sync_competitor_catalog()
+
+    assert "complete" in result.detail["pass"]
+    assert result.detail["no_longer_listed"] == 0
+    with get_session() as s:
+        row = s.query(Competitor).one()
+        assert row.catalog_page == 1
+        assert row.catalog_complete is True
+
+
+def test_the_fetcher_reports_the_end_of_the_feed(monkeypatch):
+    """`next_page is None` is what the whole resumption scheme hangs on —
+    a short page, an empty page and a non-200 all mean "stop here"."""
+    import httpx
+
+    class Resp:
+        status_code = 200
+
+        def __init__(self, n):
+            self._n = n
+
+        def json(self):
+            return {"products": [{"id": i, "handle": f"h{i}", "title": "T",
+                                  "variants": []} for i in range(self._n)]}
+
+    class Client:
+        def __init__(self, sizes):
+            self.sizes = list(sizes)
+
+        def get(self, url, params=None):
+            if url.endswith("robots.txt"):
+                r = Resp(0)
+                r.status_code = 404
+                return r
+            return Resp(self.sizes.pop(0))
+
+        def close(self):
+            pass
+
+    # A short second page ends the pass.
+    out = C.fetch_shopify_catalog(
+        "https://x.example", client=Client([250, 10]), max_pages=5
+    )
+    assert out.next_page is None
+    assert len(out.products) == 260

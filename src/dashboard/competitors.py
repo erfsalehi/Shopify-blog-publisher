@@ -52,10 +52,12 @@ log = logging.getLogger(__name__)
 #: Seconds between requests to the same host. A human clicking through a
 #: catalogue is slower than this.
 _PAUSE = 1.0
-#: Pages of 250 products. 40 covers a 10,000-product catalogue, which is far
-#: larger than any local flooring retailer, and stops a misconfigured URL
-#: from paging forever.
-_MAX_PAGES = 40
+#: Pages of 250 products per run. 40 was chosen on the assumption that no
+#: local flooring retailer has 10,000 products; one of them has more, and
+#: that run took 57.5s against a 60s function ceiling — one slow second from
+#: being killed mid-write. 20 pages (5,000 products) lands around 25s, and
+#: `next_page` makes the rest a resumption rather than a blind spot.
+_MAX_PAGES = 20
 _TIMEOUT = 20.0
 
 #: Says what this is and who it's for. A competitor who wants to block it can
@@ -104,6 +106,11 @@ class Fetched:
     #: Reported on the job so a site quietly falling back to the fragile
     #: selector route is visible before it breaks, rather than after.
     price_sources: dict = field(default_factory=dict)
+    #: Where the next run should resume, or None when the feed ended. None
+    #: means "this was a complete pass" — the difference between a product
+    #: count that is their catalogue and one that is only what fit in 60
+    #: seconds.
+    next_page: int | None = None
 
 
 def normalize_base(url: str) -> str:
@@ -275,34 +282,58 @@ def _product_from_shopify(node: dict, base: str) -> RawProduct:
     )
 
 
-def fetch_shopify_catalog(base: str, client: httpx.Client | None = None) -> Fetched:
-    """Every product, paged. Stops at the first empty page."""
+def fetch_shopify_catalog(
+    base: str,
+    client: httpx.Client | None = None,
+    *,
+    start_page: int = 1,
+    max_pages: int = _MAX_PAGES,
+) -> Fetched:
+    """A slice of the catalogue, starting at `start_page`.
+
+    Sets `next_page` to where the following run should resume, or None when
+    the feed ended — which is what tells the caller a full pass is done and
+    the product count can finally be trusted as their catalogue size.
+
+    Sliced rather than exhaustive because a 60-second function can't page an
+    unbounded catalogue: one real competitor has 10,000+ products and took
+    57.5s to reach the old cap. Being killed mid-write would lose the whole
+    run, since it's one transaction.
+    """
     own = client is None
     client = client or _client()
     out = Fetched()
+    start_page = max(1, start_page)
     try:
         _require_allowed(base, "/products.json", client=client)
-        for page in range(1, _MAX_PAGES + 1):
+        page = start_page
+        for offset in range(max_pages):
+            page = start_page + offset
             resp = client.get(
                 f"{base}/products.json", params={"limit": 250, "page": page}
             )
             if resp.status_code != 200:
-                if page == 1:
+                if offset == 0:
                     raise FetchError(
                         f"{base}/products.json returned HTTP {resp.status_code}."
                     )
-                break
+                out.next_page = None  # treat as the end rather than a hole
+                return out
             nodes = (resp.json() or {}).get("products") or []
-            out.pages = page
+            out.pages += 1
             if not nodes:
-                break
+                out.next_page = None
+                return out
             for node in nodes:
                 product = _product_from_shopify(node, base)
                 if product.handle:
                     out.products.append(product)
             if len(nodes) < 250:
-                break
+                out.next_page = None  # short page means the last page
+                return out
             time.sleep(_PAUSE)
+        # Ran out of budget, not out of catalogue.
+        out.next_page = page + 1
     finally:
         if own:
             client.close()

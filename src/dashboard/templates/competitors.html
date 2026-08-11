@@ -71,7 +71,12 @@
           <div class="muted small bad">{{ row.competitor.last_error }}</div>
         {% endif %}
       </td>
-      <td class="n">{{ row.products | int_ }}</td>
+      <td class="n">
+        {{ row.products | int_ }}
+        {%- if not row.competitor.catalog_complete and row.products %}
+        <div class="muted small">still collecting</div>
+        {%- endif %}
+      </td>
       <td class="n">
         {{ row.priced | int_ }}
         <span class="muted small">({{ '%.0f' | format(row.priced_pct) }}%)</span>

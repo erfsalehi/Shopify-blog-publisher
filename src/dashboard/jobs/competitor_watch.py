@@ -109,6 +109,12 @@ def _selector_of(competitor_id: int) -> str | None:
         return (row.price_selector or None) if row else None
 
 
+def _resume_page(competitor_id: int) -> int:
+    with get_session() as session:
+        row = session.get(Competitor, competitor_id)
+        return max(1, (row.catalog_page or 1)) if row else 1
+
+
 # ── Catalogue ────────────────────────────────────────────────────────
 
 
@@ -118,6 +124,7 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
     if claimed is None:
         return _no_competitors()
     cid, name, base_url = claimed
+    start_page = _resume_page(cid)
 
     # ── network, with no session open ────────────────────────────────
     try:
@@ -127,7 +134,7 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
             platform = fetchers.probe_platform(base)
             _set_platform(cid, platform)
         if platform == CompetitorPlatform.shopify.value:
-            fetched = fetchers.fetch_shopify_catalog(base)
+            fetched = fetchers.fetch_shopify_catalog(base, start_page=start_page)
         else:
             # No /products.json, so fall back to reading product pages one at
             # a time out of the sitemap. Far more expensive per product,
@@ -224,10 +231,24 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
             snap.price_max = raw.price_max
             snap.available = raw.available
 
-        gone = sum(1 for r in existing.values() if r.last_seen < now)
+        # Only meaningful after a pass that reached the end of the feed. On a
+        # partial slice almost everything has an older `last_seen` simply
+        # because it wasn't in this slice, and reporting that as "no longer
+        # listed" would claim a competitor delisted their whole catalogue
+        # every single night.
+        complete_pass = fetched.next_page is None
+        gone = (
+            sum(1 for r in existing.values() if r.last_seen < now)
+            if complete_pass else None
+        )
 
         competitor = session.get(Competitor, cid)
         if competitor is not None:
+            # Wrap to the start once the feed ends, so the next pass
+            # re-reads from page 1 and picks up new and changed products.
+            competitor.catalog_page = fetched.next_page or 1
+            if complete_pass:
+                competitor.catalog_complete = True
             # "0 products showing a price" is ambiguous and the page can't
             # tell the two apart on its own: either they hide prices like we
             # do, or the extraction chain couldn't read them. Only the second
@@ -245,12 +266,22 @@ def sync_competitor_catalog(today: date | None = None) -> JobResult:
     detail = {
         "competitor": name,
         "platform": platform,
-        "pages": fetched.pages,
+        "pages": f"{start_page}–{start_page + fetched.pages - 1}"
+        if fetched.pages else str(start_page),
         "new_products": created,
         "updated_products": updated,
         "with_visible_price": priced,
-        "no_longer_listed": gone,
     }
+    if complete_pass:
+        detail["no_longer_listed"] = gone
+        detail["pass"] = "complete — this is their whole catalogue"
+    else:
+        detail["pass"] = (
+            f"partial — {len(products):,} products this run, resuming at page "
+            f"{fetched.next_page} next time"
+        )
+    if duplicates:
+        detail["duplicate_handles_in_feed"] = duplicates
     if fetched.price_sources:
         # Which extraction step actually produced the prices. A site that
         # quietly stops emitting JSON-LD and starts depending on the owner's
