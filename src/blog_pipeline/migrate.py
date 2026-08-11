@@ -6,13 +6,11 @@ because the local pipeline keeps running and keeps producing articles the
 deployment can't see. This is re-runnable: it copies what the target is
 missing and leaves everything else alone.
 
-Only `article` and `article_revision`. They are the two tables the dashboard
-reads out of the pipeline (see `dashboard/jobs/blog_articles.py`), and
-`article_revision` has to come along because it is an article's refresh
-history — and, for a published post, the only undo that exists. The
-pipeline's `search_performance` is deliberately left behind: the dashboard
-keeps its own `gsc_*` tables synced from the API directly, so copying 30,000
-rows of a second opinion would buy nothing.
+Everything the pipeline owns except nothing: the calendar and its queue, the
+articles, their revisions, and the two per-article history tables. That's
+wider than the first version of this file, which copied only articles —
+enough to fill the Blog page's list, and not enough to make it *true*, since
+the queue lived in the table left behind.
 
 Rows keep their primary keys. `article_revision.article_id` points at them,
 and renumbering on the way across would silently reattach a revision to the
@@ -27,11 +25,38 @@ from dataclasses import dataclass, field
 from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import Session
 
-from blog_pipeline.db.models import Article, ArticleRevision, Base
+from blog_pipeline.db.models import (
+    AiReferral,
+    Article,
+    ArticleRevision,
+    Base,
+    CalendarEntry,
+    ContentCalendar,
+    SearchPerformance,
+)
 from blog_pipeline.db.session import get_engine, normalize_database_url
 
-#: Order matters: an article must exist before a revision can reference it.
-_TABLES = (Article, ArticleRevision)
+#: Insert order, and it is a foreign-key order rather than a preference:
+#: a calendar must exist before its entries, and an article before anything
+#: that points at one. Getting this wrong doesn't corrupt anything — Postgres
+#: refuses the insert — but it does fail the migration halfway.
+#:
+#: `calendar_entry` is here because the *queue* is the thing that makes the
+#: dashboard's Blog page tell the truth. Leaving it behind would move the
+#: articles across and still show "Nothing is queued" over a database that
+#: has three weeks of topics in it.
+#:
+#: `search_performance` and `ai_referral` are here for a narrower reason than
+#: display: both carry `article_id`, and moving articles without them would
+#: strip an article of its own history the moment it arrived.
+_TABLES = (
+    ContentCalendar,
+    Article,
+    ArticleRevision,
+    CalendarEntry,
+    SearchPerformance,
+    AiReferral,
+)
 
 
 @dataclass

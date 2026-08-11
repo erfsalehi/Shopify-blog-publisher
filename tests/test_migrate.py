@@ -42,7 +42,8 @@ def test_articles_and_revisions_are_copied(target):
 
     report = copy_articles(url)
 
-    assert report.copied == {"article": 3, "article_revision": 1}
+    assert report.copied["article"] == 3
+    assert report.copied["article_revision"] == 1
     with Session(engine) as t:
         assert t.scalar(select(Article.title).where(Article.id == 10)) == "Title 1"
         assert t.scalar(
@@ -77,8 +78,9 @@ def test_running_it_twice_copies_nothing_the_second_time(target):
     copy_articles(url)
     second = copy_articles(url)
 
-    assert second.copied == {"article": 0, "article_revision": 0}
-    assert second.skipped == {"article": 3, "article_revision": 1}
+    assert not any(second.copied.values())
+    assert second.skipped["article"] == 3
+    assert second.skipped["article_revision"] == 1
     with Session(engine) as t:
         assert len(t.scalars(select(Article.id)).all()) == 3
 
@@ -105,7 +107,8 @@ def test_a_dry_run_writes_nothing(target):
 
     report = copy_articles(url, dry_run=True)
 
-    assert report.copied == {"article": 3, "article_revision": 1}
+    assert report.copied["article"] == 3
+    assert report.copied["article_revision"] == 1
     with Session(engine) as t:
         assert t.scalars(select(Article.id)).all() == []
 
@@ -130,11 +133,63 @@ def test_the_id_sequence_is_moved_past_the_copied_rows():
     assert "_resync_sequences(target)" in inspect.getsource(migrate.copy_articles)
 
 
-def test_search_performance_is_left_behind():
-    """30,000 rows of a second opinion. The dashboard keeps its own gsc_*
-    tables synced from the API, so copying these buys nothing — and this is
-    the sort of 'while we're here' addition that turns a 5-second migration
-    into a slow one nobody wants to re-run."""
+def test_the_queue_comes_across_too():
+    """Copying articles without `calendar_entry` moves the *history* and
+    leaves the *plan* behind — the dashboard would list every published post
+    over a "Nothing is queued" banner, above a database holding three weeks
+    of topics. That was the actual state before this widened."""
     from blog_pipeline.migrate import _TABLES
 
-    assert [m.__tablename__ for m in _TABLES] == ["article", "article_revision"]
+    names = [m.__tablename__ for m in _TABLES]
+    assert "calendar_entry" in names
+    assert "content_calendar" in names
+
+
+def test_tables_are_ordered_so_foreign_keys_resolve():
+    """Postgres refuses an insert whose parent row doesn't exist yet, so a
+    wrong order here fails the migration halfway — with the articles moved
+    and the queue not."""
+    from blog_pipeline.migrate import _TABLES
+
+    names = [m.__tablename__ for m in _TABLES]
+    # A calendar before its entries; an article before anything pointing at one.
+    assert names.index("content_calendar") < names.index("calendar_entry")
+    for dependent in ("article_revision", "calendar_entry",
+                      "search_performance", "ai_referral"):
+        assert names.index("article") < names.index(dependent), dependent
+
+
+def test_a_queued_topic_arrives_still_attached_to_its_calendar(target):
+    """The end-to-end version of the two structural tests above. A queue
+    entry whose `calendar_id` pointed at a row that never came across would
+    satisfy every count in the report and still be unreadable — the daily
+    drafter joins through it."""
+    from datetime import date
+
+    from blog_pipeline.db.models import (
+        CalendarEntry, ContentCalendar, EntryStatus, TopicSource,
+    )
+
+    url, engine = target
+    init_db()
+    with Session(get_engine()) as s:
+        s.add(ContentCalendar(id=7, cadence="3x/week: Mon/Wed/Fri"))
+        s.flush()
+        s.add(CalendarEntry(
+            id=3, calendar_id=7, scheduled_date=date(2026, 8, 14),
+            topic="Acoustic Underlayment for Langley Condos",
+            target_keywords=["acoustic underlayment langley"],
+            source=TopicSource.auto_researched, status=EntryStatus.queued,
+        ))
+        s.commit()
+
+    report = copy_articles(url)
+
+    assert report.copied["calendar_entry"] == 1
+    assert report.copied["content_calendar"] == 1
+    with Session(engine) as t:
+        entry = t.scalars(select(CalendarEntry)).one()
+        assert entry.topic == "Acoustic Underlayment for Langley Condos"
+        assert entry.target_keywords == ["acoustic underlayment langley"]
+        # The join the drafter makes must resolve on the far side.
+        assert t.get(ContentCalendar, entry.calendar_id) is not None

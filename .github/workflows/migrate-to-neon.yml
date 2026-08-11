@@ -1,0 +1,62 @@
+name: Migrate pipeline data to Neon
+
+# One-shot, manual, and safe to run twice.
+#
+# Until now there were two pipeline databases: the one CI has always written
+# to (DATABASE_URL, set 2026-07-15) and the Neon one the deployed dashboard
+# reads. The dashboard therefore showed "Nothing is queued" over a database
+# that had three weeks of topics in it, and "Counter this" wrote topics the
+# drafter would never see.
+#
+# This copies CI's data into Neon so the two can be collapsed into one. It
+# runs *here* rather than on a laptop because the source URL is a repo secret
+# and should stay one — nobody needs a copy of it locally to do this.
+#
+# After a successful run, point DATABASE_URL itself at Neon and this file can
+# be deleted.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Report what would be copied, write nothing"
+        type: boolean
+        default: true
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install -e ".[postgres]"
+
+      - name: Write the destination URL to a file
+        # --to-file, not an argument: a Postgres URL carries its own password
+        # and a command line ends up in the workflow log. Actions masks known
+        # secrets, but only the ones it knows — this needs no such luck.
+        env:
+          NEON_DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
+        run: |
+          if [ -z "$NEON_DATABASE_URL" ]; then
+            echo "NEON_DATABASE_URL secret is not set." >&2
+            exit 1
+          fi
+          printf '%s' "$NEON_DATABASE_URL" > neon-url.txt
+
+      - name: Copy
+        env:
+          # The SOURCE. Everything blog-pipeline reads comes from here; only
+          # the destination is named explicitly, because that's the one that
+          # writes.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          blog-pipeline migrate-articles --to-file neon-url.txt \
+            ${{ inputs.dry_run && '--dry-run' || '' }}
+
+      - name: Remove the URL file
+        if: always()
+        run: rm -f neon-url.txt
