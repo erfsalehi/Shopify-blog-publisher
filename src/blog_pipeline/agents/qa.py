@@ -52,6 +52,41 @@ Be strict about fabricated specifics and truncated/incomplete drafts, but \
 don't penalize general, defensible statements or first-party brand mentions."""
 
 
+#: How much article text QA is shown. Was 12,000 characters, chosen when
+#: context windows were small — and it quietly became the single biggest
+#: reason nothing published.
+#:
+#: Articles grew past it (16,000-20,000 characters is now typical). QA was
+#: handed a copy cut off mid-sentence, told above to "be strict about
+#: truncated/incomplete drafts", and did exactly that: six consecutive
+#: articles scored 0.5-0.7 against a 0.75 publish gate, every one of them
+#: complete in the database. Articles under the old cap averaged 0.96
+#: confidence; those over it averaged 0.70.
+#:
+#: 200,000 characters is roughly 50k tokens — far inside every model this
+#: routes to, and about ten times the longest article the pipeline writes.
+#: The cap exists now only so a runaway draft can't blow the context window.
+_MAX_REVIEW_CHARS = 200_000
+
+
+def _for_review(text: str) -> str:
+    """The article as QA should see it: whole, or explicitly labelled if not.
+
+    Silently truncating is what caused the original bug — the model cannot
+    tell "the author stopped writing" from "the harness stopped sending", so
+    it reported the only thing it could see. If a cut is ever unavoidable,
+    say so in the text, so an abridged review isn't mistaken for an
+    incomplete draft.
+    """
+    if len(text) <= _MAX_REVIEW_CHARS:
+        return text
+    return (
+        text[:_MAX_REVIEW_CHARS]
+        + "\n\n[Review note: the article continues beyond this point and was "
+        "abridged to fit. Do NOT treat this cut-off as an incomplete draft.]"
+    )
+
+
 def review_article(
     *,
     title: str,
@@ -95,7 +130,7 @@ def review_article(
             SystemMessage(content=SYSTEM),
             HumanMessage(
                 content=f"{biz_block}\n\nTITLE: {title}\n\n{existing_block}\n\n"
-                f"ARTICLE TEXT:\n{text[:12000]}"
+                f"ARTICLE TEXT:\n{_for_review(text)}"
             ),
         ],
         temperature=0.0,

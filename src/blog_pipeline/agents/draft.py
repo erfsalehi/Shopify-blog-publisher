@@ -7,6 +7,7 @@ meta description, semantic HTML body, and image slot requests with alt text.
 from __future__ import annotations
 
 import re
+from html import unescape
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -75,11 +76,27 @@ Also, beyond the study's findings:
 
 
 def _looks_truncated(body_html: str) -> bool:
-    """Heuristic: a complete article body ends on a closed HTML tag. If the
-    last non-whitespace character isn't '>', the model very likely stopped
-    mid-sentence and the draft is incomplete."""
-    stripped = (body_html or "").rstrip()
-    return not stripped.endswith(">")
+    """Whether the *prose* stops mid-sentence.
+
+    The previous version asked whether the HTML ended with '>', which tests
+    the markup rather than the writing. A model that stops mid-sentence still
+    usually closes its tags — and the body now ends with a JSON-LD
+    `</script>` block regardless — so that check returned "fine" for every
+    draft ever written, and the retry below never once fired.
+
+    Judge the visible text instead: a finished article ends on sentence
+    punctuation. Tags are stripped first, and the trailing structured-data
+    block with them, since its closing brace is not prose.
+    """
+    html = (body_html or "")
+    # The FAQ JSON-LD block is machine content, not writing — its punctuation
+    # would otherwise satisfy the check on its own.
+    html = re.sub(r"<script\b.*?</script>", " ", html, flags=re.S | re.I)
+    text = re.sub(r"<[^>]+>", " ", html)
+    text = unescape(re.sub(r"\s+", " ", text)).strip()
+    if not text:
+        return True
+    return text[-1] not in ".!?\"')]:â€¦"
 
 
 _ANCHOR = re.compile(r'<a\b[^>]*?\bhref\s*=\s*(["\'])(.*?)\1[^>]*>(.*?)</a>', re.I | re.S)

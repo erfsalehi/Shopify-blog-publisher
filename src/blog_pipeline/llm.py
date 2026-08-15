@@ -62,7 +62,46 @@ def make_llm(
     )
 
 
+class TruncatedResponse(RuntimeError):
+    """The model stopped because it ran out of output tokens.
+
+    Its own category rather than a generic error because the remedy is
+    different: nothing is wrong with the prompt or the service, the answer
+    simply didn't fit. Retrying may help (the next attempt can be shorter);
+    silently accepting the fragment never does.
+    """
+
+
+#: What each provider calls "I ran out of room". OpenAI-compatible endpoints
+#: — which is how this reaches Gemini — use "length"; the native Gemini field
+#: is MAX_TOKENS. Both are matched so this keeps working if the route changes.
+_TRUNCATED_REASONS = frozenset({"length", "max_tokens", "maxtokens"})
+
+
+def _hit_token_ceiling(raw) -> bool:
+    """Whether the provider said it stopped at the output limit.
+
+    Read from the response rather than guessed from the text. Every
+    text-based heuristic for "does this look cut off" has to decide what a
+    finished answer looks like, and the ones in this codebase have been wrong
+    in both directions — this is the provider stating it as fact.
+    """
+    if raw is None:
+        return False
+    meta = getattr(raw, "response_metadata", None) or {}
+    reason = meta.get("finish_reason") or meta.get("stop_reason")
+    if reason is None:
+        return False
+    return str(reason).strip().lower().replace("_", "") in {
+        r.replace("_", "") for r in _TRUNCATED_REASONS
+    }
+
+
 def _is_retryable(exc: Exception) -> bool:
+    # A truncated answer is worth another attempt: sampling differs run to
+    # run, and the fallback chain may reach a model with more headroom.
+    if isinstance(exc, TruncatedResponse):
+        return True
     status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
     if isinstance(status, int) and status in _RETRYABLE_STATUSES:
         return True
@@ -108,6 +147,16 @@ def structured_invoke(
                 res = structured.invoke(messages)
                 if cost is not None and res.get("raw") is not None:
                     cost.record(stage, m, res["raw"])
+                if _hit_token_ceiling(res.get("raw")):
+                    # The provider says it stopped because it ran out of room,
+                    # which is not something to infer from the text. Raised so
+                    # the retry/fallback loop below treats it like any other
+                    # recoverable failure rather than returning half an answer
+                    # for a later stage to puzzle over.
+                    raise TruncatedResponse(
+                        f"{m} stopped at the output token limit during "
+                        f"{stage or 'this stage'} — the response is incomplete."
+                    )
                 return res["parsed"]
             except Exception as e:  # noqa: BLE001 — need broad transient handling
                 last_exc = e
