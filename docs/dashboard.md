@@ -5,9 +5,21 @@ rather than beside it. Phase 0 of [PLAN.md](../PLAN.md) is done: the
 foundation, the job framework, and the Search Console daily sync.
 
 ```bash
+cd Shopify-blog-publisher        # both commands run from the project root
+python -m venv .venv && . .venv/bin/activate    # Windows: .\.venv\Scripts\Activate.ps1
 pip install -e ".[dashboard]"
 python -m dashboard
 ```
+
+`No module named dashboard` means one of the first three lines was skipped —
+the package lives in `src/`, so it has to be installed (or `PYTHONPATH=src`
+set) before `python -m dashboard` can find it, and it has to be installed into
+the same interpreter that runs it.
+
+For a lighter install, `pip install -r requirements.txt uvicorn` is the same
+dependency set the Vercel deployment uses, plus the server Vercel provides
+itself — about a tenth of the download, and run with `PYTHONPATH=src` since it
+doesn't install the package.
 
 Then open <http://127.0.0.1:8600>. The first thing to do is the Jobs page →
 **Run now** on the Search Console sync; nothing is on the Overview until that
