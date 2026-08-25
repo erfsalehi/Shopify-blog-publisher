@@ -164,6 +164,11 @@ confident articles:
    development"** first (one-time).
 2. **Create an app** → **Configure Admin API scopes** → enable `write_content`
    and `read_products` (add `write_files` only if you enable image generation).
+   For the [product importer](docs/product-import.md) you need two more:
+   `write_products` (it creates products, media, collections and metafields)
+   and `write_files` (it re-hosts the manufacturer's PDFs on your store).
+   Adding a scope to an existing app means clicking **Save** and then
+   **Install app** again — the token itself doesn't change.
 3. **Install app** → reveal the **Admin API access token** (shown once, starts
    with `shpat_`) → `SHOPIFY_ACCESS_TOKEN`.
 4. Set `SHOPIFY_STORE_DOMAIN` to the permanent `*.myshopify.com` domain

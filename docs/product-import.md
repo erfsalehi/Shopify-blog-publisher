@@ -7,6 +7,19 @@ and links to the rest of the range. The collection is created too.
 
 The page is **Import** in the top nav (`/import`).
 
+## Before the first run
+
+The Shopify token needs two scopes the blog pipeline never asked for:
+**`write_products`** (products, media, collections, metafields) and
+**`write_files`** (re-hosting the manufacturer's PDFs). Shopify admin →
+Settings → Apps and sales channels → Develop apps → your app → Configure
+Admin API scopes → tick both → **Save**, then **Install app** again. The
+token string doesn't change.
+
+Without them the first product fails with a Shopify `userErrors` message
+naming the missing scope, and the run stops there having created nothing —
+which is why a dry run costs nothing to try first.
+
 ```
 https://www.example.com/collections/some-range
         │
