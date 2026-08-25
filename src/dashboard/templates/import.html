@@ -1,0 +1,154 @@
+{% extends "base.html" %}
+{% block title %}Product import{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Product import</h1>
+  <span class="muted small">manufacturer collection → draft products</span>
+</div>
+
+{% if error %}<div class="notice bad-box">{{ error }}</div>{% endif %}
+
+{% if not shopify_ready %}
+<div class="notice">
+  <strong>Shopify isn't configured.</strong>
+  Set <code>SHOPIFY_STORE_DOMAIN</code> and <code>SHOPIFY_ACCESS_TOKEN</code> in
+  <code>.env</code> before importing. You can still run a dry run — it scrapes,
+  reads the documents and writes the copy without sending anything to the store.
+</div>
+{% endif %}
+
+<p class="muted window-note">
+  Paste the URL of a collection on the manufacturer's own site. Every product
+  in it is read — description, photographs, specification tables, and the PDFs
+  they link — the documents are downloaded and their text used, and a product
+  is created here with its own copy, SEO fields, tags, an FAQ, and links to the
+  rest of the range. Products are created as <strong>drafts</strong> unless you
+  change that below, so nothing appears on the storefront until you say so.
+  Prices are never set: manufacturers don't publish yours.
+</p>
+
+<section class="panel">
+  <h2>Import a collection</h2>
+  <form method="post" action="/import">
+    <div class="field">
+      <label for="source_url">Manufacturer collection URL</label>
+      <input type="url" class="wide" id="source_url" name="source_url" required
+             placeholder="https://www.example.com/collections/some-range">
+      <p class="help">
+        The page listing the range, not one product. A Shopify manufacturer
+        site gives the most complete result — the whole product, images and all,
+        comes from their own feed.
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="collection_title">Call the collection (optional)</label>
+      <input type="text" class="wide" id="collection_title" name="collection_title"
+             placeholder="Left blank: whatever the source page calls it">
+      <p class="help">
+        A manufacturer's internal name for a range is rarely what a customer
+        searches for. This is the title of the collection created here.
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="vendor">Vendor / brand (optional)</label>
+      <input type="text" class="wide" id="vendor" name="vendor"
+             placeholder="Left blank: taken from the source">
+    </div>
+
+    <div class="field">
+      <label for="max_products">Most products to take</label>
+      <input type="number" id="max_products" name="max_products" min="1" max="500"
+             value="{{ defaults.max_products }}">
+      <p class="help">A ceiling, in case the URL turns out to be the whole catalogue.</p>
+    </div>
+
+    <div class="field">
+      <label for="publish_status">Create products as</label>
+      <select id="publish_status" name="publish_status">
+        <option value="DRAFT" {{ 'selected' if defaults.publish_status == 'DRAFT' }}>
+          Draft — review in Shopify admin first
+        </option>
+        <option value="ACTIVE" {{ 'selected' if defaults.publish_status == 'ACTIVE' }}>
+          Active — live on the storefront immediately
+        </option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="make_collection" value="1" checked>
+        <span>Create the collection and put the products in it</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="link_products" value="1" checked>
+        <span>Link every product to the others in the range, with pictures</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="dry_run" value="1">
+        <span>Dry run — read everything, create nothing</span>
+      </label>
+      <p class="help">
+        The safe way to try a supplier's site for the first time: you see
+        exactly what was extracted from each product page and what the
+        description would say, with nothing sent to Shopify.
+      </p>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="primary">Start import</button>
+    </div>
+  </form>
+  <p class="muted small">
+    Images, documents, copy and tags are governed by the
+    <a href="/settings">Product import settings</a> — currently
+    {{ defaults.max_images }} images and {{ defaults.max_docs }} documents per
+    product, copy written by <code>{{ defaults.model }}</code>.
+  </p>
+</section>
+
+<h2>Runs</h2>
+{% if not runs %}
+<p class="muted">Nothing imported yet.</p>
+{% else %}
+<table>
+  <thead>
+    <tr>
+      <th>Collection</th><th>Source</th><th>Stage</th>
+      <th class="num">Created</th><th class="num">Skipped</th><th class="num">Failed</th>
+      <th>Started</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for run in runs %}
+    <tr>
+      <td>
+        <a href="/import/{{ run.id }}">{{ run.collection_title or 'Untitled run' }}</a>
+        {% if run.dry_run %}<span class="pill">dry run</span>{% endif %}
+      </td>
+      <td class="truncate muted small">
+        <a href="{{ run.source_url }}" target="_blank" rel="noopener noreferrer">
+          {{ run.source_url }}
+        </a>
+      </td>
+      <td>
+        <span class="pill {{ 'running' if run.active else ('error' if run.stage == 'failed' else ('warn' if run.stage == 'stopped' else 'ok')) }}">
+          {{ run.stage }}
+        </span>
+      </td>
+      <td class="num">{{ run.counts.created | int_ }}</td>
+      <td class="num">{{ run.counts.skipped | int_ }}</td>
+      <td class="num">{{ run.counts.failed | int_ }}</td>
+      <td class="muted small nowrap">{{ run.started_at | when }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

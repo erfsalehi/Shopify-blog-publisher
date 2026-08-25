@@ -42,13 +42,15 @@
         <input type="checkbox" name="{{ spec.key }}" {{ 'checked' if values[spec.key] }}>
         <span>{{ spec.label }}</span>
       </label>
-      {% elif spec.kind == 'csv' %}
+      {% elif spec.kind in ('csv', 'str') %}
       <label for="{{ spec.key }}">{{ spec.label }}</label>
       {# Stored as a JSON list, edited as plain comma-separated text — asking
          the owner to type JSON into a form is how a settings form goes
-         permanently unedited. #}
+         permanently unedited. A plain string setting (a model name, a tag)
+         lands here too: rendered as a number field it was uneditable. #}
+      {% set value = values[spec.key] %}
       <input type="text" class="wide" id="{{ spec.key }}" name="{{ spec.key }}"
-             value="{{ values[spec.key] | join(', ') }}">
+             value="{{ value | join(', ') if (value is sequence and value is not string) else value }}">
       {% else %}
       <label for="{{ spec.key }}">{{ spec.label }}</label>
       <input type="number" id="{{ spec.key }}" name="{{ spec.key }}"

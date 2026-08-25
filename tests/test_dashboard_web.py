@@ -204,7 +204,7 @@ def test_no_page_makes_an_outbound_request(client, monkeypatch):
     for name in ("get", "post", "request"):
         monkeypatch.setattr(httpx, name, forbidden)
 
-    for path in ("/", "/jobs", "/settings", "/jobs/status"):
+    for path in ("/", "/jobs", "/settings", "/jobs/status", "/import"):
         assert client.get(path).status_code == 200
 
 

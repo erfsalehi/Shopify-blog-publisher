@@ -72,6 +72,8 @@ dashboard = [
     "psycopg[binary]>=3.1",
     # Session cookies for the login page (itsdangerous signs them).
     "itsdangerous>=2.1",
+    # Reading the manufacturer's spec sheets during a product import.
+    "pypdf>=4.2",
 ]
 
 [project.scripts]

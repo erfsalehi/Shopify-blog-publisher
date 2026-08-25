@@ -54,6 +54,15 @@ LOCAL_MAX_KEYWORDS = "local.max_keywords_per_run"
 ADS_BACKFILL_DAYS = "ads.backfill_days"
 ADS_RECENT_DAYS = "ads.recent_days"
 
+IMPORT_MODEL = "import.model"
+IMPORT_MAX_PRODUCTS = "import.max_products_per_collection"
+IMPORT_BATCH = "import.products_per_pass"
+IMPORT_MAX_IMAGES = "import.max_images_per_product"
+IMPORT_MAX_DOCS = "import.max_docs_per_product"
+IMPORT_PUBLISH_STATUS = "import.publish_status"
+IMPORT_TAG_PREFIX = "import.source_tag"
+
+
 
 def _as_bool(value: Any) -> bool:
     if isinstance(value, bool):
@@ -432,6 +441,115 @@ LOCAL_SPECS: tuple[Spec, ...] = (
 
 SPECS = SPECS + LOCAL_SPECS
 
+IMPORT_SPECS: tuple[Spec, ...] = (
+    Spec(
+        key=IMPORT_MODEL,
+        default="gemini-2.5-flash",
+        label="Model that writes product copy",
+        help=(
+            "One call per product, and it is the call that decides what the "
+            "page says about a product the store has to stand behind. Worth "
+            "a stronger model than the dashboard's advisor uses — a "
+            "rate-limited one falls back to a plain description built from "
+            "the source, not to a guess."
+        ),
+        group="Product import",
+        kind="str",
+        coerce=_as_str,
+    ),
+    Spec(
+        key=IMPORT_MAX_PRODUCTS,
+        default=60,
+        label="Most products taken from one collection",
+        help=(
+            "A ceiling on how much one pasted URL can create. A manufacturer "
+            "range is usually well under this; a URL that turns out to be "
+            "the whole catalogue is the case this exists for."
+        ),
+        group="Product import",
+        kind="int",
+        coerce=_as_int,
+        minimum=1,
+        maximum=500,
+    ),
+    Spec(
+        key=IMPORT_BATCH,
+        default=3,
+        label="Products handled per pass",
+        help=(
+            "Each product is a page fetch, a few PDF downloads, an LLM call "
+            "and several Shopify mutations — 10-25 seconds of work. On "
+            "Vercel the whole pass has to finish inside 60 seconds, so this "
+            "is the number that keeps a run resumable instead of killed "
+            "mid-product. Raise it when running locally."
+        ),
+        group="Product import",
+        kind="int",
+        coerce=_as_int,
+        minimum=1,
+        maximum=25,
+    ),
+    Spec(
+        key=IMPORT_MAX_IMAGES,
+        default=8,
+        label="Most images per product",
+        help=(
+            "Shopify fetches each one from the manufacturer's CDN. Past "
+            "half a dozen they are usually room scenes repeated across the "
+            "whole range rather than this product."
+        ),
+        group="Product import",
+        kind="int",
+        coerce=_as_int,
+        minimum=1,
+        maximum=30,
+    ),
+    Spec(
+        key=IMPORT_MAX_DOCS,
+        default=4,
+        label="Most documents per product",
+        help=(
+            "Spec sheet, installation guide, warranty, care guide — in that "
+            "order of usefulness. Each is downloaded, read for its "
+            "specifications, and re-hosted on the store."
+        ),
+        group="Product import",
+        kind="int",
+        coerce=_as_int,
+        minimum=0,
+        maximum=12,
+    ),
+    Spec(
+        key=IMPORT_PUBLISH_STATUS,
+        default="DRAFT",
+        label="Status new products are created with",
+        help=(
+            "DRAFT keeps everything off the storefront until you set it "
+            "active in Shopify admin, which is the point of importing this "
+            "way. ACTIVE publishes each product the moment it is created — "
+            "including any mistake in the extraction."
+        ),
+        group="Product import",
+        kind="str",
+        coerce=_as_str,
+    ),
+    Spec(
+        key=IMPORT_TAG_PREFIX,
+        default="imported",
+        label="Tag added to every imported product",
+        help=(
+            "How you find everything one import created, in Shopify admin "
+            "and in a bulk edit, months later. Left blank, nothing marks an "
+            "imported product as imported."
+        ),
+        group="Product import",
+        kind="str",
+        coerce=_as_str,
+    ),
+)
+
+SPECS = SPECS + IMPORT_SPECS
+
 
 def _schedule_specs() -> tuple[Spec, ...]:
     """An enabled-toggle and an hour for every scheduled job.
@@ -456,6 +574,7 @@ def _schedule_specs() -> tuple[Spec, ...]:
         ("competitor_bestsellers", "Competitor best sellers", 2),
         ("competitor_matches", "Competitor match proposals", 4),
         ("publish_reconcile", "Reconcile published state", 5),
+        ("product_import", "Continue product imports", 1),
         ("advisor_weekly", "Advisor notes", 9),
         ("strategy_weekly", "Strategy checkpoints", 10),
     )

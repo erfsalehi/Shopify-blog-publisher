@@ -45,6 +45,21 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _json_dict(raw: str | None) -> dict:
+    """A JSON-text column as a dict, whatever state it's in.
+
+    Tolerates None (a row not yet flushed, so the column default hasn't been
+    applied) and malformed text (a value written by an older version of the
+    code), because every caller wants "the settings, or none" rather than an
+    exception in the middle of rendering a page.
+    """
+    try:
+        loaded = json.loads(raw or "{}")
+    except ValueError:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 class Base(DeclarativeBase):
     """Separate from `blog_pipeline.db.models.Base` — different database."""
 
@@ -1173,3 +1188,182 @@ class CompetitorMatch(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+# ── Product import (manufacturer collection → our store) ─────────────
+
+
+class ImportStage(str, enum.Enum):
+    """Where a run has got to. The order here is the order they run in.
+
+    A stage rather than a bare "running" flag because no single HTTP request
+    can do this work: one collection is dozens of page fetches, PDF
+    downloads, LLM calls and Shopify mutations, and a Vercel function is dead
+    at 60 seconds. Each `advance()` does a bounded slice and writes the stage
+    back, so the next call — a poll from the run page, a cron tick, whatever
+    arrives first — picks up exactly where this one stopped.
+    """
+
+    #: Read the collection page; work out which product URLs it lists.
+    discover = "discover"
+    #: Per product: scrape it, read its PDFs, write its copy, create it.
+    products = "products"
+    #: Create the collection itself and put the products in it.
+    collection = "collection"
+    #: Second pass over the products, now that they all exist: link each one
+    #: to its siblings. Can only happen once every sibling has an id.
+    linking = "linking"
+    done = "done"
+    failed = "failed"
+    #: Stopped by the owner mid-run. Its own state rather than `failed`,
+    #: because "I changed my mind" and "the supplier's site broke" are
+    #: different things to read on a list of past runs — and because whatever
+    #: was created before the stop is still there and still theirs.
+    stopped = "stopped"
+
+
+class ImportProductStatus(str, enum.Enum):
+    pending = "pending"
+    #: Scraped and written, but nothing sent to Shopify — a dry run, or the
+    #: run stopped before the create.
+    prepared = "prepared"
+    created = "created"
+    #: A product with this handle was already in the store. Left alone.
+    skipped = "skipped"
+    failed = "failed"
+
+
+class ImportRun(Base):
+    """One "import this collection" request, from URL to finished products.
+
+    Kept after it finishes, not deleted, because this is the only record of
+    where a product came from. Six months on, "why does this description say
+    the wear layer is 20 mil" is answered by the source URL and the doc text
+    on the row, and by nothing else in the store.
+    """
+
+    __tablename__ = "import_run"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: The manufacturer collection URL the owner pasted.
+    source_url: Mapped[str] = mapped_column(String(900), nullable=False, index=True)
+    #: Scheme + host, so every fetch and every relative URL resolves against
+    #: the same origin rather than re-deriving it per call site.
+    source_base: Mapped[str] = mapped_column(String(300), nullable=False, default="")
+
+    stage: Mapped[str] = mapped_column(
+        String(20), default=ImportStage.discover.value, index=True
+    )
+    #: Nothing is sent to Shopify; payloads are recorded instead. The way to
+    #: see what a site actually yields before it yields it into the store.
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    #: What the collection is called on our side. Taken from the source, and
+    #: overridable on the form because a manufacturer's internal name for a
+    #: range ("3DBARS") is rarely what a customer searches for.
+    collection_title: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    collection_gid: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    collection_handle: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    #: Vendor written onto every product in the run. Usually the manufacturer.
+    vendor: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+    #: Options captured at submit time so a resumed run behaves like the run
+    #: that was started, not like the settings page as it is now.
+    options_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    #: Free-text progress, newest last. Rendered on the run page — this is
+    #: what the owner reads while it works, and what explains a bad result
+    #: afterwards.
+    log_json: Mapped[str] = mapped_column(Text, default="[]")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    @property
+    def options(self) -> dict:
+        return _json_dict(self.options_json)
+
+    @property
+    def log(self) -> list[str]:
+        # `log_json`'s column default is applied by the database on INSERT, so
+        # a row built in Python and not yet flushed has None here — and the
+        # first thing `start_run` does is append a line to it.
+        try:
+            loaded = json.loads(self.log_json or "[]")
+        except ValueError:
+            return []
+        return loaded if isinstance(loaded, list) else []
+
+    def note(self, message: str, *, keep: int = 200) -> None:
+        """Append a line to the run log, oldest dropped past `keep`."""
+        stamp = _utcnow().strftime("%H:%M:%S")
+        entries = self.log + [f"{stamp}  {message}"]
+        self.log_json = json.dumps(entries[-keep:])
+
+    @property
+    def is_active(self) -> bool:
+        return self.stage not in {
+            ImportStage.done.value,
+            ImportStage.failed.value,
+            ImportStage.stopped.value,
+        }
+
+
+class ImportProduct(Base):
+    """One product inside a run: what the source said, and what we made of it.
+
+    `extracted_json` is the scrape and `generated_json` is the copy written
+    from it, kept apart on purpose. When a description is wrong, the question
+    is always which of the two was wrong — the site said something odd, or
+    the model did — and one merged blob cannot answer it.
+    """
+
+    __tablename__ = "import_product"
+    __table_args__ = (
+        UniqueConstraint("run_id", "source_url", name="uq_import_product_source"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(Integer, index=True, nullable=False)
+    #: Display order, which is the order the collection listed them in.
+    position: Mapped[int] = mapped_column(Integer, default=0)
+
+    source_url: Mapped[str] = mapped_column(String(900), nullable=False)
+    source_handle: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    title: Mapped[str | None] = mapped_column(String(600), nullable=True)
+
+    status: Mapped[str] = mapped_column(
+        String(20), default=ImportProductStatus.pending.value, index=True
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    extracted_json: Mapped[str] = mapped_column(Text, default="{}")
+    generated_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    product_gid: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    handle: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    admin_url: Mapped[str | None] = mapped_column(String(700), nullable=True)
+    online_url: Mapped[str | None] = mapped_column(String(700), nullable=True)
+
+    images_saved: Mapped[int] = mapped_column(Integer, default=0)
+    docs_saved: Mapped[int] = mapped_column(Integer, default=0)
+    #: Set once the cross-link pass has written this product's siblings onto
+    #: it, so a resumed linking stage doesn't rewrite what it already did.
+    linked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+
+    @property
+    def extracted(self) -> dict:
+        return _json_dict(self.extracted_json)
+
+    @property
+    def generated(self) -> dict:
+        return _json_dict(self.generated_json)

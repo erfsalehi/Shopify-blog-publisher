@@ -86,6 +86,78 @@
     setTimeout(tick, 3000);
   }
 
+  // Product import: one pass of work per request, driven from here.
+  //
+  // The run page is what makes an import feel like it's happening — each
+  // pass creates a few more products and the page says so. It is also what
+  // *does* the work in practice: the server never starts a background thread
+  // for it (a Vercel function is frozen the moment it responds), so an
+  // import advances when this loop asks it to, or overnight when the cron
+  // job does. Closing the tab pauses it; it never loses anything.
+  var importRun = document.querySelector('.import-run');
+  if (importRun) {
+    var runId = importRun.dataset.run;
+    var active = importRun.dataset.active === '1';
+    var advanceBtn = document.querySelector('.js-advance');
+    var advancing = false;
+
+    var setText = function (selector, value) {
+      var node = document.querySelector(selector);
+      if (node && value !== undefined && value !== null) node.textContent = value;
+    };
+
+    var renderLog = function (lines) {
+      var list = document.querySelector('.js-log');
+      if (!list || !lines) return;
+      list.innerHTML = '';
+      lines.forEach(function (line) {
+        var li = document.createElement('li');
+        li.textContent = line;
+        list.appendChild(li);
+      });
+    };
+
+    var advance = function () {
+      if (advancing) return;
+      advancing = true;
+      if (advanceBtn) { advanceBtn.disabled = true; advanceBtn.textContent = 'Working…'; }
+      fetch('/import/' + encodeURIComponent(runId) + '/advance', { method: 'POST' })
+        .then(function (r) { return r.json(); })
+        .then(function (body) {
+          advancing = false;
+          if (advanceBtn) { advanceBtn.disabled = false; advanceBtn.textContent = 'Continue now'; }
+          if (body.error) return;
+          setText('.stage-value', body.stage);
+          setText('.js-stage-note', body.message || (body.active ? 'working…' : 'finished'));
+          if (body.counts) {
+            setText('.js-count-created', body.dry_run ? body.counts.prepared : body.counts.created);
+            setText('.js-count-skipped', body.counts.skipped);
+            setText('.js-count-failed', body.counts.failed);
+          }
+          renderLog(body.log);
+          if (body.active) {
+            // A short breath between passes rather than none: each pass is
+            // already tens of seconds of fetching, and hammering a
+            // supplier's site from a UI loop is the thing the scraper's
+            // pacing exists to prevent.
+            setTimeout(advance, 1500);
+          } else {
+            // Finished — reload so the product table, its thumbnails and
+            // every link come from the server rather than being patched in.
+            window.location.reload();
+          }
+        })
+        .catch(function () {
+          advancing = false;
+          if (advanceBtn) { advanceBtn.disabled = false; advanceBtn.textContent = 'Continue now'; }
+          setTimeout(advance, 5000);
+        });
+    };
+
+    if (advanceBtn) advanceBtn.addEventListener('click', advance);
+    if (active) setTimeout(advance, 400);
+  }
+
   function startPolling() {
     if (polling) return;
     polling = true;

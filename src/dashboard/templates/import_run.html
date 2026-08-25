@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block title %}{{ run.collection_title or 'Import' }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>{{ run.collection_title or 'Import' }}</h1>
+  <span class="muted small">
+    <a href="/import">← all imports</a>
+  </span>
+</div>
+
+<p class="muted small">
+  From <a href="{{ run.source_url }}" target="_blank" rel="noopener noreferrer">{{ run.source_url }}</a>
+  {% if run.vendor %} · {{ run.vendor }}{% endif %}
+  {% if run.dry_run %} · <strong>dry run, nothing is being created</strong>{% endif %}
+</p>
+
+{% if run.error %}
+<div class="notice bad-box"><strong>Failed.</strong> {{ run.error }}</div>
+{% endif %}
+
+<section class="cards import-run" data-run="{{ run.id }}"
+         data-active="{{ '1' if run.is_active else '0' }}">
+  <div class="card">
+    <div class="card-label">Stage</div>
+    <div class="card-value stage-value">{{ run.stage }}</div>
+    <div class="card-delta muted js-stage-note">
+      {% if run.is_active %}working…{% else %}finished{% endif %}
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-label">{{ 'Prepared' if run.dry_run else 'Created' }}</div>
+    <div class="card-value js-count-created">
+      {{ (counts.prepared if run.dry_run else counts.created) | int_ }}
+    </div>
+    <div class="card-delta muted">of {{ counts.total | int_ }} products</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Already in the store</div>
+    <div class="card-value js-count-skipped">{{ counts.skipped | int_ }}</div>
+    <div class="card-delta muted">left untouched</div>
+  </div>
+  <div class="card">
+    <div class="card-label">Failed</div>
+    <div class="card-value js-count-failed {{ 'bad' if counts.failed }}">{{ counts.failed | int_ }}</div>
+    <div class="card-delta muted">reason on the row</div>
+  </div>
+</section>
+
+<div class="actions">
+  {% if run.is_active %}
+  <button type="button" class="primary js-advance">Continue now</button>
+  <form method="post" action="/import/{{ run.id }}/stop" style="display:inline">
+    <button type="submit" class="danger">Stop</button>
+  </form>
+  <span class="muted small">
+    Keeps going on its own while this page is open, and overnight through the
+    <a href="/jobs">Continue product imports</a> job if you close it.
+  </span>
+  {% elif run.collection_handle and not run.dry_run %}
+  <span class="muted small">
+    Collection handle <code>{{ run.collection_handle }}</code>
+    {% if run.collection_gid %} · created in Shopify{% endif %}
+  </span>
+  {% endif %}
+</div>
+
+<section class="panel">
+  <h2>What happened</h2>
+  <ol class="import-log js-log">
+    {% for line in log %}<li>{{ line }}</li>{% endfor %}
+  </ol>
+</section>
+
+<h2>Products</h2>
+{% if not products %}
+<p class="muted">Nothing discovered yet — the first pass reads the collection page.</p>
+{% else %}
+<table class="import-products">
+  <thead>
+    <tr>
+      <th></th><th>Product</th><th>Status</th>
+      <th class="num">Images</th><th class="num">Docs</th><th class="num">Specs</th>
+      <th>Where it went</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in products %}
+    {% set row = item.row %}
+    <tr>
+      <td class="thumb-cell">
+        {% if item.image %}
+        <img src="{{ item.image }}" alt="" loading="lazy" class="import-thumb">
+        {% endif %}
+      </td>
+      <td>
+        <div>{{ row.title or row.source_handle or row.source_url }}</div>
+        <a class="muted small truncate" href="{{ row.source_url }}"
+           target="_blank" rel="noopener noreferrer">source page</a>
+        {% if row.error %}<div class="small bad">{{ row.error }}</div>{% endif %}
+        {% if item.generated.seo_title %}
+        <div class="muted small">SEO: {{ item.generated.seo_title }}</div>
+        {% endif %}
+        {% if item.generated.tags %}
+        <div class="muted small">{{ item.generated.tags | join(', ') }}</div>
+        {% endif %}
+      </td>
+      <td>
+        <span class="pill {{ {'created': 'ok', 'prepared': 'ok', 'skipped': 'warn', 'failed': 'error'}.get(row.status, 'running') }}">
+          {{ row.status }}
+        </span>
+      </td>
+      <td class="num">{{ (row.images_saved or (item.extracted.images | length)) | int_ }}</td>
+      <td class="num">{{ (row.docs_saved or item.doc_count) | int_ }}</td>
+      <td class="num">{{ item.spec_count | int_ }}</td>
+      <td class="small">
+        {% if row.admin_url %}
+        <a href="{{ row.admin_url }}" target="_blank" rel="noopener noreferrer">Shopify admin</a>
+        {% endif %}
+        {% if row.online_url %}
+        · <a href="{{ row.online_url }}" target="_blank" rel="noopener noreferrer">storefront</a>
+        {% endif %}
+        {% if not row.admin_url and run.dry_run %}<span class="muted">dry run</span>{% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

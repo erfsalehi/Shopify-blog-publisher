@@ -15,6 +15,7 @@ Implements the full PRD (`PRD Topic Research to Publish Pipeline.md`).
 · [AI SEO / GEO](#ai-seo-geo) · [WhatsApp trigger](docs/whatsapp-setup.md)
 · [Railway deploy](docs/railway-deploy.md) · [robots.txt for AI crawlers](docs/robots.txt.liquid)
 · [llms.txt](docs/llms.txt) · [Control Center dashboard](docs/dashboard.md)
+· [Product import](docs/product-import.md)
 
 ## Architecture
 
@@ -43,6 +44,15 @@ Two graphs, a refresh pass, and a CLI that cron drives:
   [Refreshing old posts](#refreshing-old-posts). This is the only path that
   edits public content without a human in the loop, so it's the most heavily
   guarded — snapshot before write, refuse-on-asset-loss, dry-run by default.
+
+- **Product import** (on demand, from the Control Center's Import page): paste
+  a manufacturer's collection URL → scrape the range → download and read their
+  spec-sheet PDFs → write each product page (description, SEO, tags, FAQ +
+  `FAQPage` JSON-LD, local availability) → create the products in Shopify as
+  **drafts**, with their photographs, the documents re-hosted on the store, the
+  collection, and every product linked to the rest of the range. Prices are
+  never set and an existing handle is never touched. See
+  [docs/product-import.md](docs/product-import.md).
 
 The store's **existing** posts matter to all three: `import-existing` pulls
 every live Shopify article into the database, which is what lets dedup see

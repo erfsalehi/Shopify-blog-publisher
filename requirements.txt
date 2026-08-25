@@ -54,3 +54,9 @@ apscheduler>=3.10
 # caught here by tracing every reachable `from blog_pipeline...` import
 # rather than only the ones exercised by a typical local test run.
 rich>=13.7
+
+# dashboard/product_docs.py — the product importer reads the manufacturer's
+# spec sheets, warranties and installation guides, which are PDFs. Pure
+# Python and ~1MB; the import degrades to "documents attached but unread" if
+# it's ever missing rather than failing (see extract_text).
+pypdf>=4.2

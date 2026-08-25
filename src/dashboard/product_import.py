@@ -1,0 +1,1082 @@
+"""Turning a pasted collection URL into products in the store.
+
+One run, four stages, each one resumable:
+
+    discover → products → collection → linking → done
+
+**Why stages and not a function.** Importing 40 products is 40 page fetches,
+a hundred PDF downloads, 40 LLM calls and several hundred Shopify mutations —
+minutes of work. A Vercel function is killed at 60 seconds and this app runs
+on Vercel. So `advance()` does a bounded slice of whatever the run needs next,
+writes its progress, and returns; whoever calls it again — the run page
+polling, the cron job, the owner clicking Continue — carries on from there.
+Nothing is held in memory between passes, which is also what makes a crash
+mid-import cost one product rather than the run.
+
+**Why the linking stage exists separately.** Every product in a range should
+link to its siblings, with a picture, and no product can link to a sibling
+that doesn't exist yet. So the descriptions are written twice: once at
+creation, and once more at the end when every product has an ID and a URL.
+
+**What it refuses to do.** Prices are never set — manufacturer pages don't
+publish retail prices and inventing one is not an option. Products are
+created as drafts by default, so nothing reaches the storefront until someone
+looks at it. And an existing product with the same handle is left completely
+alone: the second run of an import finds what the first one made rather than
+duplicating or overwriting it.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+from dashboard import product_copy, product_docs, store
+from dashboard.competitors import FetchError
+from dashboard.config import is_serverless
+from dashboard.db import get_session
+from dashboard.manufacturer import (
+    SourceDoc,
+    SourceImage,
+    SourceProduct,
+    client as source_client,
+    discover_collection,
+    fetch_product,
+)
+from dashboard.models import ImportProduct, ImportProductStatus, ImportRun, ImportStage
+
+log = logging.getLogger(__name__)
+
+#: Wall clock one `advance()` may spend before returning, whatever stage it's
+#: in. Under Vercel's 60s ceiling with room to finish the product in hand and
+#: write it; generous locally, where the only cost of a long pass is a slower
+#: page refresh.
+PASS_BUDGET_SECONDS = 40.0
+LOCAL_PASS_BUDGET_SECONDS = 240.0
+
+#: Siblings linked from each product page. Enough to show the range, few
+#: enough that the block stays a footer rather than a second catalogue.
+RELATED_LIMIT = 8
+
+METAFIELD_NAMESPACE = "custom"
+
+
+class ImportRunError(RuntimeError):
+    """A run-level failure: nothing about this collection can proceed."""
+
+
+@dataclass
+class PassResult:
+    run_id: int
+    stage: str
+    done: bool
+    handled: int = 0
+    message: str = ""
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _budget() -> float:
+    return PASS_BUDGET_SECONDS if is_serverless() else LOCAL_PASS_BUDGET_SECONDS
+
+
+# ── Starting a run ───────────────────────────────────────────────────
+
+
+def start_run(
+    source_url: str,
+    *,
+    dry_run: bool = False,
+    collection_title: str | None = None,
+    vendor: str | None = None,
+    max_products: int | None = None,
+    publish_status: str | None = None,
+    make_collection: bool = True,
+    link_products: bool = True,
+) -> int:
+    """Record the request and return its run id. Does no fetching.
+
+    Deliberately does no work: the caller is an HTTP request handler, and the
+    first thing the owner should see is a run page they can watch, not a
+    spinner on the form for however long a supplier's site takes to answer.
+    """
+    options = {
+        "max_products": int(max_products or store.get(store.IMPORT_MAX_PRODUCTS)),
+        "publish_status": (
+            publish_status or store.get(store.IMPORT_PUBLISH_STATUS) or "DRAFT"
+        ).upper(),
+        "make_collection": bool(make_collection),
+        "link_products": bool(link_products),
+        "max_images": int(store.get(store.IMPORT_MAX_IMAGES)),
+        "max_docs": int(store.get(store.IMPORT_MAX_DOCS)),
+        "batch": int(store.get(store.IMPORT_BATCH)),
+        "source_tag": str(store.get(store.IMPORT_TAG_PREFIX) or "").strip(),
+    }
+    with get_session() as session:
+        run = ImportRun(
+            source_url=source_url.strip(),
+            dry_run=bool(dry_run),
+            collection_title=(collection_title or "").strip() or None,
+            vendor=(vendor or "").strip() or None,
+            options_json=json.dumps(options),
+            stage=ImportStage.discover.value,
+        )
+        run.note(
+            f"Queued {'a dry run of ' if dry_run else ''}{source_url.strip()}"
+        )
+        session.add(run)
+        session.flush()
+        return run.id
+
+
+# ── The pass ─────────────────────────────────────────────────────────
+
+
+def advance(run_id: int) -> PassResult:
+    """Do the next bounded slice of work for this run.
+
+    Safe to call on a finished run (returns immediately) and safe to call
+    twice concurrently in the sense that matters — the work is idempotent per
+    product, and the handle check before every create means the worst outcome
+    of a double call is wasted fetches, not duplicate products.
+    """
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is None:
+            raise ImportRunError(f"No import run {run_id}.")
+        stage = run.stage
+        if not run.is_active:
+            return PassResult(run_id, stage, done=True, message="finished")
+
+    try:
+        if stage == ImportStage.discover.value:
+            return _discover(run_id)
+        if stage == ImportStage.products.value:
+            return _products(run_id)
+        if stage == ImportStage.collection.value:
+            return _collection(run_id)
+        if stage == ImportStage.linking.value:
+            return _linking(run_id)
+    except ImportRunError as e:
+        _fail(run_id, str(e))
+        return PassResult(run_id, ImportStage.failed.value, done=True, message=str(e))
+    except Exception as e:  # noqa: BLE001 - a run-level crash must be legible
+        log.exception("import run %s crashed in %s", run_id, stage)
+        message = f"{type(e).__name__}: {e}"
+        _fail(run_id, message)
+        return PassResult(run_id, ImportStage.failed.value, done=True, message=message)
+
+    return PassResult(run_id, stage, done=True, message="nothing to do")
+
+
+def _fail(run_id: int, message: str) -> None:
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is None:
+            return
+        run.stage = ImportStage.failed.value
+        run.error = message[:2000]
+        run.finished_at = _now()
+        run.note(f"Failed: {message[:300]}")
+
+
+def _set_stage(session, run: ImportRun, stage: ImportStage, message: str) -> None:
+    run.stage = stage.value
+    run.note(message)
+    if stage is ImportStage.done:
+        run.finished_at = _now()
+
+
+# ── Stage 1: discover ────────────────────────────────────────────────
+
+
+def _discover(run_id: int) -> PassResult:
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        source_url, options = run.source_url, run.options
+        dry_run = run.dry_run
+        forced_title, forced_vendor = run.collection_title, run.vendor
+
+    try:
+        collection = discover_collection(
+            source_url, max_products=int(options.get("max_products", 60))
+        )
+    except FetchError as e:
+        raise ImportRunError(str(e)) from e
+
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        run.source_base = collection.base
+        run.collection_title = forced_title or collection.title or "Imported collection"
+        run.collection_handle = product_copy.slugify(
+            run.collection_title, fallback="imported-collection"
+        )
+        existing = {
+            row.source_url
+            for row in session.query(ImportProduct.source_url)
+            .filter(ImportProduct.run_id == run_id)
+            .all()
+        }
+        added = 0
+        for position, url in enumerate(collection.product_urls, start=1):
+            if url in existing:
+                continue
+            seed = collection.seeds.get(url)
+            if not forced_vendor and seed and seed.vendor and not run.vendor:
+                run.vendor = seed.vendor
+            session.add(
+                ImportProduct(
+                    run_id=run_id,
+                    position=position,
+                    source_url=url,
+                    source_handle=(seed.handle if seed else None),
+                    title=(seed.title if seed else None),
+                    extracted_json=json.dumps(seed.as_dict()) if seed else "{}",
+                    status=ImportProductStatus.pending.value,
+                )
+            )
+            added += 1
+
+        options["collection_description"] = (collection.description or "")[:2000]
+        options["platform"] = collection.platform
+        run.options_json = json.dumps(options)
+        run.note(
+            f"Found {added} products on {collection.platform} source "
+            f"({collection.pages} pages read)."
+            + (" Dry run — nothing will be created." if dry_run else "")
+        )
+        _set_stage(session, run, ImportStage.products, "Reading products.")
+        return PassResult(run_id, ImportStage.products.value, done=False, handled=added)
+
+
+# ── Stage 2: one product at a time ───────────────────────────────────
+
+
+def _products(run_id: int) -> PassResult:
+    deadline = time.monotonic() + _budget()
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        options, dry_run = run.options, run.dry_run
+        base, vendor = run.source_base, run.vendor
+        collection_title = run.collection_title
+        pending = (
+            session.query(ImportProduct.id)
+            .filter(
+                ImportProduct.run_id == run_id,
+                ImportProduct.status == ImportProductStatus.pending.value,
+            )
+            .order_by(ImportProduct.position)
+            .limit(int(options.get("batch", 3)))
+            .all()
+        )
+        ids = [row.id for row in pending]
+
+    if not ids:
+        with get_session() as session:
+            run = session.get(ImportRun, run_id)
+            counts = _counts(session, run_id)
+            next_stage = (
+                ImportStage.collection
+                if options.get("make_collection", True)
+                else ImportStage.linking
+            )
+            _set_stage(
+                session, run, next_stage,
+                f"{counts['created']} created, {counts['skipped']} already existed, "
+                f"{counts['failed']} failed.",
+            )
+        return PassResult(run_id, next_stage.value, done=False)
+
+    client = _shopify_client() if not dry_run else None
+    http = source_client()
+    handled = 0
+    try:
+        for product_id in ids:
+            _one_product(
+                product_id,
+                run_id=run_id,
+                base=base,
+                vendor=vendor,
+                collection_title=collection_title,
+                collection_description=options.get("collection_description"),
+                options=options,
+                dry_run=dry_run,
+                client=client,
+                http=http,
+            )
+            handled += 1
+            if time.monotonic() > deadline:
+                break
+    finally:
+        http.close()
+
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        run.updated_at = _now()
+        remaining = (
+            session.query(ImportProduct)
+            .filter(
+                ImportProduct.run_id == run_id,
+                ImportProduct.status == ImportProductStatus.pending.value,
+            )
+            .count()
+        )
+    return PassResult(
+        run_id, ImportStage.products.value, done=False, handled=handled,
+        message=f"{remaining} to go",
+    )
+
+
+def _one_product(
+    product_id: int,
+    *,
+    run_id: int,
+    base: str,
+    vendor: str | None,
+    collection_title: str | None,
+    collection_description: str | None,
+    options: dict,
+    dry_run: bool,
+    client,
+    http,
+) -> None:
+    """Scrape, read, write and create one product. Never raises.
+
+    A product that fails is marked failed with its reason and the run carries
+    on. One supplier page returning a 500 should not decide the fate of the
+    other thirty-nine.
+    """
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        source_url = row.source_url
+        seed_data = row.extracted
+
+    try:
+        seed = _seed_from(seed_data, source_url)
+        source = fetch_product(source_url, base, seed=seed, http=http)
+        source.images = source.images[: int(options.get("max_images", 8))]
+
+        max_docs = int(options.get("max_docs", 4))
+        if max_docs and source.docs:
+            product_docs.read_docs(
+                source.docs, http=http, limit=max_docs, keep_data=not dry_run
+            )
+        elif not max_docs:
+            source.docs = []
+
+        copy, model_used = product_copy.write_copy(
+            source,
+            collection_title=collection_title,
+            collection_description=collection_description,
+            vendor=vendor or source.vendor,
+        )
+
+        with get_session() as session:
+            row = session.get(ImportProduct, product_id)
+            row.title = copy.title
+            row.extracted_json = json.dumps(source.as_dict())
+            row.generated_json = json.dumps(
+                {**copy.model_dump(), "model": model_used}
+            )
+
+        if dry_run:
+            _finish_product(
+                product_id, ImportProductStatus.prepared,
+                note=f"prepared ({len(source.images)} images, "
+                     f"{len([d for d in source.docs if d.text])} docs read)",
+            )
+            return
+
+        _create_in_shopify(
+            product_id,
+            run_id=run_id,
+            source=source,
+            copy=copy,
+            vendor=vendor or source.vendor,
+            options=options,
+            client=client,
+        )
+    except Exception as e:  # noqa: BLE001 - one product's failure, recorded
+        log.warning("import product %s failed: %s", product_id, e, exc_info=True)
+        _finish_product(
+            product_id, ImportProductStatus.failed,
+            error=f"{type(e).__name__}: {e}",
+        )
+
+
+def _seed_from(data: dict, source_url: str) -> SourceProduct:
+    """Rebuild the discovery seed off the row, so a resumed run doesn't
+    re-fetch what the collection feed already gave us."""
+    if not data:
+        return SourceProduct(source_url=source_url)
+    seed = SourceProduct(
+        source_url=data.get("source_url") or source_url,
+        handle=data.get("handle") or "",
+        title=data.get("title") or "",
+        description_html=data.get("description_html") or "",
+        description_text=data.get("description_text") or "",
+        vendor=data.get("vendor"),
+        sku=data.get("sku"),
+        product_type=data.get("product_type"),
+        tags=list(data.get("tags") or []),
+        specs=dict(data.get("specs") or {}),
+        options=dict(data.get("options") or {}),
+        sources=dict(data.get("sources") or {}),
+    )
+    seed.images = [
+        SourceImage(
+            url=i.get("url", ""), alt=i.get("alt"), position=i.get("position", 0)
+        )
+        for i in (data.get("images") or [])
+        if i.get("url")
+    ]
+    seed.docs = [
+        SourceDoc(
+            url=d.get("url", ""), title=d.get("title"), kind=d.get("kind", "other"),
+        )
+        for d in (data.get("docs") or [])
+        if d.get("url")
+    ]
+    return seed
+
+
+def _finish_product(
+    product_id: int,
+    status: ImportProductStatus,
+    *,
+    error: str | None = None,
+    note: str | None = None,
+    **fields,
+) -> None:
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        if row is None:
+            return
+        row.status = status.value
+        row.error = error[:2000] if error else None
+        for key, value in fields.items():
+            setattr(row, key, value)
+        run = session.get(ImportRun, row.run_id)
+        if run is not None:
+            label = row.title or row.source_url
+            if status is ImportProductStatus.failed:
+                run.note(f"✗ {label}: {(error or 'failed')[:200]}")
+            else:
+                run.note(f"✓ {label} — {note or status.value}")
+
+
+# ── Creating it in Shopify ───────────────────────────────────────────
+
+
+def _shopify_client():
+    from blog_pipeline.tools.shopify import ShopifyClient
+
+    return ShopifyClient()
+
+
+def _create_in_shopify(
+    product_id: int,
+    *,
+    run_id: int,
+    source: SourceProduct,
+    copy: product_copy.ProductCopy,
+    vendor: str | None,
+    options: dict,
+    client,
+) -> None:
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    handle = product_copy.slugify(copy.title, fallback=source.handle or "product")
+    existing = client.find_product(handle)
+    if existing:
+        _finish_product(
+            product_id, ImportProductStatus.skipped,
+            note="already in the store, left untouched",
+            product_gid=existing["id"], handle=handle,
+            admin_url=client.admin_url(existing["id"]),
+            online_url=existing.get("onlineStoreUrl"),
+        )
+        return
+
+    tags = list(copy.tags)
+    source_tag = options.get("source_tag")
+    if source_tag:
+        tags.append(source_tag)
+    tags = product_copy.clean_tags(tags)
+
+    locale = product_copy.locale_text()
+    body = product_copy.render_description(
+        copy, docs=source.docs, doc_urls={}, source_url=source.source_url, locale=locale
+    )
+
+    created = client.create_product(
+        title=copy.title,
+        description_html=body,
+        handle=handle,
+        vendor=vendor,
+        product_type=copy.product_type or source.product_type,
+        tags=tags,
+        seo_title=copy.seo_title,
+        seo_description=copy.seo_description,
+        status=options.get("publish_status", "DRAFT"),
+    )
+    product_gid = created["id"]
+
+    images_saved = _attach_images(client, product_gid, source, copy)
+    doc_urls, docs_saved = _attach_docs(client, product_gid, source)
+
+    # The description is rewritten once the documents have store URLs — the
+    # first version was written before they existed, and a Downloads section
+    # that links the manufacturer's site instead of ours is the thing this
+    # whole exercise is meant to avoid.
+    if doc_urls:
+        body = product_copy.render_description(
+            copy, docs=source.docs, doc_urls=doc_urls,
+            source_url=source.source_url, locale=locale,
+        )
+        client.update_product(product_gid, description_html=body)
+
+    try:
+        client.set_metafields(_metafields(product_gid, source, copy, doc_urls))
+    except ShopifyError as e:
+        # Metafields are the machine-readable copy of what's already in the
+        # description. Losing them costs a theme feature, not the product.
+        log.info("metafields for %s failed: %s", product_gid, e)
+
+    # Where each document ended up, kept on the row: the cross-linking pass
+    # rebuilds this description from scratch and would otherwise drop the
+    # Downloads section it can no longer find the URLs for.
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        row.generated_json = json.dumps({**row.generated, "doc_urls": doc_urls})
+
+    _finish_product(
+        product_id, ImportProductStatus.created,
+        note=f"{images_saved} images, {docs_saved} documents",
+        product_gid=product_gid,
+        handle=created.get("handle") or handle,
+        admin_url=client.admin_url(product_gid),
+        # Only what Shopify reports: a draft has no storefront URL, and
+        # showing a link that 404s until someone publishes would be a lie the
+        # run page tells about its own work.
+        online_url=created.get("onlineStoreUrl"),
+        images_saved=images_saved,
+        docs_saved=docs_saved,
+    )
+
+
+def _attach_images(client, product_gid: str, source: SourceProduct, copy) -> int:
+    """Images onto the product, with a fallback for a CDN that blocks Shopify.
+
+    First choice is handing Shopify the source URL and letting it fetch — no
+    bytes move through this process at all. Some manufacturer CDNs refuse
+    that fetch (hotlink protection, a WAF), and the mutation reports it; the
+    fallback downloads each image here, where the request looks like the same
+    browser that read the product page, and uploads the bytes instead.
+    """
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    if not source.images:
+        return 0
+    alts = copy.image_alts or []
+    media = [
+        {
+            "originalSource": image.url,
+            "alt": (alts[index] if index < len(alts) else copy.title),
+        }
+        for index, image in enumerate(source.images)
+    ]
+    try:
+        client.add_product_media(product_gid, media)
+        return len(media)
+    except ShopifyError as e:
+        log.info("media by URL failed for %s (%s); uploading bytes", product_gid, e)
+
+    saved = 0
+    http = source_client()
+    try:
+        for index, image in enumerate(source.images):
+            try:
+                resp = http.get(image.url)
+                resp.raise_for_status()
+                mime = resp.headers.get("content-type", "image/jpeg").split(";")[0]
+                filename = product_docs.filename_for(
+                    SourceDoc(url=image.url, title=f"{copy.title} {index + 1}")
+                )
+                uploaded = client.upload_image(resp.content, filename, mime)
+                if uploaded.get("url"):
+                    client.add_product_media(
+                        product_gid,
+                        [{
+                            "originalSource": uploaded["url"],
+                            "alt": alts[index] if index < len(alts) else copy.title,
+                        }],
+                    )
+                    saved += 1
+            except Exception as e:  # noqa: BLE001 - one image is not the product
+                log.info("image %s failed: %s", image.url, e)
+    finally:
+        http.close()
+    return saved
+
+
+def _attach_docs(client, product_gid: str, source: SourceProduct) -> tuple[dict, int]:
+    """Upload the PDFs we downloaded. Returns {source_url: store_url}, count.
+
+    Only documents whose bytes we actually hold are uploaded — a doc that
+    failed to download has nothing to upload, and pointing the store at the
+    manufacturer's URL instead would be a link that breaks the day they
+    redesign.
+    """
+    doc_urls: dict[str, str] = {}
+    saved = 0
+    #: Uploaded, but Shopify hasn't finished processing it into a URL yet.
+    awaiting: list[tuple[str, str]] = []
+
+    for doc in source.docs:
+        if not doc.data:
+            continue
+        try:
+            uploaded = client.upload_file(
+                doc.data,
+                product_docs.filename_for(doc),
+                mime_type="application/pdf",
+                alt=f"{doc.kind}: {doc.title or ''}".strip(": "),
+                # Every upload first, then wait for the URLs — waiting on each
+                # one in turn would serialise four independent uploads and
+                # spend most of a 60-second pass asleep.
+                wait=False,
+            )
+            saved += 1
+            if uploaded.get("url"):
+                doc_urls[doc.url] = uploaded["url"]
+            elif uploaded.get("id"):
+                awaiting.append((doc.url, uploaded["id"]))
+        except Exception as e:  # noqa: BLE001 - a failed doc is not the product
+            log.info("doc upload failed for %s: %s", doc.url, e)
+        finally:
+            # The bytes have done their job twice over — read, then uploaded.
+            doc.data = None
+
+    for source_url, file_gid in awaiting:
+        try:
+            url = client.wait_for_file_url(file_gid, attempts=3)
+        except Exception as e:  # noqa: BLE001 - no URL is a missing link, not a failure
+            log.info("file %s never got a URL: %s", file_gid, e)
+            continue
+        if url:
+            doc_urls[source_url] = url
+    return doc_urls, saved
+
+
+def _metafields(product_gid: str, source: SourceProduct, copy, doc_urls: dict) -> list[dict]:
+    """Specs, documents and provenance as structured data.
+
+    The description is for people; this is for the theme, the product feed,
+    and whoever has to answer "where did this product come from" later.
+    """
+    def field(key: str, type_: str, value) -> dict:
+        return {
+            "ownerId": product_gid,
+            "namespace": METAFIELD_NAMESPACE,
+            "key": key,
+            "type": type_,
+            "value": value if isinstance(value, str) else json.dumps(value),
+        }
+
+    fields = [field("source_url", "url", source.source_url)]
+    if copy.specs:
+        fields.append(
+            field("specifications", "json",
+                  [{"name": s.name, "value": s.value} for s in copy.specs])
+        )
+    documents = [
+        {"title": d.title or d.kind, "kind": d.kind, "url": doc_urls[d.url]}
+        for d in source.docs
+        if d.url in doc_urls
+    ]
+    if documents:
+        fields.append(field("documents", "json", documents))
+    if copy.faqs:
+        # Also as data, not only as the JSON-LD in the description body:
+        # Shopify may strip a <script> tag from a product description
+        # depending on the theme and the field's sanitising, and a theme that
+        # renders the FAQ from here gets proper markup either way.
+        fields.append(
+            field("faq", "json",
+                  [{"question": f.question, "answer": f.answer} for f in copy.faqs])
+        )
+    return fields
+
+
+def _product_path(handle: str | None) -> str | None:
+    """Where a product will live on our storefront, as a root-relative path.
+
+    Relative on purpose. These links are written into other products'
+    descriptions on the same store, so they need no domain — and a draft
+    product has no `onlineStoreUrl` from Shopify at all, which would
+    otherwise leave the whole range unlinked until someone published it.
+    """
+    return f"/products/{handle}" if handle else None
+
+
+# ── Stage 3: the collection ──────────────────────────────────────────
+
+
+def _collection(run_id: int) -> PassResult:
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        options, dry_run = run.options, run.dry_run
+        title = run.collection_title or "Imported collection"
+        handle = run.collection_handle or product_copy.slugify(title)
+        description = options.get("collection_description")
+        rows = (
+            session.query(ImportProduct)
+            .filter(
+                ImportProduct.run_id == run_id,
+                ImportProduct.status.in_([
+                    ImportProductStatus.created.value,
+                    ImportProductStatus.skipped.value,
+                ]),
+            )
+            .order_by(ImportProduct.position)
+            .all()
+        )
+        gids = [r.product_gid for r in rows if r.product_gid]
+        names = [r.title or "" for r in rows if r.title]
+
+    body = product_copy.collection_body(title, description, names)
+
+    if dry_run:
+        with get_session() as session:
+            run = session.get(ImportRun, run_id)
+            run.note(f"Dry run: would create the collection “{title}” with {len(gids)} products.")
+            _set_stage(session, run, ImportStage.linking, "Cross-linking (dry run).")
+        return PassResult(run_id, ImportStage.linking.value, done=False)
+
+    if not gids:
+        with get_session() as session:
+            run = session.get(ImportRun, run_id)
+            run.note("No products were created, so no collection was made.")
+            _set_stage(session, run, ImportStage.done, "Finished with nothing to show.")
+        return PassResult(run_id, ImportStage.done.value, done=True)
+
+    client = _shopify_client()
+    existing = client.find_collection(handle)
+    if existing:
+        collection_gid = existing["id"]
+        client.add_products_to_collection(collection_gid, gids)
+        message = f"Added {len(gids)} products to the existing “{existing['title']}”."
+    else:
+        created = client.create_collection(
+            title=title,
+            description_html=body,
+            handle=handle,
+            seo_title=title[: product_copy.MAX_SEO_TITLE],
+            seo_description=(description or body)[: product_copy.MAX_SEO_DESCRIPTION],
+            product_gids=gids,
+        )
+        collection_gid = created["id"]
+        message = f"Created the collection “{title}” with {len(gids)} products."
+
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        run.collection_gid = collection_gid
+        run.collection_handle = handle
+        run.note(message)
+        next_stage = (
+            ImportStage.linking if options.get("link_products", True) else ImportStage.done
+        )
+        _set_stage(
+            session, run, next_stage,
+            "Linking the products to each other."
+            if next_stage is ImportStage.linking
+            else "Done.",
+        )
+    return PassResult(run_id, next_stage.value, done=next_stage is ImportStage.done)
+
+
+# ── Stage 4: link the range together ─────────────────────────────────
+
+
+def _linking(run_id: int) -> PassResult:
+    deadline = time.monotonic() + _budget()
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        dry_run = run.dry_run
+        rows = (
+            session.query(ImportProduct)
+            .filter(
+                ImportProduct.run_id == run_id,
+                ImportProduct.status == ImportProductStatus.created.value,
+            )
+            .order_by(ImportProduct.position)
+            .all()
+        )
+        siblings = [
+            {
+                "id": r.id,
+                "gid": r.product_gid,
+                "title": r.title or "",
+                "url": _product_path(r.handle),
+                "handle": r.handle,
+                "image": _first_image(r.extracted),
+                "linked": r.linked,
+            }
+            for r in rows
+            if r.product_gid
+        ]
+
+    todo = [s for s in siblings if not s["linked"]]
+    if dry_run or not todo or len(siblings) < 2:
+        with get_session() as session:
+            run = session.get(ImportRun, run_id)
+            if dry_run:
+                run.note(
+                    f"Dry run finished. {len(siblings)} products prepared — nothing "
+                    "was sent to Shopify."
+                )
+            elif len(siblings) < 2:
+                run.note("Only one product, so there was nothing to cross-link.")
+            else:
+                run.note(f"Cross-linked {len(siblings)} products.")
+            _set_stage(session, run, ImportStage.done, "Done.")
+        return PassResult(run_id, ImportStage.done.value, done=True)
+
+    client = _shopify_client()
+    handled = 0
+    for item in todo:
+        try:
+            _link_one(client, run_id, item, siblings)
+        except Exception as e:  # noqa: BLE001 - a failed link is not a failed product
+            log.info("cross-link failed for %s: %s", item["gid"], e)
+            with get_session() as session:
+                run = session.get(ImportRun, run_id)
+                run.note(f"Could not link {item['title']}: {e}"[:300])
+                # Marked linked anyway: retrying forever would stall the run
+                # on one product whose update Shopify keeps refusing.
+                row = session.get(ImportProduct, item["id"])
+                if row is not None:
+                    row.linked = True
+        handled += 1
+        if time.monotonic() > deadline:
+            break
+
+    return PassResult(
+        run_id, ImportStage.linking.value, done=False, handled=handled,
+        message=f"{len(todo) - handled} to link",
+    )
+
+
+def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
+    """Rewrite one product's description with its siblings, and record them
+    as a metafield the theme can render properly."""
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    others = [s for s in siblings if s["gid"] != item["gid"]]
+    # A window starting after this product, so each page leads somewhere
+    # different rather than every page in the range linking the same eight.
+    start = next((i for i, s in enumerate(siblings) if s["gid"] == item["gid"]), 0)
+    ordered = (siblings[start + 1:] + siblings[:start])
+    related = [
+        {"url": s["url"], "title": s["title"], "image": s["image"]}
+        for s in ordered
+        if s["gid"] != item["gid"] and s["url"]
+    ][:RELATED_LIMIT]
+    if not related:
+        related = [
+            {"url": s["url"], "title": s["title"], "image": s["image"]}
+            for s in others
+            if s["url"]
+        ][:RELATED_LIMIT]
+
+    with get_session() as session:
+        row = session.get(ImportProduct, item["id"])
+        generated, extracted = row.generated, row.extracted
+        source_url = row.source_url
+
+    copy = _copy_from(generated)
+    docs = [
+        SourceDoc(url=d.get("url", ""), title=d.get("title"), kind=d.get("kind", "other"),
+                  pages=d.get("pages"))
+        for d in (extracted.get("docs") or [])
+    ]
+    doc_urls = _stored_doc_urls(generated)
+    body = product_copy.render_description(
+        copy,
+        docs=docs,
+        doc_urls=doc_urls,
+        related=related,
+        source_url=source_url,
+        locale=product_copy.locale_text(),
+    )
+    client.update_product(item["gid"], description_html=body)
+
+    related_gids = [s["gid"] for s in ordered if s["gid"] != item["gid"]][:RELATED_LIMIT]
+    if related_gids:
+        try:
+            client.set_metafields([{
+                "ownerId": item["gid"],
+                "namespace": METAFIELD_NAMESPACE,
+                "key": "related_products",
+                "type": "list.product_reference",
+                "value": json.dumps(related_gids),
+            }])
+        except ShopifyError as e:
+            log.info("related_products metafield failed for %s: %s", item["gid"], e)
+
+    with get_session() as session:
+        row = session.get(ImportProduct, item["id"])
+        if row is not None:
+            row.linked = True
+
+
+def _copy_from(data: dict) -> product_copy.ProductCopy:
+    """The stored copy back as a model, tolerating a row written by an older
+    version of the schema."""
+    payload = {k: v for k, v in (data or {}).items() if k != "model"}
+    payload.setdefault("title", "")
+    payload.setdefault("product_type", "")
+    payload.setdefault("summary", "")
+    payload.setdefault("seo_title", "")
+    payload.setdefault("seo_description", "")
+    return product_copy.ProductCopy.model_validate(payload)
+
+
+def _stored_doc_urls(generated: dict) -> dict:
+    return dict(generated.get("doc_urls") or {})
+
+
+def _first_image(extracted: dict) -> str | None:
+    images = extracted.get("images") or []
+    return images[0].get("url") if images else None
+
+
+# ── Reading a run ────────────────────────────────────────────────────
+
+
+def _counts(session, run_id: int) -> dict:
+    counts = {s.value: 0 for s in ImportProductStatus}
+    rows = (
+        session.query(ImportProduct.status)
+        .filter(ImportProduct.run_id == run_id)
+        .all()
+    )
+    for row in rows:
+        counts[row.status] = counts.get(row.status, 0) + 1
+    counts["total"] = len(rows)
+    return counts
+
+
+def run_status(run_id: int) -> dict:
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is None:
+            raise ImportRunError(f"No import run {run_id}.")
+        counts = _counts(session, run_id)
+        return {
+            "id": run.id,
+            "stage": run.stage,
+            "active": run.is_active,
+            "dry_run": run.dry_run,
+            "source_url": run.source_url,
+            "collection_title": run.collection_title,
+            "collection_handle": run.collection_handle,
+            "error": run.error,
+            "counts": counts,
+            "log": run.log[-40:],
+            "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        }
+
+
+def list_runs(limit: int = 25) -> list[dict]:
+    with get_session() as session:
+        runs = (
+            session.query(ImportRun)
+            .order_by(ImportRun.started_at.desc())
+            .limit(limit)
+            .all()
+        )
+        return [
+            {
+                "id": r.id,
+                "source_url": r.source_url,
+                "collection_title": r.collection_title,
+                "stage": r.stage,
+                "dry_run": r.dry_run,
+                "active": r.is_active,
+                "started_at": r.started_at,
+                "counts": _counts(session, r.id),
+            }
+            for r in runs
+        ]
+
+
+def run_detail(run_id: int) -> dict:
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is None:
+            raise ImportRunError(f"No import run {run_id}.")
+        products = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .order_by(ImportProduct.position)
+            .all()
+        )
+        return {
+            "run": run,
+            "options": run.options,
+            "log": run.log[-60:],
+            "counts": _counts(session, run_id),
+            "products": [
+                {
+                    "row": p,
+                    "extracted": p.extracted,
+                    "generated": p.generated,
+                    "image": _first_image(p.extracted),
+                    "doc_count": len(p.extracted.get("docs") or []),
+                    "spec_count": len(p.extracted.get("specs") or {}),
+                }
+                for p in products
+            ],
+        }
+
+
+def stop_run(run_id: int) -> None:
+    """Stop a run where it stands. What it already created stays created.
+
+    Nothing is rolled back, and that is the honest behaviour: the products
+    exist in Shopify, drafts or not, and quietly deleting them because
+    someone clicked Stop would be a bigger surprise than leaving them.
+    """
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is None or not run.is_active:
+            return
+        run.stage = ImportStage.stopped.value
+        run.finished_at = _now()
+        run.note("Stopped. Anything already created is still in the store.")
+
+
+def active_run_ids(limit: int = 5) -> list[int]:
+    """Runs that still have work to do — what the cron job advances."""
+    with get_session() as session:
+        rows = (
+            session.query(ImportRun.id)
+            .filter(
+                ImportRun.stage.notin_([
+                    ImportStage.done.value,
+                    ImportStage.failed.value,
+                    ImportStage.stopped.value,
+                ])
+            )
+            .order_by(ImportRun.started_at)
+            .limit(limit)
+            .all()
+        )
+        return [row.id for row in rows]

@@ -33,6 +33,12 @@ It's also the only way price history and experiment baselines can exist at all
 it, because the rule is easy to break with one convenient import and the
 breakage is invisible until a bad morning.
 
+The rule is about **pages**. A handful of POST actions the owner triggers
+deliberately do call out — publishing an article, running a job by hand,
+advancing a product import — and they run on the request thread so the result
+is reported rather than lost to a frozen function. A GET that renders a page
+never does.
+
 ## Layout
 
 ```
@@ -45,6 +51,10 @@ src/dashboard/
   reporting.py     every read query the UI makes
   charts.py        inline SVG line charts, server-rendered
   scheduler.py     APScheduler, reads its times from store.py
+  manufacturer.py  reading a supplier's collection + product pages
+  product_docs.py  downloading and reading their PDFs
+  product_copy.py  writing the product page from what was read
+  product_import.py  the import run: four stages, resumable
   jobs/
     registry.py    what a job is
     runner.py      job_run logging, retry/backoff, per-job lock
@@ -249,10 +259,18 @@ alerting gets muted wholesale. The inbox is the system of record regardless.
 
 ## Pages
 
-`/` overview · `/products` · `/blog` · `/ads` · `/alerts` · `/jobs` ·
-`/settings`. The open-alert count rides in the nav on every page, because an
-alerting system you have to remember to go and look at is one you stop
-looking at.
+`/` overview · `/products` · `/import` · `/blog` · `/ads` · `/alerts` ·
+`/jobs` · `/settings`. The open-alert count rides in the nav on every page,
+because an alerting system you have to remember to go and look at is one you
+stop looking at.
+
+**Import** is the one page that writes to the catalogue rather than reading
+it: paste a manufacturer's collection URL and it scrapes the range, reads
+their spec sheets, writes each product page and creates the products as
+drafts. It has its own document — [product-import.md](product-import.md) — and
+its own reason for existing outside the one rule above: the work is a POST the
+owner asked for, done in bounded passes so a 60-second function can carry an
+import that takes minutes.
 
 **Blog** ranks by **absolute impressions lost**, not percent — the same choice
 `run-refresh` makes, and for the same reason. Percentage flatters trivia: a

@@ -25,8 +25,8 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
 
 from dashboard import (
-    advisor, alerts, auth, charts, cron, diffing, experiments, refresh,
-    reporting, scheduler, store, strategy,
+    advisor, alerts, auth, charts, cron, diffing, experiments, product_import,
+    refresh, reporting, scheduler, store, strategy,
 )
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
@@ -234,6 +234,18 @@ def _last_dfs_error() -> str | None:
     return run.error
 
 
+# One lock per import run. Two `advance` calls on the same run would do the
+# same work twice — wasted fetches and LLM calls, not duplicate products (the
+# handle check prevents those), but wasted is enough of a reason.
+_IMPORT_LOCKS: dict[int, threading.Lock] = {}
+_IMPORT_LOCKS_GUARD = threading.Lock()
+
+
+def _import_lock(run_id: int) -> threading.Lock:
+    with _IMPORT_LOCKS_GUARD:
+        return _IMPORT_LOCKS.setdefault(run_id, threading.Lock())
+
+
 def _start_preview(article_id: int) -> None:
     def work() -> None:
         try:
@@ -422,6 +434,104 @@ def create_app() -> FastAPI:
                 experiment=experiment, cohort=cohort, order=order,
             ),
         )
+
+    # ── Product import ──────────────────────────────────────────────
+    @app.get("/import", response_class=HTMLResponse)
+    def import_page(request: Request, error: str = ""):
+        return render(
+            request, "import.html",
+            nav="import",
+            runs=product_import.list_runs(limit=25),
+            defaults={
+                "max_products": store.get(store.IMPORT_MAX_PRODUCTS),
+                "publish_status": store.get(store.IMPORT_PUBLISH_STATUS),
+                "max_images": store.get(store.IMPORT_MAX_IMAGES),
+                "max_docs": store.get(store.IMPORT_MAX_DOCS),
+                "model": store.get(store.IMPORT_MODEL),
+            },
+            shopify_ready=pipeline().has_shopify,
+            error=error,
+        )
+
+    @app.post("/import")
+    def start_import(
+        source_url: str = Form(...),
+        collection_title: str = Form(""),
+        vendor: str = Form(""),
+        max_products: int = Form(0),
+        publish_status: str = Form(""),
+        dry_run: str = Form(""),
+        make_collection: str = Form(""),
+        link_products: str = Form(""),
+    ):
+        url = (source_url or "").strip()
+        if not url:
+            return RedirectResponse("/import?error=Paste+a+collection+URL+first.",
+                                    status_code=303)
+        run_id = product_import.start_run(
+            url,
+            dry_run=bool(dry_run),
+            collection_title=collection_title,
+            vendor=vendor,
+            max_products=max_products or None,
+            publish_status=publish_status or None,
+            # Unchecked boxes post nothing, so a plain form submit would read
+            # as "no collection, no linking" — the two things the owner most
+            # likely wants. The form posts them as hidden fields set to "1".
+            make_collection=bool(make_collection),
+            link_products=bool(link_products),
+        )
+        return RedirectResponse(f"/import/{run_id}", status_code=303)
+
+    @app.get("/import/{run_id}", response_class=HTMLResponse)
+    def import_run_page(request: Request, run_id: int):
+        try:
+            detail = product_import.run_detail(run_id)
+        except product_import.ImportRunError:
+            return RedirectResponse("/import?error=That+run+no+longer+exists.",
+                                    status_code=303)
+        return render(request, "import_run.html", nav="import", **detail)
+
+    @app.post("/import/{run_id}/advance")
+    def advance_import(run_id: int):
+        """Do one pass of work and report where the run got to.
+
+        Synchronous on purpose, in both environments. A background thread
+        wouldn't survive Vercel (see the jobs route above for the same
+        reasoning), and here it would also hide the thing the owner most
+        wants to see — that products are appearing one by one.
+        """
+        lock = _import_lock(run_id)
+        if not lock.acquire(blocking=False):
+            return JSONResponse(
+                {"advanced": False, "reason": "a pass is already running"},
+                status_code=409,
+            )
+        try:
+            result = product_import.advance(run_id)
+        except product_import.ImportRunError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+        finally:
+            lock.release()
+        return {
+            "advanced": True,
+            "stage": result.stage,
+            "handled": result.handled,
+            "message": result.message,
+            **product_import.run_status(run_id),
+        }
+
+    @app.get("/import/{run_id}/status")
+    def import_status(run_id: int):
+        try:
+            return product_import.run_status(run_id)
+        except product_import.ImportRunError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=404)
+
+    @app.post("/import/{run_id}/stop")
+    def stop_import(run_id: int):
+        product_import.stop_run(run_id)
+        return RedirectResponse(f"/import/{run_id}", status_code=303)
 
     # ── Blog ────────────────────────────────────────────────────────
     @app.get("/blog", response_class=HTMLResponse)

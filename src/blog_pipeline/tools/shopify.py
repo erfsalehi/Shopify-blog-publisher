@@ -1,14 +1,24 @@
 """Shopify Admin GraphQL client.
 
-Covers exactly what the pipeline needs:
+Two groups of operations share one client, because they share one store:
+
+**Blog publishing** — what the article pipeline needs:
   * default_blog_id   — resolve the store's first blog if none configured
   * list_published    — published article titles/handles for dedup + internal links
   * list_link_targets — products/pages/articles used as internal-link anchors
-  * upload_image      — stagedUploadsCreate -> PUT -> fileCreate (returns file id/url)
+  * upload_image      — stagedUploadsCreate -> POST -> fileCreate (returns file id/url)
   * create_article    — articleCreate mutation, published immediately
 
+**Catalogue writing** — what the product importer needs (see
+`dashboard/product_import.py`):
+  * find_product / create_product / update_product
+  * add_product_media  — images fetched by Shopify from a source URL
+  * upload_file        — a PDF into Shopify Files, staged from bytes we hold
+  * set_metafields     — specs and document links as structured data
+  * find_collection / create_collection / add_products_to_collection
+
 The client raises ShopifyError on GraphQL userErrors so callers can mark the
-Article row failed with a real reason. `dry_run` short-circuits create_article
+row failed with a real reason. `dry_run` short-circuits the create mutations
 and returns the payload instead of calling the API.
 """
 
@@ -276,11 +286,16 @@ class ShopifyClient:
                 )
         return targets
 
-    # ── image upload ─────────────────────────────────────────────
-    def upload_image(
-        self, image_bytes: bytes, filename: str, mime_type: str = "image/png"
-    ) -> dict:
-        """Staged upload -> PUT bytes -> fileCreate. Returns {id, url, alt?}."""
+    # ── file upload ──────────────────────────────────────────────
+    def _stage_upload(
+        self, data: bytes, filename: str, mime_type: str, resource: str = "FILE"
+    ) -> str:
+        """Reserve a staged target, POST the bytes to it, return its
+        resourceUrl — the handle `fileCreate` takes in place of a public URL.
+
+        Split out because images and documents differ only in what they tell
+        `fileCreate` afterwards; the upload itself is identical.
+        """
         staged = self.graphql(
             """
             mutation($input: [StagedUploadInput!]!) {
@@ -293,7 +308,7 @@ class ShopifyClient:
             {
                 "input": [
                     {
-                        "resource": "FILE",
+                        "resource": resource,
                         "filename": filename,
                         "mimeType": mime_type,
                         "httpMethod": "POST",
@@ -306,9 +321,16 @@ class ShopifyClient:
 
         # POST the bytes to the staged target (S3/GCS presigned form).
         form = {p["name"]: p["value"] for p in target["parameters"]}
-        files = {"file": (filename, image_bytes, mime_type)}
+        files = {"file": (filename, data, mime_type)}
         upload_resp = httpx.post(target["url"], data=form, files=files, timeout=120.0)
         upload_resp.raise_for_status()
+        return target["resourceUrl"]
+
+    def upload_image(
+        self, image_bytes: bytes, filename: str, mime_type: str = "image/png"
+    ) -> dict:
+        """Staged upload -> POST bytes -> fileCreate. Returns {id, url, alt?}."""
+        resource_url = self._stage_upload(image_bytes, filename, mime_type)
 
         created = self.graphql(
             """
@@ -320,7 +342,7 @@ class ShopifyClient:
               }
             }
             """,
-            {"files": [{"originalSource": target["resourceUrl"], "contentType": "IMAGE"}]},
+            {"files": [{"originalSource": resource_url, "contentType": "IMAGE"}]},
         )["fileCreate"]
         self._check_user_errors(created, "fileCreate")
         node = created["files"][0]
@@ -398,6 +420,361 @@ class ShopifyClient:
         return PublishResult(
             article_id=node["id"], handle=node["handle"], url=url
         )
+
+    # ── files that aren't images ─────────────────────────────────
+    def upload_file(
+        self,
+        data: bytes,
+        filename: str,
+        mime_type: str = "application/pdf",
+        alt: str | None = None,
+        *,
+        wait: bool = True,
+    ) -> dict:
+        """A document into Shopify Files. Returns {id, url}.
+
+        Staged from bytes we already hold rather than handing Shopify the
+        manufacturer's URL to fetch: the bytes are the ones whose text went
+        into the description, so the file a customer downloads is provably
+        the file the page describes. It also survives the supplier
+        reorganising their site an hour later.
+
+        Shopify processes an uploaded file asynchronously, so the CDN URL is
+        usually absent from the `fileCreate` response. `wait` polls for it,
+        because a download link is the entire point of uploading this.
+        """
+        resource_url = self._stage_upload(data, filename, mime_type)
+        payload: dict[str, Any] = {
+            "originalSource": resource_url,
+            "contentType": "FILE",
+        }
+        if alt:
+            payload["alt"] = alt[:512]
+        created = self.graphql(
+            """
+            mutation($files: [FileCreateInput!]!) {
+              fileCreate(files: $files) {
+                files {
+                  id fileStatus alt
+                  ... on GenericFile { url }
+                }
+                userErrors { field message }
+              }
+            }
+            """,
+            {"files": [payload]},
+        )["fileCreate"]
+        self._check_user_errors(created, "fileCreate")
+        node = created["files"][0]
+        url = node.get("url")
+        if not url and wait:
+            url = self.wait_for_file_url(node["id"])
+        return {"id": node["id"], "url": url}
+
+    def wait_for_file_url(self, file_gid: str, attempts: int = 6) -> str | None:
+        """Poll a file until Shopify finishes processing it and gives a URL.
+
+        Bounded and allowed to give up: a file with no URL yet is still
+        uploaded and still linked from the product's metafield, so the cost
+        of giving up early is a missing download link on one product, not a
+        lost file. Blocking a whole import on Shopify's queue would be worse.
+        """
+        for attempt in range(attempts):
+            time.sleep(min(1.5 * (attempt + 1), 6.0))
+            node = self.graphql(
+                """
+                query($id: ID!) {
+                  node(id: $id) {
+                    ... on GenericFile { id fileStatus url }
+                  }
+                }
+                """,
+                {"id": file_gid},
+            ).get("node") or {}
+            if node.get("url"):
+                return node["url"]
+            if str(node.get("fileStatus") or "").upper() == "FAILED":
+                raise ShopifyError(f"Shopify failed to process file {file_gid}.")
+        return None
+
+    # ── products ─────────────────────────────────────────────────
+    def find_product(self, handle: str) -> dict | None:
+        """The product with this handle, or None.
+
+        Checked before every create, which is what makes re-running an import
+        safe: the second run finds what the first one made and leaves it
+        alone instead of failing on a taken handle or creating a duplicate.
+        """
+        data = self.graphql(
+            """
+            query($q: String!) {
+              products(first: 1, query: $q) {
+                nodes { id handle title status onlineStoreUrl }
+              }
+            }
+            """,
+            {"q": f"handle:{handle}"},
+        )
+        nodes = (data.get("products") or {}).get("nodes") or []
+        for node in nodes:
+            if node.get("handle") == handle:
+                return node
+        return None
+
+    def create_product(
+        self,
+        *,
+        title: str,
+        description_html: str,
+        handle: str | None = None,
+        vendor: str | None = None,
+        product_type: str | None = None,
+        tags: list[str] | None = None,
+        seo_title: str | None = None,
+        seo_description: str | None = None,
+        status: str = "DRAFT",
+        metafields: list[dict] | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """Create one product. DRAFT unless told otherwise.
+
+        No price and no variants: the importer reads manufacturer pages,
+        which publish neither, and this store shows "call for price" on most
+        of the catalogue anyway. Shopify creates a default variant on its own,
+        which is where a price goes later if one is ever set.
+        """
+        product: dict[str, Any] = {
+            "title": title,
+            "descriptionHtml": description_html,
+            "status": (status or "DRAFT").upper(),
+        }
+        if handle:
+            product["handle"] = handle
+        if vendor:
+            product["vendor"] = vendor
+        if product_type:
+            product["productType"] = product_type
+        if tags:
+            product["tags"] = tags
+        if seo_title or seo_description:
+            # ProductCreateInput takes `seo` directly, unlike articles. Both
+            # fields go together — see product_seo.py on Shopify replacing
+            # this object wholesale rather than merging it.
+            product["seo"] = {"title": seo_title, "description": seo_description}
+        if metafields:
+            product["metafields"] = metafields
+
+        if dry_run:
+            return {"dry_run": True, "product": product}
+
+        data = self.graphql(
+            """
+            mutation($product: ProductCreateInput!) {
+              productCreate(product: $product) {
+                product { id handle title status onlineStoreUrl }
+                userErrors { field message }
+              }
+            }
+            """,
+            {"product": product},
+        )["productCreate"]
+        self._check_user_errors(data, "productCreate")
+        return data["product"]
+
+    def update_product(
+        self,
+        product_gid: str,
+        *,
+        description_html: str | None = None,
+        tags: list[str] | None = None,
+        status: str | None = None,
+    ) -> dict:
+        """Change an existing product. Used by the cross-linking pass, which
+        rewrites each description once its siblings exist."""
+        product: dict[str, Any] = {"id": _as_gid(product_gid, "Product")}
+        if description_html is not None:
+            product["descriptionHtml"] = description_html
+        if tags is not None:
+            product["tags"] = tags
+        if status is not None:
+            product["status"] = status.upper()
+        data = self.graphql(
+            """
+            mutation($input: ProductInput!) {
+              productUpdate(input: $input) {
+                product { id handle }
+                userErrors { field message }
+              }
+            }
+            """,
+            {"input": product},
+        )["productUpdate"]
+        self._check_user_errors(data, "productUpdate")
+        return data["product"]
+
+    def add_product_media(
+        self, product_gid: str, media: list[dict], *, dry_run: bool = False
+    ) -> list[dict]:
+        """Attach images to a product from their source URLs.
+
+        Shopify fetches each URL itself and stores its own copy on the store's
+        CDN — so this both saves the picture and avoids downloading megabytes
+        of photography through this process to upload it straight back out.
+
+        `media` is [{"originalSource": url, "alt": text}]. A source that
+        Shopify can't fetch comes back in `mediaUserErrors`, which is raised:
+        a product silently missing its photographs looks fine in the API
+        response and wrong on the storefront.
+        """
+        if not media:
+            return []
+        payload = [
+            {
+                "originalSource": item["originalSource"],
+                "alt": (item.get("alt") or "")[:512],
+                "mediaContentType": "IMAGE",
+            }
+            for item in media
+        ]
+        if dry_run:
+            return payload
+        data = self.graphql(
+            """
+            mutation($productId: ID!, $media: [CreateMediaInput!]!) {
+              productCreateMedia(productId: $productId, media: $media) {
+                media { ... on MediaImage { id status } }
+                mediaUserErrors { field message }
+              }
+            }
+            """,
+            {"productId": _as_gid(product_gid, "Product"), "media": payload},
+        )["productCreateMedia"]
+        errors = data.get("mediaUserErrors") or []
+        if errors:
+            raise ShopifyError(f"productCreateMedia userErrors: {errors}")
+        return data.get("media") or []
+
+    def set_metafields(self, metafields: list[dict]) -> list[dict]:
+        """Write metafields on any resource. Each entry needs ownerId,
+        namespace, key, type and value.
+
+        Specs and document links go here as well as into the description
+        HTML: the description is what a customer reads, and the metafield is
+        what a theme, an export, or a feed can read as data.
+        """
+        if not metafields:
+            return []
+        data = self.graphql(
+            """
+            mutation($metafields: [MetafieldsSetInput!]!) {
+              metafieldsSet(metafields: $metafields) {
+                metafields { id namespace key }
+                userErrors { field message }
+              }
+            }
+            """,
+            {"metafields": metafields},
+        )["metafieldsSet"]
+        self._check_user_errors(data, "metafieldsSet")
+        return data.get("metafields") or []
+
+    # ── collections ──────────────────────────────────────────────
+    def find_collection(self, handle: str) -> dict | None:
+        data = self.graphql(
+            """
+            query($q: String!) {
+              collections(first: 1, query: $q) {
+                nodes { id handle title }
+              }
+            }
+            """,
+            {"q": f"handle:{handle}"},
+        )
+        nodes = (data.get("collections") or {}).get("nodes") or []
+        for node in nodes:
+            if node.get("handle") == handle:
+                return node
+        return None
+
+    def create_collection(
+        self,
+        *,
+        title: str,
+        description_html: str = "",
+        handle: str | None = None,
+        seo_title: str | None = None,
+        seo_description: str | None = None,
+        product_gids: list[str] | None = None,
+        dry_run: bool = False,
+    ) -> dict:
+        """A manual collection holding exactly the products we put in it.
+
+        Manual rather than a smart collection with a tag rule: the import
+        knows precisely which products belong, and a rule would also sweep up
+        anything else that later happens to carry the tag.
+        """
+        collection: dict[str, Any] = {
+            "title": title,
+            "descriptionHtml": description_html,
+        }
+        if handle:
+            collection["handle"] = handle
+        if seo_title or seo_description:
+            collection["seo"] = {"title": seo_title, "description": seo_description}
+        if product_gids:
+            collection["products"] = product_gids
+
+        if dry_run:
+            return {"dry_run": True, "collection": collection}
+
+        data = self.graphql(
+            """
+            mutation($input: CollectionInput!) {
+              collectionCreate(input: $input) {
+                collection { id handle title }
+                userErrors { field message }
+              }
+            }
+            """,
+            {"input": collection},
+        )["collectionCreate"]
+        self._check_user_errors(data, "collectionCreate")
+        return data["collection"]
+
+    def add_products_to_collection(
+        self, collection_gid: str, product_gids: list[str]
+    ) -> None:
+        """Add products to an existing collection, in batches.
+
+        Batched because `collectionAddProducts` is one of the more expensive
+        mutations in the Admin API's cost model, and a 60-product collection
+        sent as one call is the kind of thing that gets throttled.
+        """
+        gid = _as_gid(collection_gid, "Collection")
+        for start in range(0, len(product_gids), 25):
+            batch = product_gids[start:start + 25]
+            if not batch:
+                continue
+            data = self.graphql(
+                """
+                mutation($id: ID!, $productIds: [ID!]!) {
+                  collectionAddProducts(id: $id, productIds: $productIds) {
+                    collection { id }
+                    userErrors { field message }
+                  }
+                }
+                """,
+                {"id": gid, "productIds": batch},
+            )["collectionAddProducts"]
+            self._check_user_errors(data, "collectionAddProducts")
+
+    # ── links back to the admin ──────────────────────────────────
+    def admin_url(self, gid: str) -> str:
+        """Where the owner goes to look at what was created."""
+        numeric = str(gid).rsplit("/", 1)[-1]
+        kind = str(gid).split("/")[-2].lower() if "/" in str(gid) else "product"
+        return f"https://{self.domain}/admin/{kind}s/{numeric}"
+
 
     def close(self) -> None:
         self._client.close()
