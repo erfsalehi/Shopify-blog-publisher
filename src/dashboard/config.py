@@ -152,9 +152,18 @@ class DashboardSettings(BaseSettings):
     # or DASHBOARD_SESSION_SECRET would just silently reject every login
     # attempt against an apparently-correct password, which is a much worse
     # failure to have to diagnose. Stripping here means it can't happen
-    # again regardless of which of the three fields it lands on, or whether
-    # it was `echo` piping, a copy-paste into Vercel's UI, or anything else.
-    @field_validator("password", "session_secret", "cron_secret", mode="after")
+    # again regardless of which of the fields it lands on, or whether it was
+    # `echo` piping, a copy-paste into Vercel's UI, or anything else.
+    #
+    # The API keys are here for the same reason and one more: both go out as
+    # `Authorization: Bearer <key>`, and a newline inside a header value is
+    # rejected by httpx before the request is ever sent — so the failure
+    # arrives as a protocol error naming neither the key nor the newline.
+    @field_validator(
+        "password", "session_secret", "cron_secret",
+        "windsor_api_key", "firecrawl_api_key",
+        mode="after",
+    )
     @classmethod
     def _strip_secret(cls, value: str) -> str:
         return value.strip()
