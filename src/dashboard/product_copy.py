@@ -251,7 +251,11 @@ def write_copy(
     )
     if not get_settings().google_api_key:
         log.info("no GOOGLE_API_KEY; using the deterministic description")
-        return fallback_copy(source, vendor=vendor), "none"
+        # Tidied like any other copy. Skipping it here was a real bug: the
+        # fallback derives seo_title from the product title, which is the one
+        # value Shopify silently stores as null — so every product imported
+        # without a key would have had no meta title at all.
+        return tidy(fallback_copy(source, vendor=vendor), source), "none"
 
     try:
         copy = structured_invoke(
@@ -264,9 +268,10 @@ def write_copy(
         )
     except Exception as e:  # noqa: BLE001 - one product's copy is not the run
         log.warning("copy generation failed for %s: %s", source.source_url, e)
-        copy = fallback_copy(source, vendor=vendor)
-        copy.summary = copy.summary or ""
-        return copy, f"failed: {type(e).__name__}"
+        return (
+            tidy(fallback_copy(source, vendor=vendor), source),
+            f"failed: {type(e).__name__}",
+        )
 
     return tidy(copy, source), chosen
 

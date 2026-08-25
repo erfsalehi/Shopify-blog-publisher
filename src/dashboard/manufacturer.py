@@ -666,7 +666,7 @@ def discover_collection(
         # The collection page itself, for its title and description — needed
         # on the Shopify path too, since products.json says nothing about the
         # collection it came from.
-        page_html = _get_html(http, f"{base}{path}")
+        page_html, page_error = _fetch_html(http, f"{base}{path}")
         if page_html:
             out.pages += 1
             soup = soup_of(page_html)
@@ -695,6 +695,17 @@ def discover_collection(
                 out.product_urls = _dedupe(out.product_urls)[:max_products]
 
         if not out.product_urls:
+            if page_error:
+                # Never reached the page at all. Saying "no products here"
+                # would send someone off to inspect markup that was never
+                # read — the fix is a network, DNS, or blocked-request one.
+                raise FetchError(
+                    f"Couldn't read {out.url} — {page_error}. Nothing was "
+                    "imported because nothing was fetched: check the URL "
+                    "opens in a browser, and that this machine can reach the "
+                    "site (a proxy, a firewall, or the site blocking "
+                    "non-browser requests would all look like this)."
+                )
             raise FetchError(
                 f"No products found at {out.url}. The page loaded, but nothing "
                 "on it looked like a product link — if the collection renders "
@@ -708,18 +719,31 @@ def discover_collection(
             http.close()
 
 
-def _get_html(http: httpx.Client, url: str, params: dict | None = None) -> str | None:
+def _fetch_html(
+    http: httpx.Client, url: str, params: dict | None = None
+) -> tuple[str | None, str | None]:
+    """The page, or None and *why* — the reason is the whole point.
+
+    "The site didn't answer" and "the page had nothing on it" are different
+    problems with different fixes, and a caller that only sees None has to
+    guess which one it hit. Guessing wrong produces the worst kind of error
+    message: one that confidently describes something that didn't happen.
+    """
     try:
         resp = http.get(url, params=params)
     except Exception as e:  # noqa: BLE001 - an unreadable page is not a crash
         log.info("fetch failed for %s: %s", url, e)
-        return None
+        return None, f"{type(e).__name__}: {e}"[:300]
     if resp.status_code != 200:
-        return None
+        return None, f"the site answered HTTP {resp.status_code}"
     content_type = resp.headers.get("content-type", "")
     if "html" not in content_type and not resp.text.lstrip().startswith("<"):
-        return None
-    return resp.text
+        return None, f"the response wasn't HTML (content-type {content_type!r})"
+    return resp.text, None
+
+
+def _get_html(http: httpx.Client, url: str, params: dict | None = None) -> str | None:
+    return _fetch_html(http, url, params)[0]
 
 
 # ── One product page ─────────────────────────────────────────────────

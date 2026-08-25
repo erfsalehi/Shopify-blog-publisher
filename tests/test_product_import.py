@@ -345,6 +345,34 @@ def test_a_collection_with_no_product_links_says_so(fake_site, monkeypatch):
         manufacturer.discover_collection("https://empty.test/collections/x")
 
 
+def test_a_site_that_cannot_be_reached_says_so_rather_than_blaming_its_markup(
+    monkeypatch,
+):
+    """An unreachable host and an empty page are different problems.
+
+    Caught live: a proxy blocking the request produced "the page loaded, but
+    nothing on it looked like a product link", which sends someone off to
+    inspect markup that was never fetched.
+    """
+    def refused(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="")
+        raise httpx.ConnectError("connection refused")
+
+    transport = httpx.MockTransport(refused)
+    monkeypatch.setattr(
+        manufacturer, "client",
+        lambda: httpx.Client(transport=transport, follow_redirects=True),
+    )
+    manufacturer_reset()
+    with pytest.raises(manufacturer.FetchError) as caught:
+        manufacturer.discover_collection("https://unreachable.test/collections/x")
+    message = str(caught.value)
+    assert "Couldn't read" in message and "ConnectError" in message
+    assert "looked like a product link" not in message
+    manufacturer_reset()
+
+
 def test_robots_disallow_stops_the_import_rather_than_being_ignored(monkeypatch):
     def blocked(request):
         if request.url.path == "/robots.txt":
@@ -411,6 +439,28 @@ def test_an_seo_title_equal_to_the_product_title_is_changed(dashboard_db):
     # title, so a page that wanted one would quietly have none.
     assert copy.seo_title != copy.title
     assert copy.title in copy.seo_title
+
+
+def test_the_no_api_key_fallback_is_tidied_like_any_other_copy(
+    dashboard_db, monkeypatch
+):
+    """Caught by running it: the fallback returned untidied copy, so its
+    seo_title equalled the product title — the value Shopify stores as null,
+    leaving every product imported without a key with no meta title."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "")
+    from blog_pipeline.config import get_settings
+
+    get_settings.cache_clear()
+    source = manufacturer.SourceProduct(
+        source_url="https://x.test/p", title="3D Bars White",
+        description_text="A textured wall tile.", vendor="Ames",
+    )
+    copy, model = product_copy.write_copy(source)
+    get_settings.cache_clear()
+
+    assert model == "none"
+    assert copy.seo_title and copy.seo_title != copy.title
+    assert len(copy.seo_title) <= product_copy.MAX_SEO_TITLE
 
 
 def test_tags_are_deduplicated_case_insensitively():
@@ -599,7 +649,9 @@ def test_a_collection_that_cannot_be_read_fails_the_run_with_the_reason(
     assert result.stage == ImportStage.failed.value
     status = product_import.run_status(run_id)
     assert not status["active"]
-    assert "No products found" in status["error"]
+    # The URL 404s, and the run says exactly that rather than reporting on
+    # markup it never received.
+    assert "HTTP 404" in status["error"]
 
 
 def test_stopping_a_run_keeps_what_it_already_created(
