@@ -238,8 +238,7 @@ def write_copy(
     regenerate one — and an import that dies on product 12 because a free-tier
     model was rate-limited is not.
     """
-    from blog_pipeline.config import get_settings
-    from blog_pipeline.llm import structured_invoke
+    from blog_pipeline.llm import has_access_for, is_openrouter_model, structured_invoke
 
     chosen = model or store.get(store.IMPORT_MODEL)
     brief = build_brief(
@@ -249,8 +248,8 @@ def write_copy(
         vendor=vendor,
         locale=locale_text(),
     )
-    if not get_settings().google_api_key:
-        log.info("no GOOGLE_API_KEY; using the deterministic description")
+    if not has_access_for(chosen):
+        log.info("no API key configured for %s; using the deterministic description", chosen)
         # Tidied like any other copy. Skipping it here was a real bug: the
         # fallback derives seo_title from the product title, which is the one
         # value Shopify silently stores as null — so every product imported
@@ -265,6 +264,11 @@ def write_copy(
             temperature=0.3,
             stage="product_copy",
             max_tokens=4000,
+            # A deliberately chosen OpenRouter model falling back to the
+            # pipeline's Gemini fallback chain would swap providers (and
+            # need a Google key that may not exist) with no sign why the
+            # product page suddenly reads differently.
+            fallbacks=[] if is_openrouter_model(chosen) else None,
         )
     except Exception as e:  # noqa: BLE001 - one product's copy is not the run
         log.warning("copy generation failed for %s: %s", source.source_url, e)

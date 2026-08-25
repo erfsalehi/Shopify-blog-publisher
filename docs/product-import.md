@@ -104,6 +104,9 @@ In order of preference, per `dashboard/manufacturer.py`:
 3. **OpenGraph** tags.
 4. **The page markup** — the `<h1>`, the spec `<table>`, the `<img>` tags, and
    the `<a href="…pdf">` links.
+5. **Firecrawl**, only when a collection page comes back with nothing to
+   parse and `FIRECRAWL_API_KEY` is set — a real browser renders the page's
+   JavaScript, and steps 2-4 run again against what that produces.
 
 Each step fills what the ones before it didn't, except documents and specs,
 which are always additive — a warranty PDF found in the markup joins the spec
@@ -168,7 +171,7 @@ Settings → **Product import**:
 
 | Setting | Default | Why you'd change it |
 |---|---|---|
-| Model that writes product copy | `gemini-2.5-flash` | A stronger model writes better product pages; a rate-limited one falls back to plain copy |
+| Model that writes product copy | `~deepseek/deepseek-v4-flash-latest` | A stronger model writes better product pages; a rate-limited one falls back to plain copy. A name containing `/` routes through OpenRouter (needs `OPENROUTER_API_KEY` — check the exact id at [openrouter.ai/models](https://openrouter.ai/models), some carry a leading `~`); anything else routes through Google AI Studio (needs `GOOGLE_API_KEY`) |
 | Most products from one collection | 60 | A ceiling in case the URL is the whole catalogue |
 | Products handled per pass | 3 | Raise it when running locally — the 60-second function is what keeps it low |
 | Most images per product | 8 | |
@@ -180,8 +183,10 @@ Settings → **Product import**:
 
 **"No products found."** The collection page loaded but nothing on it looked
 like a product link. Usually a site that renders its grid in JavaScript —
-there's nothing in the HTML to read. Try the manufacturer's sitemap or a
-different collection URL.
+there's nothing in the HTML to read. If `FIRECRAWL_API_KEY` is set, a
+JavaScript-rendered fetch of the same URL is tried automatically before this
+error is raised; without it, try the manufacturer's sitemap or a different
+collection URL.
 
 **Products created with three-sentence descriptions.** The source published
 little and linked no documents. Check the dry run's extraction: if `specs` is

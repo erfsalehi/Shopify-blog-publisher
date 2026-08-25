@@ -69,6 +69,8 @@ USER_AGENT = (
 #: Pages of a paginated collection to walk in one discovery pass.
 MAX_COLLECTION_PAGES = 10
 
+FIRECRAWL_BASE_URL = "https://api.firecrawl.dev/v2"
+
 #: File extensions treated as product documentation.
 DOC_EXTENSIONS = (".pdf", ".doc", ".docx", ".xls", ".xlsx")
 
@@ -694,6 +696,35 @@ def discover_collection(
                     out.product_urls.extend(fresh)
                 out.product_urls = _dedupe(out.product_urls)[:max_products]
 
+        render_note = ""
+        if not out.product_urls:
+            # Either the plain GET never landed, or it landed and named no
+            # products — the second is the signature of a grid JavaScript
+            # fills in after load. One Firecrawl render is worth trying
+            # before giving up either way.
+            rendered_html, render_error = _firecrawl_scrape(f"{base}{path}")
+            if rendered_html:
+                out.pages += 1
+                soup = soup_of(rendered_html)
+                if not out.title:
+                    out.title, out.description = _collection_meta(soup)
+                found = _ld_collection_urls(soup, base) or _product_links(soup, base)
+                out.product_urls = _dedupe(found)[:max_products]
+                if out.product_urls:
+                    page_error = None
+            elif render_error and not render_error.startswith("Firecrawl isn't configured"):
+                # Recorded as a note, never folded into `page_error`: whether
+                # the page itself was readable is what picks the message
+                # below, and a failed *render* says nothing about that. Losing
+                # that distinction turned "nothing here looked like a product"
+                # into "couldn't reach the site, check your firewall" for a
+                # page that had in fact loaded perfectly — which is the exact
+                # wrong-diagnosis trap the next test down already documents.
+                render_note = (
+                    f" Rendering it with JavaScript was tried too, and failed: "
+                    f"{render_error}"
+                )
+
         if not out.product_urls:
             if page_error:
                 # Never reached the page at all. Saying "no products here"
@@ -704,12 +735,12 @@ def discover_collection(
                     "imported because nothing was fetched: check the URL "
                     "opens in a browser, and that this machine can reach the "
                     "site (a proxy, a firewall, or the site blocking "
-                    "non-browser requests would all look like this)."
+                    f"non-browser requests would all look like this).{render_note}"
                 )
             raise FetchError(
                 f"No products found at {out.url}. The page loaded, but nothing "
                 "on it looked like a product link — if the collection renders "
-                "its grid with JavaScript, this can't see it."
+                f"its grid with JavaScript, this can't see it.{render_note}"
             )
         out.product_urls = out.product_urls[:max_products]
         out.seeds = {u: s for u, s in out.seeds.items() if u in set(out.product_urls)}
@@ -744,6 +775,48 @@ def _fetch_html(
 
 def _get_html(http: httpx.Client, url: str, params: dict | None = None) -> str | None:
     return _fetch_html(http, url, params)[0]
+
+
+def _firecrawl_scrape(url: str) -> tuple[str | None, str | None]:
+    """`url`, rendered by Firecrawl's own browser, or None and why.
+
+    The fallback for a collection whose plain GET comes back with nothing to
+    parse — usually a grid a theme fills in with JavaScript after load, which
+    `httpx` can never see. Firecrawl runs a real browser against the page and
+    hands back the HTML that produces, so it's tried only once a direct fetch
+    has already failed to find products, not on every request.
+    """
+    from dashboard.config import get_settings
+
+    settings = get_settings()
+    if not settings.has_firecrawl:
+        return None, "Firecrawl isn't configured (set FIRECRAWL_API_KEY)."
+    try:
+        resp = httpx.post(
+            f"{FIRECRAWL_BASE_URL}/scrape",
+            headers={"Authorization": f"Bearer {settings.firecrawl_api_key}"},
+            json={"url": url, "formats": ["html"], "waitFor": 2000},
+            # Deliberately well under the 60s a Vercel function gets: this
+            # call is one step of a discovery pass, not the whole budget, and
+            # a render that hasn't answered in 25s is not going to rescue the
+            # pass — it's going to take the function down with it and lose the
+            # run's progress. Failing here is recoverable; being killed isn't.
+            timeout=25.0,
+        )
+    except Exception as e:  # noqa: BLE001 - report it, don't crash the import
+        return None, f"Firecrawl request failed: {type(e).__name__}: {e}"[:300]
+    if resp.status_code != 200:
+        return None, f"Firecrawl answered HTTP {resp.status_code}"
+    try:
+        payload = resp.json()
+    except ValueError:
+        return None, "Firecrawl returned a non-JSON response"
+    if not payload.get("success"):
+        return None, str(payload.get("error") or "Firecrawl reported failure")[:300]
+    html = ((payload.get("data") or {}).get("html")) or ""
+    if not html:
+        return None, "Firecrawl returned no HTML"
+    return html, None
 
 
 # ── One product page ─────────────────────────────────────────────────

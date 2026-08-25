@@ -30,6 +30,26 @@ def _isolated_settings(monkeypatch, tmp_path):
     monkeypatch.setenv("SLACK_WEBHOOK_URL", "")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
 
+    # The dashboard has its own Settings class reading the same .env, and it
+    # holds credentials for services that cost money and reach the network
+    # (Firecrawl, Windsor). Neutralised here rather than in `dashboard_db`
+    # because that fixture isn't autouse: a test that touches dashboard code
+    # without asking for a database still gets a live key otherwise, which is
+    # how the product-import tests ended up making real Firecrawl calls.
+    # Imported defensively so the pipeline suite still runs without the
+    # [dashboard] extra installed (see `dashboard_db` below).
+    try:
+        import dashboard.config as dash_config
+    except ImportError:
+        dash_config = None
+    else:
+        monkeypatch.setitem(
+            dash_config.DashboardSettings.model_config, "env_file", None
+        )
+        monkeypatch.setenv("FIRECRAWL_API_KEY", "")
+        monkeypatch.setenv("WINDSOR_API_KEY", "")
+        dash_config.get_settings.cache_clear()
+
     # Reset cached singletons so the new env is picked up.
     import blog_pipeline.db.session as session
 
@@ -38,6 +58,8 @@ def _isolated_settings(monkeypatch, tmp_path):
     session._SessionLocal = None
     yield
     config.get_settings.cache_clear()
+    if dash_config is not None:
+        dash_config.get_settings.cache_clear()
     session._engine = None
     session._SessionLocal = None
 

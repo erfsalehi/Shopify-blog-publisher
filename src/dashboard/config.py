@@ -176,6 +176,18 @@ class DashboardSettings(BaseSettings):
     def has_windsor(self) -> bool:
         return bool(self.windsor_api_key.strip())
 
+    # Renders a collection page with a real browser before handing back its
+    # HTML — the product importer's fallback for a manufacturer whose grid is
+    # filled in by JavaScript, which a plain GET can never see. Key from
+    # https://www.firecrawl.dev/app/api-keys. Optional: the importer's plain
+    # fetch is tried first regardless, and this only fires when that comes
+    # back with nothing to parse.
+    firecrawl_api_key: str = Field("", validation_alias="FIRECRAWL_API_KEY")
+
+    @property
+    def has_firecrawl(self) -> bool:
+        return bool(self.firecrawl_api_key.strip())
+
 
 @lru_cache
 def get_settings() -> DashboardSettings:

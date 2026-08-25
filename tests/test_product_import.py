@@ -373,6 +373,79 @@ def test_a_site_that_cannot_be_reached_says_so_rather_than_blaming_its_markup(
     manufacturer_reset()
 
 
+def test_firecrawl_finds_the_products_a_javascript_grid_hid(fake_site, monkeypatch):
+    """A collection whose grid only exists after JavaScript runs.
+
+    The plain fetch sees an empty shell, so the render is what the import
+    actually has to run on.
+    """
+    def shell(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="")
+        if request.url.path.endswith("products.json"):
+            return httpx.Response(404)
+        return httpx.Response(200, html="<html><body><div id='grid'></div></body></html>")
+
+    transport = httpx.MockTransport(shell)
+    monkeypatch.setattr(
+        manufacturer, "client",
+        lambda: httpx.Client(transport=transport, follow_redirects=True),
+    )
+    monkeypatch.setattr(
+        manufacturer, "_firecrawl_scrape",
+        lambda url: (
+            "<html><body><h1>3D Bars</h1>"
+            "<a href='/products/3d-bars-white'>White</a>"
+            "<a href='/products/3d-bars-grey'>Grey</a>"
+            "</body></html>",
+            None,
+        ),
+    )
+    manufacturer_reset()
+    found = manufacturer.discover_collection("https://js.test/collections/x")
+    assert found.product_urls == [
+        "https://js.test/products/3d-bars-white",
+        "https://js.test/products/3d-bars-grey",
+    ]
+    manufacturer_reset()
+
+
+def test_a_failed_render_does_not_turn_an_empty_page_into_an_unreachable_one(
+    fake_site, monkeypatch
+):
+    """A page that loaded and had no products is still that, render or no.
+
+    Regression: folding the render's failure into the page's own error flipped
+    "nothing here looked like a product" into "couldn't reach the site, check
+    your firewall" — for a page that had loaded perfectly. The render's reason
+    is still worth showing, just not at the cost of the diagnosis.
+    """
+    def empty(request):
+        if request.url.path == "/robots.txt":
+            return httpx.Response(200, text="")
+        if request.url.path.endswith("products.json"):
+            return httpx.Response(404)
+        return httpx.Response(200, html="<html><body><h1>Nothing here</h1></body></html>")
+
+    transport = httpx.MockTransport(empty)
+    monkeypatch.setattr(
+        manufacturer, "client",
+        lambda: httpx.Client(transport=transport, follow_redirects=True),
+    )
+    monkeypatch.setattr(
+        manufacturer, "_firecrawl_scrape",
+        lambda url: (None, "Firecrawl answered HTTP 402"),
+    )
+    manufacturer_reset()
+    with pytest.raises(manufacturer.FetchError) as caught:
+        manufacturer.discover_collection("https://empty.test/collections/x")
+    message = str(caught.value)
+    assert "No products found" in message
+    assert "Couldn't read" not in message
+    assert "HTTP 402" in message  # the render's reason survives as a note
+    manufacturer_reset()
+
+
 def test_robots_disallow_stops_the_import_rather_than_being_ignored(monkeypatch):
     def blocked(request):
         if request.url.path == "/robots.txt":

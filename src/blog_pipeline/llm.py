@@ -20,7 +20,7 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
-from blog_pipeline.config import GOOGLE_BASE_URL, get_settings
+from blog_pipeline.config import GOOGLE_BASE_URL, OPENROUTER_BASE_URL, get_settings
 
 # USD per 1M tokens (input, output). Empty on the free tier — AI Studio's
 # free models are gated by rate limits, not per-token billing.
@@ -37,6 +37,25 @@ _RETRYABLE_MARKERS = (
 )
 
 
+def is_openrouter_model(model: str) -> bool:
+    """Whether `model` names an OpenRouter model rather than a Google one.
+
+    OpenRouter names every model "<provider>/<model>" (deepseek/deepseek-v4-
+    flash-latest, openai/gpt-5, ...); nothing in Google AI Studio's own
+    catalog contains a slash. That's enough to route on without a second
+    setting that could drift out of sync with the model string itself.
+    """
+    return "/" in (model or "")
+
+
+def has_access_for(model: str) -> bool:
+    """Whether the key `model`'s provider needs is configured."""
+    settings = get_settings()
+    if is_openrouter_model(model):
+        return bool(settings.openrouter_api_key)
+    return bool(settings.google_api_key)
+
+
 def make_llm(
     model: str,
     temperature: float = 0.7,
@@ -44,14 +63,29 @@ def make_llm(
     max_tokens: int | None = None,
     **kwargs,
 ) -> ChatOpenAI:
-    """Build a ChatOpenAI client routed through Google AI Studio for `model`."""
+    """Build a ChatOpenAI client for `model`, routed to whichever gateway its
+    name belongs to (see `is_openrouter_model`)."""
     settings = get_settings()
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    if is_openrouter_model(model):
+        if not settings.openrouter_api_key:
+            raise RuntimeError(
+                f"{model!r} is an OpenRouter model but OPENROUTER_API_KEY is "
+                "not set."
+            )
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            api_key=settings.openrouter_api_key,
+            base_url=OPENROUTER_BASE_URL,
+            max_retries=max_retries,
+            **kwargs,
+        )
     if not settings.google_api_key:
         raise RuntimeError(
             "GOOGLE_API_KEY is not set — required for all LLM stages."
         )
-    if max_tokens is not None:
-        kwargs["max_tokens"] = max_tokens
     return ChatOpenAI(
         model=model,
         temperature=temperature,
