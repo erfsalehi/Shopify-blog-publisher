@@ -132,6 +132,38 @@
   {% endif %}
 </section>
 
+<!-- ── What is waiting to be written ──────────────────────────── -->
+{# Shown only while a draft, because the apply form below replaces it the
+   moment the experiment starts. Without this an experiment built from an
+   advisor suggestion asks the owner to freeze a baseline before they can see
+   what the test would actually write — approving a change sight-unseen. #}
+{% if experiment.status == 'draft' and treatment | selectattr('proposed_value') | first %}
+<section class="panel">
+  <h2>Proposed treatment</h2>
+  <p class="muted small">
+    Suggested by the advisor and not yet written. Nothing reaches Shopify
+    until the baseline is frozen and you apply it below — that order is what
+    makes the result mean anything, since applying first would leave the
+    "before" measuring a page that had already changed.
+  </p>
+  <table>
+    <thead><tr><th>Product</th><th>Proposed {{ experiment.variable }}</th></tr></thead>
+    <tbody>
+      {% for m in treatment %}
+      {% set p = products.get(m.product_gid) %}
+      <tr>
+        <td class="page-cell">
+          {{ p.title if p else m.product_gid }}
+          <div class="muted small">{{ p.handle if p else '' }}</div>
+        </td>
+        <td>{{ m.proposed_value or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
 <!-- ── Apply ──────────────────────────────────────────────────── -->
 {% if experiment.status == 'running' and experiment.variable in ('title', 'description') %}
 <section class="panel">
@@ -155,8 +187,11 @@
             {{ p.title if p else m.product_gid }}
             <div class="muted small">{{ p.handle if p else '' }}</div>
           </td>
+          {# `proposed_value` only fills the box; `after_value` wins once a
+             write has happened, so the field always shows what is live rather
+             than what was suggested. #}
           <td><input type="text" name="value-{{ m.product_gid }}" class="wide"
-                     value="{{ m.after_value or '' }}"></td>
+                     value="{{ m.after_value or m.proposed_value or '' }}"></td>
           <td class="muted small nowrap">
             {% if m.applied_at %}{{ m.applied_at | when }}
             {% elif m.apply_error %}<span class="bad">failed</span>

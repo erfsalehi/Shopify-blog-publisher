@@ -284,9 +284,29 @@ ul.tight li { margin: 2px 0; }
 .advisor-body p { margin: 0 0 8px; }
 .advisor-body ul { margin: 4px 0 10px; padding-left: 20px; }
 .advisor-body li { margin: 3px 0; }
-.advisor-table td { vertical-align: middle; }
-.advisor-buttons { display: flex; gap: 6px; }
+.advisor-table td { vertical-align: top; }
+.advisor-buttons { display: flex; gap: 6px; align-items: flex-start; }
 .advisor-buttons form { display: inline; }
+/* The Experiment link stands in for a button once one has been created, so
+   it has to match the buttons beside it rather than read as body copy. */
+.advisor-buttons a.small-btn {
+  display: inline-block; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--panel); color: var(--ink); text-decoration: none;
+  line-height: 1.5;
+}
+.advisor-buttons a.small-btn:hover { border-color: var(--accent); }
+
+/* What a suggestion would actually write. Indented under the advice so it
+   reads as evidence for the button rather than as a second suggestion. */
+.advisor-payload {
+  margin: 8px 0 2px; font-size: 12.5px; width: 100%;
+  border-left: 2px solid var(--line); padding-left: 10px;
+}
+.advisor-payload th {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.03em;
+  color: var(--muted); font-weight: 500; text-align: left; padding: 2px 8px 2px 0;
+}
+.advisor-payload td { padding: 3px 8px 3px 0; vertical-align: top; }
 .warn-box { border-color: var(--warn); color: var(--warn); }
 .advisor-history { margin-top: 12px; }
 .advisor-history summary { cursor: pointer; padding: 4px 0; }

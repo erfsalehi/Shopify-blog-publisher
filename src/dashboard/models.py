@@ -329,6 +329,19 @@ class AdvisorAction(Base):
     suggestions were *done* and which were *dismissed* lets it say "you
     changed those titles three weeks ago — here is what CTR did since", and
     stop repeating advice that was already rejected.
+
+    `kind` and `payload_json` are what let a suggestion carry a button rather
+    than only prose. They borrow `StepKind`'s vocabulary deliberately: the
+    strategy planner already solved "a plan that presents performable and
+    trackable items identically is a plan whose progress bar lies", and a
+    second, parallel vocabulary for the same three writers would drift.
+
+    A payload does **not** widen what the model can reach. It still gets no
+    tools and cannot fetch; it proposes a handle and a string, and
+    `advisor._valid_action` resolves that handle against the catalogue before
+    a button is ever rendered. A suggestion naming a product that does not
+    exist is downgraded to `manual`, exactly as `strategy._valid_step`
+    downgrades an executable step with an empty payload.
     """
 
     __tablename__ = "advisor_action"
@@ -342,6 +355,45 @@ class AdvisorAction(Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    #: One of `StepKind`. Anything this app can't perform stays `manual`.
+    kind: Mapped[str] = mapped_column(String(30), default="manual", index=True)
+    #: Validated, resolved arguments — never the model's raw output. See
+    #: `advisor._valid_action` for what "resolved" means per kind.
+    payload_json: Mapped[str] = mapped_column(Text, default="{}")
+
+    # What happened when the owner pressed the button. Kept separate from
+    # `status` because they answer different questions: `status` is the
+    # owner's verdict on the advice, `run_status` is the machine's report on
+    # the write. A run that failed leaves the suggestion open, not done.
+    #: None (never run) | done | failed
+    run_status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    run_result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: Set when the owner chose to measure this suggestion rather than just
+    #: apply it. The write then happens on the experiment page, after a
+    #: control group exists and a baseline is frozen.
+    experiment_id: Mapped[int | None] = mapped_column(
+        Integer, index=True, nullable=True
+    )
+
+    @property
+    def payload(self) -> dict:
+        try:
+            loaded = json.loads(self.payload_json or "{}")
+        except ValueError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+
+    @property
+    def executable(self) -> bool:
+        return self.kind in EXECUTABLE_KINDS
+
+    @property
+    def products(self) -> list[dict]:
+        """The resolved products this suggestion would write to, if any."""
+        found = self.payload.get("products")
+        return found if isinstance(found, list) else []
 
 
 class ShopifyProduct(Base):
@@ -690,6 +742,13 @@ class ExperimentProduct(Base):
     baseline_frozen_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
     )
+
+    #: What the advisor suggested writing here, if this cohort came from a
+    #: suggestion. Distinct from `after_value` on purpose: this is a proposal
+    #: that pre-fills the apply form, that one is the audit record of what was
+    #: actually written. Collapsing them would make an unapplied experiment
+    #: indistinguishable from an applied one in the only column that proves it.
+    proposed_value: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # What the treatment actually changed, kept so a result can be explained
     # and so the change can be reverted by hand.

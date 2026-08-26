@@ -821,6 +821,38 @@ Generated on demand and by a weekly job that only refreshes scopes whose note
 is over a week old. Never on page load: the free tier is rate-limited, and
 advice that changes every refresh is advice nobody trusts.
 
+### Suggestions that carry a button
+
+A suggestion to rewrite product SEO can be applied from the panel instead of
+retyped into Shopify admin. Two buttons, and the difference matters:
+
+- **Apply** writes the new title or description to every product in the
+  suggestion, through the same `write_seo` path the Products page uses. Each
+  product is attempted independently, and the receipt — what was written,
+  what failed — stays on the row.
+- **Test it** writes nothing. It builds a draft experiment with the
+  suggestion's products as the treatment cohort and an impression-matched
+  control group, and the write happens there after you've reviewed the
+  controls and frozen a baseline. That order is the whole point: applying
+  first would leave the "before" measuring a page that had already changed.
+
+Everything else stays prose with *Done* and *Dismiss*, because this app has no
+write access for it. Suggestions about Ads, prices or Google Business Profile
+never get a button, and that visible absence is deliberate — the same line
+`StepKind` draws for strategy steps.
+
+**A button is a promise.** The model still gets no tools and cannot fetch; it
+proposes a handle and a string, and `advisor._valid_action` resolves that
+handle against the catalogue before anything is rendered. A handle that
+doesn't exist, a title long enough to mean the field was misread, a product
+with nothing to write — each downgrades the suggestion to `manual`, keeping
+its text and losing its button. So a rendered button cannot fail for a reason
+the app already knew.
+
+This is why the products brief carries a `handle` column: without it the model
+can only name products by a title truncated to 50 characters, which is not
+something a write should be aimed with.
+
 ### Which model actually works
 
 Being listed in `GET /v1beta/models` is not entitlement. Measured against this

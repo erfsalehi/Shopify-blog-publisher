@@ -143,12 +143,19 @@ def _products(today: date) -> str:
         f"{data['with_traffic']:,} products had search impressions in the last "
         "28 days.",
         "",
+        # The handle is here so a suggestion can name a product precisely
+        # enough to carry a button. `advisor._resolve_products` accepts only
+        # handles that resolve against this same table, so a suggestion the
+        # model invents a handle for degrades to prose rather than pointing a
+        # write at the wrong product.
         "BEST PERFORMING PRODUCTS:",
         _table(
-            ["product", "price", "clicks", "change", "impressions", "ctr", "position"],
+            ["product", "handle", "price", "clicks", "change", "impressions",
+             "ctr", "position"],
             [
                 [
                     r["product"].title[:50],
+                    r["product"].handle,
                     f"${r['product'].price_min:.2f}" if r["product"].price_min else "call",
                     r["current"].clicks,
                     f"{r['clicks_delta']:+d}",
@@ -169,8 +176,9 @@ def _products(today: date) -> str:
             "",
             "PRODUCTS LOSING THE MOST CLICKS:",
             _table(
-                ["product", "clicks now", "change", "impressions"],
-                [[r["product"].title[:50], r["current"].clicks,
+                ["product", "handle", "clicks now", "change", "impressions"],
+                [[r["product"].title[:50], r["product"].handle,
+                  r["current"].clicks,
                   f"{r['clicks_delta']:+d}", r["current"].impressions]
                  for r in losing],
             ),

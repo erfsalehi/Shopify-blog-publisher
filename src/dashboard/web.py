@@ -45,8 +45,8 @@ from dashboard.jobs.runner import (
     run_job,
 )
 from dashboard.models import (
-    AlertRule, Competitor, CompetitorMatch, CompetitorPost, Experiment,
-    ExperimentProduct, MatchStatus, ShopifyProduct, Strategy,
+    AdvisorAction, AlertRule, Competitor, CompetitorMatch, CompetitorPost,
+    Experiment, ExperimentProduct, MatchStatus, ShopifyProduct, Strategy,
     StrategyCheckpoint, StrategyStep,
 )
 from dashboard.db import get_session
@@ -999,6 +999,39 @@ def create_app() -> FastAPI:
         except ValueError:
             pass
         return RedirectResponse(back or "/", status_code=303)
+
+    @app.post("/advisor/action/{action_id}/run")
+    def run_action_route(action_id: int, back: str = Form("/")):
+        """Apply a suggestion to live products. Writes to Shopify.
+
+        Synchronous like the strategy step it borrows from: a handful of
+        `productUpdate` calls, and the owner is looking at the page waiting to
+        find out. A failure lands on the row, so the redirect shows it.
+        """
+        try:
+            advisor.run_action(action_id)
+        except advisor.ActionError as exc:
+            with get_session() as session:
+                row = session.get(AdvisorAction, action_id)
+                if row is not None:
+                    row.run_status = "failed"
+                    row.run_result = str(exc)[:4000]
+        except KeyError:
+            return JSONResponse({"error": "unknown action"}, status_code=404)
+        return RedirectResponse(back or "/", status_code=303)
+
+    @app.post("/advisor/action/{action_id}/experiment")
+    def experiment_from_action(action_id: int, back: str = Form("/")):
+        """Build a draft experiment around a suggestion. Writes nothing yet."""
+        try:
+            experiment_id = advisor.make_experiment(action_id)
+        except advisor.ActionError as exc:
+            return RedirectResponse(
+                f"/experiments?error={quote(str(exc)[:300])}", status_code=303
+            )
+        except KeyError:
+            return JSONResponse({"error": "unknown action"}, status_code=404)
+        return RedirectResponse(f"/experiments/{experiment_id}", status_code=303)
 
     # ── Experiments ─────────────────────────────────────────────────
     @app.get("/experiments", response_class=HTMLResponse)

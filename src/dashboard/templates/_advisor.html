@@ -54,8 +54,60 @@
     <tbody>
       {% for action in advisor_open %}
       <tr>
-        <td>{{ action.text }}</td>
+        <td>
+          {{ action.text }}
+
+          {# The proposed change, shown in full. A button that writes to live
+             products without first showing exactly what it will write is a
+             button nobody should press. #}
+          {% if action.products %}
+          <table class="advisor-payload">
+            <thead>
+              <tr><th>Product</th><th>Would become</th></tr>
+            </thead>
+            <tbody>
+              {% for item in action.products %}
+              <tr>
+                <td class="page-cell">
+                  {{ item.title }}
+                  <div class="muted small">{{ item.handle }}</div>
+                </td>
+                <td>
+                  {% if item.seo_title %}
+                  <div><span class="muted small">title</span> {{ item.seo_title }}</div>
+                  {% endif %}
+                  {% if item.seo_description %}
+                  <div class="muted small">{{ item.seo_description }}</div>
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+          {% endif %}
+
+          {% if action.run_result %}
+          <div class="note-box {{ 'bad-box' if action.run_status == 'failed' else '' }}">
+            <pre class="advisor-context">{{ action.run_result }}</pre>
+          </div>
+          {% endif %}
+        </td>
         <td class="nowrap advisor-buttons">
+          {% if action.executable and action.products %}
+          <form method="post" action="/advisor/action/{{ action.id }}/run"
+                onsubmit="return confirm('Write these values to live products on drflooring.ca?');">
+            <input type="hidden" name="back" value="{{ advisor_back }}">
+            <button type="submit" class="small-btn primary">Apply</button>
+          </form>
+          {% if action.experiment_id %}
+          <a class="small-btn" href="/experiments/{{ action.experiment_id }}">Experiment →</a>
+          {% else %}
+          <form method="post" action="/advisor/action/{{ action.id }}/experiment">
+            <input type="hidden" name="back" value="{{ advisor_back }}">
+            <button type="submit" class="small-btn">Test it</button>
+          </form>
+          {% endif %}
+          {% endif %}
           <form method="post" action="/advisor/action/{{ action.id }}">
             <input type="hidden" name="status" value="done">
             <input type="hidden" name="back" value="{{ advisor_back }}">
@@ -76,6 +128,15 @@
     which suggestions you did and which you rejected, so it can follow up on
     the first and stop repeating the second.
   </p>
+  <p class="muted small">
+    <strong>Apply</strong> writes the change to Shopify straight away.
+    <strong>Test it</strong> writes nothing — it builds an experiment with a
+    matched control group, and the change is applied there once you've
+    reviewed the controls and frozen a baseline, which is the only order that
+    can tell you afterwards whether it worked. Suggestions without buttons are
+    ones this app has no write access for; do those yourself and mark them
+    done.
+  </p>
   {% endif %}
 
   {% if advisor_history %}
@@ -86,7 +147,16 @@
         {% for action in advisor_history %}
         <tr>
           <td><span class="pill {{ 'ok' if action.status == 'done' }}">{{ action.status }}</span></td>
-          <td class="muted">{{ action.text }}</td>
+          <td class="muted">
+            {{ action.text }}
+            {# A suggestion the app applied is marked done and moves in here
+               immediately, so this is the only place the receipt for that
+               write survives. Without it, pressing Apply makes the row
+               disappear with no record of what went to Shopify. #}
+            {% if action.run_result %}
+            <pre class="advisor-context">{{ action.run_result }}</pre>
+            {% endif %}
+          </td>
           <td class="nowrap muted small">{{ action.resolved_at | when if action.resolved_at else '' }}</td>
         </tr>
         {% endfor %}
