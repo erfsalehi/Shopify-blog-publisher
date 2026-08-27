@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% block title %}{{ row.title or 'Product' }}{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>{{ row.title or row.source_handle or 'Product' }}</h1>
+  <span class="muted small">
+    <a href="/import/{{ run.id }}">← {{ run.collection_title or 'the run' }}</a>
+  </span>
+</div>
+
+<p class="muted small">
+  <a href="{{ row.source_url }}" target="_blank" rel="noopener noreferrer">source page</a>
+  {% if model %} · written by {{ model }}{% endif %}
+  {% if run.dry_run %} · <strong>dry run — nothing was created</strong>{% endif %}
+  {% if row.admin_url %}
+  · <a href="{{ row.admin_url }}" target="_blank" rel="noopener noreferrer">Shopify admin</a>
+  {% endif %}
+</p>
+
+{% if row.error %}
+<div class="notice bad-box"><strong>Failed.</strong> {{ row.error }}</div>
+{% endif %}
+
+{% if not copy %}
+<div class="notice warn-box">
+  No copy was generated for this product, so there is nothing to preview.
+  {% if row.status == 'pending' %}The run hasn't reached it yet.{% endif %}
+</div>
+{% else %}
+
+<!-- ── The body Shopify would receive ──────────────────────────── -->
+<section class="panel">
+  <h2>Description</h2>
+  <p class="muted small">
+    Not a summary — this is the output of the same
+    <code>render_description()</code> the real create calls, so it is the
+    body that would be sent. Your theme's CSS will style it differently;
+    the words and the structure are what's being reviewed here.
+  </p>
+  <div class="product-preview">{{ body_html | safe }}</div>
+</section>
+
+<!-- ── The fields that don't live in the body ──────────────────── -->
+<section class="panel">
+  <h2>Fields</h2>
+  <table class="kv-table">
+    <tbody>
+      <tr><th>Title</th><td>{{ copy.title }}</td></tr>
+      <tr><th>Product type</th><td>{{ copy.product_type or '—' }}</td></tr>
+      <tr>
+        <th>SEO title</th>
+        <td>
+          {{ copy.seo_title or '—' }}
+          {% if copy.seo_title %}
+          <span class="muted small">({{ copy.seo_title | length }} chars)</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <th>SEO description</th>
+        <td>
+          {{ copy.seo_description or '—' }}
+          {% if copy.seo_description %}
+          <span class="muted small">({{ copy.seo_description | length }} chars)</span>
+          {% endif %}
+        </td>
+      </tr>
+      <tr>
+        <th>Tags</th>
+        <td>
+          {% for tag in tags %}<span class="pill">{{ tag }}</span> {% endfor %}
+          {% if not tags %}—{% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ── What it had to work with ────────────────────────────────── -->
+{# Shown next to the copy on purpose: a thin description is either a thin
+   source or a document that failed to read, and those have different
+   fixes. Counts alone can't tell them apart. #}
+<section class="panel">
+  <h2>What it was given</h2>
+
+  <h3 class="muted small">Documents read ({{ docs | length }})</h3>
+  {% if docs %}
+  <table>
+    <thead><tr><th>Document</th><th>Kind</th><th class="num">Pages</th><th>Text</th></tr></thead>
+    <tbody>
+      {% for doc in docs %}
+      <tr>
+        <td class="page-cell">
+          <a href="{{ doc.url }}" target="_blank" rel="noopener noreferrer">
+            {{ doc.title or doc.url }}
+          </a>
+        </td>
+        <td class="muted small">{{ doc.kind }}</td>
+        <td class="num">{{ doc.pages or '—' }}</td>
+        <td class="small">
+          {% if doc.error %}<span class="bad">{{ doc.error }}</span>
+          {% elif doc.text %}{{ doc.text | length }} chars
+          {% else %}<span class="muted">nothing read</span>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <p class="muted small">
+    Linked here to the manufacturer because a dry run doesn't upload
+    anything. On a real run these are copied to the store and the Downloads
+    section above links our copies instead — a supplier reorganising their
+    site shouldn't turn every datasheet link into a 404.
+  </p>
+  {% else %}
+  <p class="muted small">None. Any specification below came from the page itself.</p>
+  {% endif %}
+
+  <h3 class="muted small" style="margin-top:16px">
+    Specifications found on the source ({{ specs | length }})
+  </h3>
+  {% if specs %}
+  <table class="kv-table">
+    <tbody>
+      {% for name, value in specs.items() %}
+      <tr><th>{{ name }}</th><td>{{ value }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted small">None found.</p>
+  {% endif %}
+
+  <h3 class="muted small" style="margin-top:16px">Images ({{ images | length }})</h3>
+  {% if images %}
+  <div class="preview-images">
+    {% for image in images %}
+    <img src="{{ image.url if image is mapping else image }}" alt=""
+         loading="lazy" class="import-thumb">
+    {% endfor %}
+  </div>
+  {% else %}
+  <p class="muted small">None found.</p>
+  {% endif %}
+</section>
+
+<details class="advisor-history">
+  <summary class="muted small">The stored copy, as JSON</summary>
+  <pre class="advisor-context">{{ generated | tojson(indent=2) }}</pre>
+</details>
+{% endif %}
+{% endblock %}

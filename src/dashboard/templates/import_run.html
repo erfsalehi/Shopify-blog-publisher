@@ -94,7 +94,15 @@
         {% endif %}
       </td>
       <td>
-        <div>{{ row.title or row.source_handle or row.source_url }}</div>
+        {# The title links to the preview rather than the source: on a dry
+           run this is the only place the generated copy can be read, and
+           counts of images and specs cannot answer "is this good enough to
+           publish". #}
+        <div>
+          <a href="/import/{{ run.id }}/product/{{ row.id }}">
+            {{ row.title or row.source_handle or row.source_url }}
+          </a>
+        </div>
         <a class="muted small truncate" href="{{ row.source_url }}"
            target="_blank" rel="noopener noreferrer">source page</a>
         {% if row.error %}<div class="small bad">{{ row.error }}</div>{% endif %}

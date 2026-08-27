@@ -1047,6 +1047,93 @@ def run_detail(run_id: int) -> dict:
         }
 
 
+def product_preview(run_id: int, product_id: int) -> dict:
+    """One product's generated copy, rendered the way Shopify would get it.
+
+    The point of a dry run is to answer "is this good enough to publish",
+    and counts of images and specs cannot answer it. This reads back what
+    `write_copy` already produced — a dry run does the full scrape, document
+    read and model call, and only stops short of the create — and puts it
+    through the same `render_description` the real run uses, so what's on
+    screen is the body that would be sent, not a summary of it.
+
+    Two things are deliberately honest about being a preview:
+
+    **Downloads are absent.** A dry run never uploads documents, so there
+    are no store URLs to link, and `render_downloads` drops a document
+    rather than linking the manufacturer's copy — a broken promise of a
+    download being worse than no download. The documents that *were* read
+    are listed separately, so a thin description that's thin because a PDF
+    failed can be told from one that's thin because the source said little.
+
+    **Related products are absent** for the same reason: the cross-link pass
+    runs after every product in the collection exists.
+    """
+    from dashboard.manufacturer import SourceDoc
+
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        if row is None or row.run_id != run_id:
+            raise ImportRunError(f"No product {product_id} in run {run_id}.")
+        run = session.get(ImportRun, run_id)
+        if run is None:
+            raise ImportRunError(f"No import run {run_id}.")
+        session.expunge(row)
+        session.expunge(run)
+
+    generated, extracted = row.generated, row.extracted
+    docs = [
+        SourceDoc(
+            url=str(d.get("url") or ""),
+            title=d.get("title"),
+            kind=str(d.get("kind") or "other"),
+            pages=d.get("pages"),
+            text=d.get("text"),
+            error=d.get("error"),
+        )
+        for d in (extracted.get("docs") or [])
+        if isinstance(d, dict) and d.get("url")
+    ]
+
+    body_html = ""
+    copy = None
+    if generated:
+        try:
+            copy = product_copy.ProductCopy.model_validate(
+                {k: v for k, v in generated.items() if k != "model"}
+            )
+        except Exception as exc:  # noqa: BLE001 - a preview must never 500
+            log.warning("preview: stored copy for %s is unreadable (%s)",
+                        product_id, exc)
+        else:
+            body_html = product_copy.render_description(
+                copy,
+                docs=docs,
+                doc_urls={},
+                source_url=row.source_url,
+                locale=product_copy.locale_text(),
+            )
+
+    tags = list(copy.tags) if copy else list(generated.get("tags") or [])
+    source_tag = run.options.get("source_tag")
+    if source_tag:
+        tags.append(source_tag)
+
+    return {
+        "run": run,
+        "row": row,
+        "copy": copy,
+        "generated": generated,
+        "extracted": extracted,
+        "body_html": body_html,
+        "tags": product_copy.clean_tags(tags),
+        "docs": docs,
+        "images": extracted.get("images") or [],
+        "specs": extracted.get("specs") or {},
+        "model": generated.get("model"),
+    }
+
+
 def stop_run(run_id: int) -> None:
     """Stop a run where it stands. What it already created stays created.
 

@@ -492,6 +492,22 @@ def create_app() -> FastAPI:
                                     status_code=303)
         return render(request, "import_run.html", nav="import", **detail)
 
+    @app.get("/import/{run_id}/product/{product_id}", response_class=HTMLResponse)
+    def import_product_page(request: Request, run_id: int, product_id: int):
+        """What this product's copy would look like in Shopify.
+
+        The review surface a dry run needs: the same body `render_description`
+        builds for the real create, not a summary of it.
+        """
+        try:
+            detail = product_import.product_preview(run_id, product_id)
+        except product_import.ImportRunError:
+            return RedirectResponse(
+                f"/import/{run_id}?error=" + quote("That product is not in this run."),
+                status_code=303,
+            )
+        return render(request, "import_product.html", nav="import", **detail)
+
     @app.post("/import/{run_id}/advance")
     def advance_import(run_id: int):
         """Do one pass of work and report where the run got to.

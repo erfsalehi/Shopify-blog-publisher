@@ -179,6 +179,37 @@ Settings → **Product import**:
 | Status new products are created with | `DRAFT` | `ACTIVE` publishes immediately, mistakes included |
 | Tag added to every imported product | `imported` | How you find everything one import created, later |
 
+## Reading a dry run before you commit to it
+
+A dry run does the whole expensive path — scrape the page, download and read
+the documents, call the model — and stops short of the create. All of that
+copy is kept, so the run is reviewable without re-running anything.
+
+Click a product's title on the run page. The preview shows the body produced
+by the same `render_description()` the real create calls, so what's on
+screen is what would be sent, not a summary of it — description, features,
+specifications, applications and FAQs — plus the SEO title and description
+with their character counts, and the tags including the `imported` one added
+at create time.
+
+Below that is what the model had to work with: which documents were read and
+how much text came out of each, which specifications the source page itself
+carried, and the images found. That pairing is the point. A thin description
+is either a thin source or a PDF that failed to load, and those have
+different fixes; counts alone can't tell them apart.
+
+Two things are absent from a preview and present on a real create, both for
+the same reason — a dry run uploads nothing:
+
+- **Downloads.** With no store URLs to link, `render_downloads` omits a
+  document rather than pointing at the manufacturer's copy. The documents
+  that were read are listed separately instead.
+- **Related products.** Cross-linking runs after every product in the
+  collection exists.
+
+Note that a real run does not reuse a dry run's work — it re-scrapes and
+re-writes from scratch. The preview is where the decision gets made.
+
 ## When it goes wrong
 
 **"No products found."** The collection page loaded but nothing on it looked

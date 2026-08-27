@@ -443,6 +443,39 @@ ul.tight li { margin: 2px 0; }
   border: 1px solid var(--line); background: var(--bg);
 }
 .stage-value { text-transform: capitalize; }
+
+/* ── Dry-run preview ──────────────────────────────────────────────── */
+/* The description as Shopify would receive it. Deliberately given plain,
+   readable defaults rather than an attempt at the storefront's styling:
+   pretending to be the theme would invite judging the design here, and the
+   only thing this page can honestly show is the words and the structure. */
+.product-preview {
+  max-width: 70ch; font-size: 14.5px; line-height: 1.6; color: var(--ink);
+}
+.product-preview h2 {
+  font-size: 15px; margin: 20px 0 6px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+.product-preview p { margin: 0 0 10px; }
+.product-preview ul, .product-preview ol { margin: 6px 0 12px; padding-left: 20px; }
+.product-preview li { margin: 3px 0; }
+.product-preview table { width: 100%; margin: 6px 0 12px; }
+.product-preview th, .product-preview td {
+  text-align: left; padding: 4px 8px 4px 0; border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+.product-preview .product-summary { font-size: 15px; }
+
+/* Label/value pairs — the fields that don't live in the body. */
+.kv-table { width: 100%; }
+.kv-table th {
+  text-align: left; width: 190px; font-weight: 500; color: var(--muted);
+  padding: 5px 12px 5px 0; vertical-align: top; white-space: nowrap;
+}
+.kv-table td { padding: 5px 0; vertical-align: top; }
+
+.preview-images { display: flex; flex-wrap: wrap; gap: 8px; }
+.preview-images .import-thumb { width: 84px; height: 84px; }
 /* The import form is a column of labelled fields, not a dashboard grid. */
 .panel .field { margin-bottom: 18px; }
 .panel .field select { min-width: 320px; }
