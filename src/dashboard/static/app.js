@@ -126,7 +126,14 @@
         .then(function (body) {
           advancing = false;
           if (advanceBtn) { advanceBtn.disabled = false; advanceBtn.textContent = 'Continue now'; }
-          if (body.error) return;
+          // A failed run used to end the loop here and say nothing, which
+          // left the page frozen on whatever stage it was last rendered
+          // with — indistinguishable from an import still working. Reload
+          // instead: the server already renders the failure banner, the
+          // final stage and the log, so there's no second copy of that UI
+          // to keep in step. `active` is false on a failed run, so the
+          // reloaded page doesn't start the loop again.
+          if (body.error) { window.location.reload(); return; }
           setText('.stage-value', body.stage);
           setText('.js-stage-note', body.message || (body.active ? 'working…' : 'finished'));
           if (body.counts) {

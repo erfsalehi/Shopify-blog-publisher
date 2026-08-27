@@ -182,11 +182,26 @@ Settings → **Product import**:
 ## When it goes wrong
 
 **"No products found."** The collection page loaded but nothing on it looked
-like a product link. Usually a site that renders its grid in JavaScript —
-there's nothing in the HTML to read. If `FIRECRAWL_API_KEY` is set, a
-JavaScript-rendered fetch of the same URL is tried automatically before this
-error is raised; without it, try the manufacturer's sitemap or a different
-collection URL.
+like a product link. Products are looked for three ways, best evidence
+first: JSON-LD `ItemList`, then the grid's own markup (`.product-item`,
+`.product-card`, `[data-container="product-grid"]`), then the shape of the
+URL. The middle one is what makes a store that doesn't prefix its product
+URLs work — Magento puts them at the site root, `/3dbbemg510` rather than
+`/products/3dbbemg510`, and no pattern matching a bare slug could avoid also
+matching `/about`. Asking the grid instead means the page has already
+declared what's a product, so the link inside needs no prefix to be trusted.
+
+If all three find nothing and `FIRECRAWL_API_KEY` is set, a
+JavaScript-rendered fetch of the same URL is tried before this error is
+raised; without it, try the manufacturer's sitemap or a different collection
+URL.
+
+**An import that stops one page early.** Paging follows whichever query
+parameter the page's own pagination links use — `page`, or `p` for Magento.
+Guessing this wrong is silent rather than loud, which is why it's read off
+the page rather than assumed: Magento answers `?page=2` with HTTP 200 and
+the *first* page, so a wrong guess looks like a successful fetch naming no
+new products, and a 13-product collection imports 12 and reports success.
 
 **Products created with three-sentence descriptions.** The source published
 little and linked no documents. Check the dry run's extraction: if `specs` is

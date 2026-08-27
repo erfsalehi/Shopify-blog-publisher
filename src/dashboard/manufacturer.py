@@ -42,7 +42,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from html import unescape
-from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -586,6 +586,65 @@ def fetch_shopify_collection(
 _PRODUCT_PATH = re.compile(r"/(products?|shop|item|p|tile|tiles|collections?/[^/]+/products)/[^/]+$", re.I)
 
 
+#: Containers a storefront wraps each product card in. Checked before the
+#: URL pattern below because they carry information the URL doesn't: the
+#: page has already declared "this is a product", so the link inside needs
+#: no prefix to be recognised as one.
+_ITEM_SELECTORS = (
+    ".product-item",        # Magento, and most themes that copied it
+    ".product-card",
+    ".product-tile",
+    "li.item.product",
+    "[data-container='product-grid']",
+)
+
+
+def _grid_product_links(soup: BeautifulSoup, base: str, page_url: str) -> list[str]:
+    """Product URLs taken from the grid's own markup rather than their shape.
+
+    `_product_links` below can only recognise a product by its path, which
+    means a store that doesn't prefix them is invisible to it — Magento puts
+    products at the site root (`/3dbbemg510`), and no pattern that matches
+    that could avoid also matching `/about` and `/contact`.
+
+    The grid answers the question directly. A card in `.product-item` is a
+    product because the page says so, and the link inside it needs no prefix
+    to be trusted. That also keeps the page's own furniture out: a "Download
+    the catalogue" link sitting in the category description is a bare path
+    like the products are, and only its position tells you it isn't one.
+
+    Within a card, the first same-host link that isn't a fragment wins.
+    Wishlist and compare controls are anchors too, but they point at the
+    collection page with a `#` on the end — which, once the fragment is
+    stripped, is the page we're already on.
+    """
+    here = page_url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    urls: list[str] = []
+    for selector in _ITEM_SELECTORS:
+        try:
+            cards = soup.select(selector)
+        except Exception:  # noqa: BLE001 - a bad selector must not kill a run
+            continue
+        for card in cards:
+            for tag in card.find_all("a", href=True):
+                href = tag["href"]
+                if "#" in href:
+                    continue
+                url = absolute(base, href)
+                if not url or not same_host(base, url):
+                    continue
+                clean = url.split("?", 1)[0].split("#", 1)[0]
+                if clean.rstrip("/") == here:
+                    continue
+                urls.append(clean)
+                break
+        if urls:
+            # A page whose cards were found under one selector shouldn't have
+            # a second, looser one bolted on top of the result.
+            break
+    return _dedupe(urls)
+
+
 def _product_links(soup: BeautifulSoup, base: str) -> list[str]:
     urls: list[str] = []
     for tag in soup.find_all("a", href=True):
@@ -596,6 +655,53 @@ def _product_links(soup: BeautifulSoup, base: str) -> list[str]:
         if _PRODUCT_PATH.search(urlparse(clean).path):
             urls.append(clean)
     return _dedupe(urls)
+
+
+def _extract_products(soup: BeautifulSoup, base: str, page_url: str) -> list[str]:
+    """The three ways to name a collection's products, best evidence first.
+
+    Structured data is a statement of fact by the site, the grid is the
+    site's own layout, and the URL pattern is us guessing from a string.
+    Ordered accordingly, and each is tried only when the one above found
+    nothing — a page with good JSON-LD shouldn't also get a regex opinion.
+    """
+    return (
+        _ld_collection_urls(soup, base)
+        or _grid_product_links(soup, base, page_url)
+        or _product_links(soup, base)
+    )
+
+
+#: Query parameters storefronts page with, in the order they're guessed.
+#: `page` first because it's the common one; `p` is Magento's.
+_PAGE_PARAMS = ("page", "p")
+
+
+def _page_param(soup: BeautifulSoup, base: str, path: str) -> str:
+    """Which query parameter this site pages with, read off its own links.
+
+    Guessing wrong is quiet rather than loud, which is what makes it worth
+    reading instead: Magento answers `?page=2` with HTTP 200 and the *first*
+    page, so the caller sees a successful fetch naming no new products and
+    concludes the collection ended. A 13-product collection imports 12 and
+    reports success.
+
+    So the pagination links already on the page are asked first, and the
+    guess is only a fallback for a page that has none.
+    """
+    for tag in soup.find_all("a", href=True):
+        href = absolute(base, tag["href"])
+        if not href or not same_host(base, href):
+            continue
+        parsed = urlparse(href)
+        if parsed.path.rstrip("/") != path.rstrip("/"):
+            continue
+        query = parse_qs(parsed.query)
+        for candidate in _PAGE_PARAMS:
+            values = query.get(candidate) or []
+            if any(v.isdigit() and int(v) > 1 for v in values):
+                return candidate
+    return _PAGE_PARAMS[0]
 
 
 def _ld_collection_urls(soup: BeautifulSoup, base: str) -> list[str]:
@@ -674,22 +780,20 @@ def discover_collection(
             soup = soup_of(page_html)
             out.title, out.description = _collection_meta(soup)
             if not out.product_urls:
-                found = _ld_collection_urls(soup, base) or _product_links(soup, base)
+                page_url = f"{base}{path}"
+                found = _extract_products(soup, base, page_url)
                 out.product_urls.extend(found)
                 # Paginate while a page keeps naming products we haven't seen.
+                param = _page_param(soup, base, path)
                 for page in range(2, MAX_COLLECTION_PAGES + 1):
                     if len(out.product_urls) >= max_products:
                         break
                     time.sleep(PAUSE)
-                    more_html = _get_html(http, f"{base}{path}", params={"page": page})
+                    more_html = _get_html(http, page_url, params={param: page})
                     if not more_html:
                         break
                     out.pages += 1
-                    more_soup = soup_of(more_html)
-                    more = (
-                        _ld_collection_urls(more_soup, base)
-                        or _product_links(more_soup, base)
-                    )
+                    more = _extract_products(soup_of(more_html), base, page_url)
                     fresh = [u for u in more if u not in set(out.product_urls)]
                     if not fresh:
                         break
@@ -708,7 +812,7 @@ def discover_collection(
                 soup = soup_of(rendered_html)
                 if not out.title:
                     out.title, out.description = _collection_meta(soup)
-                found = _ld_collection_urls(soup, base) or _product_links(soup, base)
+                found = _extract_products(soup, base, f"{base}{path}")
                 out.product_urls = _dedupe(found)[:max_products]
                 if out.product_urls:
                     page_error = None
