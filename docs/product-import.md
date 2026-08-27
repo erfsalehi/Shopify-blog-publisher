@@ -179,6 +179,44 @@ Settings → **Product import**:
 | Status new products are created with | `DRAFT` | `ACTIVE` publishes immediately, mistakes included |
 | Tag added to every imported product | `imported` | How you find everything one import created, later |
 
+## A range the store already carries
+
+The form asks whether this is a new range or one you already carry, rather
+than inferring it. Inferring gets the common case wrong in the expensive
+direction: a range imported before its collection page was ever built looks
+new from the store's side, and would get a second page.
+
+Either way, nothing is removed:
+
+- A product already in the store is **left exactly as it is** and is still
+  added to the collection — it may exist without ever having been in one.
+- A product the supplier has since dropped **stays**. Their catalogue is a
+  record of what they sell, not of what you do.
+- An existing collection page is **added to, never rewritten**. It may have
+  been edited by hand since it was made.
+
+The run note says which is which — "3 new, 9 already in the store" — because
+"12 products" reads the same whether all twelve are new or none are.
+
+"Build the collection page if there isn't one yet" is separate, for an older
+range whose page you maintain yourself. Untick it and the products are still
+created and tagged, so a smart collection defined on the brand and
+collection tags picks them up anyway.
+
+## Tags
+
+Three tags are written by the app rather than left to the model, and they go
+**first** in the list: the collection name, the brand (vendor) and the
+flooring type, plus the `imported` source tag. Ordering is the point —
+`clean_tags` caps a product at 20 tags and the model routinely proposes
+fifteen, so tags appended after the model's would be the first ones dropped.
+
+That guarantee is what makes a Shopify smart collection defined as *brand +
+collection* work: it needs both tags on every product in the range every
+time, not usually. A product the model happened to tag differently is a
+product missing from its own collection page, with nothing about the page
+saying so.
+
 ## Reading a dry run before you commit to it
 
 A dry run does the whole expensive path — scrape the page, download and read

@@ -108,6 +108,8 @@ def start_run(
     publish_status: str | None = None,
     make_collection: bool = True,
     link_products: bool = True,
+    collection_mode: str = "new",
+    build_page: bool = True,
 ) -> int:
     """Record the request and return its run id. Does no fetching.
 
@@ -122,6 +124,14 @@ def start_run(
         ).upper(),
         "make_collection": bool(make_collection),
         "link_products": bool(link_products),
+        # "new" | "update". Asked rather than inferred: a range imported
+        # before its collection page was ever built looks new from the
+        # store's side, and guessing wrong creates a second page for a range
+        # that already has one.
+        "collection_mode": (
+            "update" if str(collection_mode).lower() == "update" else "new"
+        ),
+        "build_page": bool(build_page),
         "max_images": int(store.get(store.IMPORT_MAX_IMAGES)),
         "max_docs": int(store.get(store.IMPORT_MAX_DOCS)),
         "batch": int(store.get(store.IMPORT_BATCH)),
@@ -788,6 +798,13 @@ def _collection(run_id: int) -> PassResult:
         )
         gids = [r.product_gid for r in rows if r.product_gid]
         names = [r.title or "" for r in rows if r.title]
+        # Counted separately so the note can say what actually happened to
+        # this range rather than only how big it is. "12 products" reads the
+        # same whether all twelve are new or all twelve were already yours.
+        already = sum(
+            1 for r in rows if r.status == ImportProductStatus.skipped.value
+        )
+        fresh = len(gids) - already
 
     body = product_copy.collection_body(title, description, names)
 
@@ -805,12 +822,37 @@ def _collection(run_id: int) -> PassResult:
             _set_stage(session, run, ImportStage.done, "Finished with nothing to show.")
         return PassResult(run_id, ImportStage.done.value, done=True)
 
+    mode = options.get("collection_mode", "new")
+    build_page = options.get("build_page", True)
+    tally = f"{fresh} new, {already} already in the store"
+
     client = _shopify_client()
     existing = client.find_collection(handle)
+    collection_gid = None
     if existing:
+        # Added to, never rewritten. The page may have been edited by hand
+        # since it was made, and a re-import that restored a generated
+        # description would silently throw that away.
         collection_gid = existing["id"]
         client.add_products_to_collection(collection_gid, gids)
-        message = f"Added {len(gids)} products to the existing “{existing['title']}”."
+        message = (
+            f"Added {len(gids)} products to the existing “{existing['title']}” "
+            f"({tally})."
+        )
+        if mode == "new":
+            message += (
+                " Marked as a new range, but a collection with this handle "
+                "already existed, so it was added to rather than replaced."
+            )
+    elif not build_page:
+        # An older range whose page the owner maintains themselves. The
+        # products are created and tagged either way, so a smart collection
+        # built on brand + collection still picks them up.
+        message = (
+            f"No collection page was built ({tally}). The products carry "
+            "their brand and collection tags, so a collection defined on "
+            "those will pick them up."
+        )
     else:
         created = client.create_collection(
             title=title,
@@ -821,7 +863,10 @@ def _collection(run_id: int) -> PassResult:
             product_gids=gids,
         )
         collection_gid = created["id"]
-        message = f"Created the collection “{title}” with {len(gids)} products."
+        message = (
+            f"Created the collection “{title}” with {len(gids)} products "
+            f"({tally})."
+        )
 
     with get_session() as session:
         run = session.get(ImportRun, run_id)

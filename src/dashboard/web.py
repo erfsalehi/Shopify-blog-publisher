@@ -463,6 +463,8 @@ def create_app() -> FastAPI:
         dry_run: str = Form(""),
         make_collection: str = Form(""),
         link_products: str = Form(""),
+        collection_mode: str = Form("new"),
+        build_page: str = Form(""),
     ):
         url = (source_url or "").strip()
         if not url:
@@ -480,6 +482,8 @@ def create_app() -> FastAPI:
             # likely wants. The form posts them as hidden fields set to "1".
             make_collection=bool(make_collection),
             link_products=bool(link_products),
+            collection_mode=collection_mode,
+            build_page=bool(build_page),
         )
         return RedirectResponse(f"/import/{run_id}", status_code=303)
 

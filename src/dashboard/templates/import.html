@@ -77,11 +77,45 @@
       </select>
     </div>
 
+    {# New versus existing changes what happens to a product that is already
+       in the store, so it is asked rather than inferred. Inferring it from
+       whether a collection with this handle exists gets the common case
+       wrong in the expensive direction: a range imported before the
+       collection page was ever built looks new, and would be created twice. #}
+    <div class="field">
+      <label>Is this a new range, or one we already carry?</label>
+      <label class="check">
+        <input type="radio" name="collection_mode" value="new" checked>
+        <span>New — nothing from this range is in the store yet</span>
+      </label>
+      <label class="check">
+        <input type="radio" name="collection_mode" value="update">
+        <span>We already carry it — add whatever is missing</span>
+      </label>
+      <p class="help">
+        Either way nothing is removed. Products already in the store are left
+        exactly as they are and simply added to the collection, and a product
+        the supplier has since dropped stays on the store — their catalogue
+        is not a record of what you sell.
+      </p>
+    </div>
+
     <div class="field">
       <label class="check">
         <input type="checkbox" name="make_collection" value="1" checked>
-        <span>Create the collection and put the products in it</span>
+        <span>Put the products in a collection</span>
       </label>
+    </div>
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="build_page" value="1" checked>
+        <span>Build the collection page if there isn't one yet</span>
+      </label>
+      <p class="help">
+        An existing page is added to, never rewritten. Untick this to add
+        products to a collection you maintain by hand — or for an older range
+        whose page you would rather build yourself.
+      </p>
     </div>
     <div class="field">
       <label class="check">
