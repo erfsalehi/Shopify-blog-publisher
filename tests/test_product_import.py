@@ -623,9 +623,19 @@ def test_a_collection_becomes_draft_products_a_collection_and_cross_links(
     assert len(fake_shopify.collections) == 1
     assert len(fake_shopify.collections[0]["products"]) == 2
 
-    # And each product links to the other, with a picture.
-    assert "More from this collection" in white["descriptionHtml"]
+    # And each product links to the other, with a picture. The heading names
+    # the range rather than saying "this collection": the range's own name is
+    # the phrase a reader would search for, and it gives the internal links
+    # an anchor context that says what they are.
+    assert "you can find them in the following list" in white["descriptionHtml"]
+    assert "3D Bars" in white["descriptionHtml"]
     assert "3D Bars Black" in white["descriptionHtml"]
+
+    # The tags the storefront is built on are present, not merely likely: a
+    # smart collection defined as brand + collection needs both on every
+    # product in the range, every time.
+    assert "3D Bars" in white["tags"]        # the collection
+    assert "Ames Tile" in white["tags"]      # the brand
     related = [m for m in fake_shopify.metafields if m["key"] == "related_products"]
     assert len(related) == 2
 

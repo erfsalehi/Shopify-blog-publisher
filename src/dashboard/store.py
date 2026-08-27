@@ -62,6 +62,7 @@ IMPORT_MAX_DOCS = "import.max_docs_per_product"
 IMPORT_PUBLISH_STATUS = "import.publish_status"
 IMPORT_TAG_PREFIX = "import.source_tag"
 IMPORT_BRAND_BLURB = "import.brand_blurb"
+IMPORT_RELATED_LIMIT = "import.related_limit"
 
 
 
@@ -559,6 +560,24 @@ IMPORT_SPECS: tuple[Spec, ...] = (
         kind="text",
         coerce=_as_optional_str,
         maximum=4000,
+    ),
+    Spec(
+        key=IMPORT_RELATED_LIMIT,
+        default=60,
+        label="Products cross-linked on each page",
+        help=(
+            "Every product in a range links to every other one, up to this "
+            "many. The links are rendered into the description so they work "
+            "on any theme and exist as HTML for a crawler, which is also why "
+            "there is a limit at all: a 200-product range would put 199 "
+            "thumbnails on every page and Shopify caps a description at "
+            "65,535 characters. A flooring series is usually well under this."
+        ),
+        group="Product import",
+        kind="int",
+        coerce=_as_int,
+        minimum=1,
+        maximum=250,
     ),
     Spec(
         key=IMPORT_PUBLISH_STATUS,

@@ -57,9 +57,19 @@ log = logging.getLogger(__name__)
 PASS_BUDGET_SECONDS = 40.0
 LOCAL_PASS_BUDGET_SECONDS = 240.0
 
-#: Siblings linked from each product page. Enough to show the range, few
-#: enough that the block stays a footer rather than a second catalogue.
-RELATED_LIMIT = 8
+#: Fallback for the number of siblings linked from each product page. The
+#: real value is `store.IMPORT_RELATED_LIMIT`; this is what applies when the
+#: settings table can't be reached. Every product in a range should link to
+#: every other one — the cap exists because Shopify limits a description to
+#: 65,535 characters, not because eight is the right number.
+RELATED_LIMIT = 60
+
+
+def _related_limit() -> int:
+    try:
+        return int(store.get(store.IMPORT_RELATED_LIMIT))
+    except Exception:  # noqa: BLE001 - a missing setting must not stop linking
+        return RELATED_LIMIT
 
 METAFIELD_NAMESPACE = "custom"
 
@@ -398,6 +408,7 @@ def _one_product(
             source=source,
             copy=copy,
             vendor=vendor or source.vendor,
+            collection_title=collection_title or "",
             options=options,
             client=client,
         )
@@ -486,6 +497,7 @@ def _create_in_shopify(
     source: SourceProduct,
     copy: product_copy.ProductCopy,
     vendor: str | None,
+    collection_title: str,
     options: dict,
     client,
 ) -> None:
@@ -503,17 +515,21 @@ def _create_in_shopify(
         )
         return
 
-    tags = list(copy.tags)
-    source_tag = options.get("source_tag")
-    if source_tag:
-        tags.append(source_tag)
-    tags = product_copy.clean_tags(tags)
+    tags = product_copy.clean_tags(
+        _required_tags(
+            product_type=copy.product_type or source.product_type,
+            vendor=vendor or source.vendor,
+            collection_title=collection_title,
+            source_tag=options.get("source_tag"),
+        )
+        + list(copy.tags)
+    )
 
     locale = product_copy.locale_text()
     brand = product_copy.brand_blurb_text()
     body = product_copy.render_description(
         copy, docs=source.docs, doc_urls={}, source_url=source.source_url,
-        locale=locale, brand=brand,
+        locale=locale, brand=brand, collection_title=collection_title,
     )
 
     created = client.create_product(
@@ -540,6 +556,7 @@ def _create_in_shopify(
         body = product_copy.render_description(
             copy, docs=source.docs, doc_urls=doc_urls,
             source_url=source.source_url, locale=locale, brand=brand,
+            collection_title=collection_title,
         )
         client.update_product(product_gid, description_html=body)
 
@@ -625,6 +642,26 @@ def _attach_images(client, product_gid: str, source: SourceProduct, copy) -> int
     finally:
         http.close()
     return saved
+
+
+def _required_tags(
+    *, product_type: str | None, vendor: str | None,
+    collection_title: str, source_tag: str | None,
+) -> list[str]:
+    """The tags the store needs, before the ones the model thought of.
+
+    Order is the point. `clean_tags` caps a product at `MAX_TAGS`, and the
+    model routinely proposes fifteen; appending these afterwards would let a
+    talkative description push the brand off the end of the list. These are
+    what the storefront is built on, so they go first and the model's
+    suggestions fill whatever room is left.
+
+    Brand and collection together are what make a smart collection possible
+    — a page defined as "these two tags" needs both present on every product
+    in the range, every time, not usually.
+    """
+    wanted = [collection_title, vendor, product_type, source_tag]
+    return [str(t).strip() for t in wanted if t and str(t).strip()]
 
 
 def _attach_docs(client, product_gid: str, source: SourceProduct) -> tuple[dict, int]:
@@ -885,22 +922,25 @@ def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
     # different rather than every page in the range linking the same eight.
     start = next((i for i, s in enumerate(siblings) if s["gid"] == item["gid"]), 0)
     ordered = (siblings[start + 1:] + siblings[:start])
+    limit = _related_limit()
     related = [
         {"url": s["url"], "title": s["title"], "image": s["image"]}
         for s in ordered
         if s["gid"] != item["gid"] and s["url"]
-    ][:RELATED_LIMIT]
+    ][:limit]
     if not related:
         related = [
             {"url": s["url"], "title": s["title"], "image": s["image"]}
             for s in others
             if s["url"]
-        ][:RELATED_LIMIT]
+        ][:limit]
 
     with get_session() as session:
         row = session.get(ImportProduct, item["id"])
         generated, extracted = row.generated, row.extracted
         source_url = row.source_url
+        run = session.get(ImportRun, run_id)
+        collection_title = (run.collection_title or "") if run else ""
 
     copy = _copy_from(generated)
     docs = [
@@ -917,10 +957,11 @@ def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
         source_url=source_url,
         locale=product_copy.locale_text(),
         brand=product_copy.brand_blurb_text(),
+        collection_title=collection_title,
     )
     client.update_product(item["gid"], description_html=body)
 
-    related_gids = [s["gid"] for s in ordered if s["gid"] != item["gid"]][:RELATED_LIMIT]
+    related_gids = [s["gid"] for s in ordered if s["gid"] != item["gid"]][:limit]
     if related_gids:
         try:
             client.set_metafields([{

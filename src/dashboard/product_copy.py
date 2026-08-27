@@ -399,6 +399,7 @@ def render_description(
     source_url: str | None = None,
     locale: str = "",
     brand: str = "",
+    collection_title: str = "",
 ) -> str:
     """The product description body, assembled from the copy's fields.
 
@@ -462,7 +463,7 @@ def render_description(
         )
 
     if related:
-        parts.append(render_related(related))
+        parts.append(render_related(related, collection_title))
 
     if source_url:
         parts.append(
@@ -572,8 +573,13 @@ def render_downloads(docs: list[SourceDoc], doc_urls: dict[str, str]) -> str:
     )
 
 
-def render_related(related: list[dict]) -> str:
+def render_related(related: list[dict], collection_title: str = "") -> str:
     """The rest of the collection, with a picture each.
+
+    Named rather than generic: "More from this collection" tells a reader
+    nothing they can search for, while the range's own name is the phrase
+    they would type. It also gives the internal links an anchor context that
+    says what the range is.
 
     Rendered into the body rather than left to a theme section so it works on
     any theme, and so the links exist as HTML for a crawler — internal links
@@ -599,8 +605,15 @@ def render_related(related: list[dict]) -> str:
         )
     if not cards:
         return ""
+    name = _one_line(collection_title or "").strip()
+    heading = (
+        f"If you want to see more products from {_esc(name)}, you can find "
+        "them in the following list:"
+        if name
+        else "More from this collection"
+    )
     return (
-        '<div class="product-related"><h2>More from this collection</h2>'
+        f'<div class="product-related"><h2>{heading}</h2>'
         '<ul class="related-grid">' + "".join(cards) + "</ul></div>"
     )
 
