@@ -69,7 +69,7 @@
     },
     {
       "path": "/api/cron/product_import",
-      "schedule": "15 * * * *"
+      "schedule": "15 22 * * *"
     }
   ]
 }

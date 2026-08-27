@@ -10,8 +10,14 @@ pass. One pass per tick would mean a forty-product import taking forty
 scheduled runs to land, which on a nightly schedule is a week.
 
 So: an import finishes in a minute or two if someone leaves the run page
-open, within an hour or so if the hourly cron is wired up on the deployment
-(`vercel.json`), and on the next nightly tick otherwise.
+open, and lands on the next nightly tick otherwise.
+
+It used to say "within an hour, if the hourly cron is wired up". It isn't,
+and on this deployment it can't be: Vercel's Hobby plan refuses any cron
+more frequent than daily, and refuses it by **failing the whole
+deployment** — not by ignoring that one entry. An hourly schedule here
+therefore doesn't cost an hour of latency, it costs every deploy. See
+`vercel.json`, where this job runs at 22:15 with the rest of them.
 """
 
 from __future__ import annotations
