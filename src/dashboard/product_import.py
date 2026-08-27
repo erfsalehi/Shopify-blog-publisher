@@ -510,8 +510,10 @@ def _create_in_shopify(
     tags = product_copy.clean_tags(tags)
 
     locale = product_copy.locale_text()
+    brand = product_copy.brand_blurb_text()
     body = product_copy.render_description(
-        copy, docs=source.docs, doc_urls={}, source_url=source.source_url, locale=locale
+        copy, docs=source.docs, doc_urls={}, source_url=source.source_url,
+        locale=locale, brand=brand,
     )
 
     created = client.create_product(
@@ -537,7 +539,7 @@ def _create_in_shopify(
     if doc_urls:
         body = product_copy.render_description(
             copy, docs=source.docs, doc_urls=doc_urls,
-            source_url=source.source_url, locale=locale,
+            source_url=source.source_url, locale=locale, brand=brand,
         )
         client.update_product(product_gid, description_html=body)
 
@@ -914,6 +916,7 @@ def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
         related=related,
         source_url=source_url,
         locale=product_copy.locale_text(),
+        brand=product_copy.brand_blurb_text(),
     )
     client.update_product(item["gid"], description_html=body)
 
@@ -1112,6 +1115,7 @@ def product_preview(run_id: int, product_id: int) -> dict:
                 doc_urls={},
                 source_url=row.source_url,
                 locale=product_copy.locale_text(),
+                brand=product_copy.brand_blurb_text(),
             )
 
     tags = list(copy.tags) if copy else list(generated.get("tags") or [])

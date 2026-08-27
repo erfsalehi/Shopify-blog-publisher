@@ -340,13 +340,109 @@ def _looks_like_photo(url: str) -> bool:
     return True
 
 
+#: Keys a gallery entry uses for one photo, largest rendition first. Magento
+#: emits all three; taking `full` avoids importing a thumbnail as the product
+#: image, which is the failure that looks fine until someone zooms.
+_GALLERY_SIZES = ("full", "img", "thumb", "large", "medium", "src", "url")
+
+
+def _gallery_images(soup: BeautifulSoup, base: str, limit: int) -> list[SourceImage]:
+    """Photos from a gallery the page hands to JavaScript as JSON.
+
+    `<img>` scanning cannot see these. Magento puts the real product
+    photography in a `text/x-magento-init` block — three renditions of each
+    photo, a caption and a position — and leaves the markup with nothing but
+    a placeholder div, so a page with six product photos scans as zero.
+
+    Parsed as JSON rather than pattern-matched out of the script text: the
+    entries carry which rendition is full size and which is a thumbnail, and
+    a regex over URLs throws that away exactly when it matters.
+    """
+    found: list[SourceImage] = []
+    seen: set[str] = set()
+
+    def take(entry: dict) -> None:
+        if len(found) >= limit:
+            return
+        # A video entry names a poster frame; importing that as product
+        # photography puts a play button on the product.
+        if entry.get("videoUrl") or str(entry.get("type") or "image") != "image":
+            return
+        raw = next(
+            (entry[k] for k in _GALLERY_SIZES
+             if isinstance(entry.get(k), str) and entry[k].strip()),
+            None,
+        )
+        if not raw:
+            return
+        url = absolute(base, raw)
+        if not url or not _looks_like_photo(url):
+            return
+        key = _gallery_key(url)
+        if key in seen:
+            return
+        seen.add(key)
+        caption = entry.get("caption")
+        found.append(SourceImage(
+            url=url,
+            alt=(str(caption).strip() or None) if caption else None,
+            position=len(found) + 1,
+        ))
+
+    def walk(node) -> None:
+        if isinstance(node, dict):
+            if any(k in node for k in _GALLERY_SIZES[:3]):
+                take(node)
+                return
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    for tag in soup.find_all("script"):
+        kind = (tag.get("type") or "").lower()
+        if kind not in ("text/x-magento-init", "application/json"):
+            continue
+        raw = tag.string or tag.get_text() or ""
+        if '"thumb"' not in raw and '"full"' not in raw:
+            continue
+        try:
+            walk(json.loads(raw))
+        except ValueError:
+            continue  # A script that isn't valid JSON is not a gallery.
+    return found
+
+
+def _gallery_key(url: str) -> str:
+    """Two renditions of one photo, reduced to the same key.
+
+    Magento's cache path is `/media/catalog/product/cache/<hash>/3/d/name.jpg`
+    where the hash encodes the size, so the same photograph appears under
+    three different URLs that `_normalize_image_url` has no reason to
+    consider equal — it strips size *suffixes*, and here the size is a
+    directory. The filename is what identifies the photo.
+    """
+    path = urlparse(_normalize_image_url(url)).path
+    return path.rsplit("/", 1)[-1].lower() or path.lower()
+
+
 def collect_images(soup: BeautifulSoup, base: str, limit: int = 20) -> list[SourceImage]:
     """Product photography from the page, best guess first.
 
-    Reads `<img src>` plus the lazy-loading attributes themes use instead
-    (`data-src`, `data-original`, `srcset`), because a page whose images only
-    appear after JavaScript runs still names them in the markup.
+    A JSON gallery is asked first and, when it answers, is the whole answer:
+    it is the site stating which photographs are the product's, in order,
+    with captions. Scanning `<img>` alongside it would only add the page's
+    furniture back in.
+
+    Otherwise reads `<img src>` plus the lazy-loading attributes themes use
+    instead (`data-src`, `data-original`, `srcset`), because a page whose
+    images only appear after JavaScript runs still names them in the markup.
     """
+    from_gallery = _gallery_images(soup, base, limit)
+    if from_gallery:
+        return from_gallery
+
     found: list[SourceImage] = []
     seen: set[str] = set()
 

@@ -103,6 +103,7 @@ def test_the_preview_is_the_body_the_real_create_would_send(dry_run):
         docs=preview["docs"], doc_urls={},
         source_url=EXTRACTED["source_url"],
         locale=product_copy.locale_text(),
+        brand=product_copy.brand_blurb_text(),
     )
     assert preview["body_html"] == expected
     assert "shifts with the light" in preview["body_html"]

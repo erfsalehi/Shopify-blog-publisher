@@ -42,6 +42,14 @@
         <input type="checkbox" name="{{ spec.key }}" {{ 'checked' if values[spec.key] }}>
         <span>{{ spec.label }}</span>
       </label>
+      {% elif spec.kind == 'text' %}
+      {# Its own kind rather than a long `str`: the brand block is several
+         paragraphs, and a single-line input makes editing it painful enough
+         that it stops being edited — which for a setting holding a live
+         offer is the failure that matters. #}
+      <label for="{{ spec.key }}">{{ spec.label }}</label>
+      <textarea id="{{ spec.key }}" name="{{ spec.key }}" class="wide"
+                rows="8">{{ values[spec.key] }}</textarea>
       {% elif spec.kind in ('csv', 'str') %}
       <label for="{{ spec.key }}">{{ spec.label }}</label>
       {# Stored as a JSON list, edited as plain comma-separated text — asking

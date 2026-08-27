@@ -61,6 +61,7 @@ IMPORT_MAX_IMAGES = "import.max_images_per_product"
 IMPORT_MAX_DOCS = "import.max_docs_per_product"
 IMPORT_PUBLISH_STATUS = "import.publish_status"
 IMPORT_TAG_PREFIX = "import.source_tag"
+IMPORT_BRAND_BLURB = "import.brand_blurb"
 
 
 
@@ -82,6 +83,17 @@ def _as_float(value: Any) -> float:
     if isinstance(value, bool):
         raise ValueError("expected a number, got a checkbox value")
     return float(str(value).strip())
+
+
+def _as_optional_str(value: Any) -> str:
+    """Like `_as_str`, but empty is a real answer.
+
+    Most string settings name something the app needs — a model, a tag — and
+    blanking one is a mistake worth refusing. The brand block is the
+    exception: emptying it means "add nothing to descriptions", which is a
+    choice, not a typo.
+    """
+    return str(value).strip()
 
 
 def _as_str(value: Any) -> str:
@@ -118,6 +130,15 @@ class Spec:
 
     def clean(self, raw: Any) -> Any:
         value = self.coerce(raw)
+        if isinstance(value, str):
+            # For text, the bounds are a length. Comparing a string to an int
+            # would raise TypeError from inside a settings save, which reads
+            # as a bug in the form rather than as "that is too long".
+            if self.maximum is not None and len(value) > self.maximum:
+                raise ValueError(
+                    f"{self.label} must be at most {self.maximum} characters"
+                )
+            return value
         if self.minimum is not None and value < self.minimum:
             raise ValueError(f"{self.label} must be at least {self.minimum}")
         if self.maximum is not None and value > self.maximum:
@@ -521,6 +542,23 @@ IMPORT_SPECS: tuple[Spec, ...] = (
         coerce=_as_int,
         minimum=0,
         maximum=12,
+    ),
+    Spec(
+        key=IMPORT_BRAND_BLURB,
+        default='D&R Flooring and Renovations is on the Langley Bypass. We stock Vinyl flooring, Laminate flooring, Engineered Hardwood, Moldings, Stair noses, Baseboards, Self Leveling, Underlayment and more.\n\nSpend $2,000 or more on materials, installation or renovation and delivery is free to Langley, Surrey, Maple Ridge, Port Coquitlam and Coquitlam, BC. Spend $7,000 or more and delivery is free to Vancouver, Burnaby, Richmond, North Vancouver, West Vancouver, Squamish, Whistler, Abbotsford, Chilliwack and Mission.\n\nCall us about this product and our current offers — D&R Flooring and Renovations, https://www.drflooring.ca',
+        label="Brand and offers block",
+        help=(
+            "Added to the end of every imported product description. This is "
+            "where the offer lives, so it is a setting rather than code — a "
+            "delivery threshold or a date written into the app would need a "
+            "deploy to change, and would sit stale on the whole catalogue "
+            "until someone noticed. Blank lines start new paragraphs and bare "
+            "URLs become links; no HTML. Leave it empty to add nothing."
+        ),
+        group="Product import",
+        kind="text",
+        coerce=_as_optional_str,
+        maximum=4000,
     ),
     Spec(
         key=IMPORT_PUBLISH_STATUS,

@@ -398,6 +398,7 @@ def render_description(
     related: list[dict] | None = None,
     source_url: str | None = None,
     locale: str = "",
+    brand: str = "",
 ) -> str:
     """The product description body, assembled from the copy's fields.
 
@@ -441,6 +442,10 @@ def render_description(
             "measured quote.</p>"
         )
 
+    blurb = render_brand_blurb(brand)
+    if blurb:
+        parts.append(blurb)
+
     downloads = render_downloads(docs or [], doc_urls or {})
     if downloads:
         parts.append(downloads)
@@ -471,6 +476,70 @@ def render_description(
         parts.append(faq_ld)
 
     return "\n".join(parts)
+
+
+#: A bare URL in the blurb, so the store's own address can be a link without
+#: the setting having to accept HTML.
+_BARE_URL = re.compile(r"(https?://[^\s<>\"']+|www\.[^\s<>\"']+)", re.I)
+
+#: Guard against a paste that runs away. The description is a product page,
+#: not a newsletter.
+MAX_BLURB = 4000
+
+
+def brand_blurb_text() -> str:
+    """The configured brand block, read from settings.
+
+    Separate from the renderer for the same reason `locale_text` is separate
+    from the paragraph it feeds: rendering is pure and testable without a
+    database, and every caller that builds a description already looks up
+    the store's own facts before calling it.
+    """
+    from dashboard import store
+
+    return str(store.get(store.IMPORT_BRAND_BLURB) or "")
+
+
+def render_brand_blurb(text: str) -> str:
+    """The store's own block: what we stock, what's on offer, and to call.
+
+    Kept in settings rather than written here because it is the part of a
+    product page most likely to be wrong tomorrow — a delivery threshold, a
+    list of cities, a seasonal offer. Code would need a deploy to correct
+    across a catalogue that is already published.
+
+    Escaped, then bare URLs are turned into links. That combination is
+    deliberate: the owner wants their own address to be clickable, and
+    accepting HTML to get one link would mean a settings field that can put
+    arbitrary markup on every product in the store.
+    """
+    raw = str(text or "").strip()[:MAX_BLURB]
+    if not raw:
+        return ""
+
+    paragraphs: list[str] = []
+    for chunk in re.split(r"\n\s*\n", raw):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        pieces: list[str] = []
+        last = 0
+        for match in _BARE_URL.finditer(chunk):
+            pieces.append(_esc(chunk[last:match.start()]))
+            url = match.group(0).rstrip(".,;:)")
+            trailing = match.group(0)[len(url):]
+            href = url if url.lower().startswith("http") else f"https://{url}"
+            pieces.append(
+                f'<a href="{_esc(href)}" rel="noopener" target="_blank">'
+                f"{_esc(url)}</a>{_esc(trailing)}"
+            )
+            last = match.end()
+        pieces.append(_esc(chunk[last:]))
+        paragraphs.append("<p>" + "".join(pieces).replace("\n", "<br>") + "</p>")
+
+    if not paragraphs:
+        return ""
+    return '<div class="product-brand">' + "".join(paragraphs) + "</div>"
 
 
 def render_downloads(docs: list[SourceDoc], doc_urls: dict[str, str]) -> str:
