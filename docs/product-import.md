@@ -203,6 +203,33 @@ range whose page you maintain yourself. Untick it and the products are still
 created and tagged, so a smart collection defined on the brand and
 collection tags picks them up anyway.
 
+## Product names
+
+Every imported product is named to the store's standard:
+
+```
+Brand + Collection + Type - Colour
+EUROSTYLE Venice Grand PRO Waterproof Luxury Vinyl Plank - Bassano
+```
+
+Assembled by the app, not requested from the model. Three of the four parts
+are things the import already knows — the vendor, the collection being
+imported, the product type — so only the colour is read off the source, and
+that is the single field the model contributes to the name. A format a model
+is *asked* to follow is a format that holds for most of a catalogue.
+
+Missing parts are dropped rather than leaving a gap, and a part already
+contained in the next one is not repeated: a manufacturer publishing its
+range as "EUROSTYLE Venice Grand PRO" under the brand "EUROSTYLE" still
+produces one "EUROSTYLE".
+
+**When the source names no colour, the source's own title is used instead.**
+The colour is the only part that separates one item in a range from the
+next, so composing without it would give every product the same name — and
+since the handle comes from the name, everything after the first would be
+skipped as already in the store. A range silently importing as one product
+is much worse than a name off-standard.
+
 ## Tags
 
 Three tags are written by the app rather than left to the model, and they go
@@ -216,6 +243,27 @@ collection* work: it needs both tags on every product in the range every
 time, not usually. A product the model happened to tag differently is a
 product missing from its own collection page, with nothing about the page
 saying so.
+
+## The description, top to bottom
+
+1. **The call line** — "For SPECIAL prices, call us NOW at (604) 532-2211".
+   First, because almost nothing in this catalogue is bought online and it is
+   the only line on the page asking for the conversion the store has. Edit it
+   in Settings.
+2. Summary, description, key features, specifications, where to use it.
+3. The local-availability line, then the **brand and offers block**.
+4. Downloads — the manufacturer's PDFs, re-hosted on the store.
+5. **The rest of the range**, each with a thumbnail and a link.
+
+There is deliberately **no link to the manufacturer's page**. Sending a
+ready-to-buy customer to the supplier is the one link a retailer should not
+publish.
+
+Layout for the range grid is written inline, not left to a class. This markup
+ends up inside a Shopify product description rendered by a theme that has
+never heard of this app, so `.related-grid` styles nothing — the block once
+rendered as a bulleted list of full-width images for exactly that reason.
+Only layout is set inline; colours and fonts are left to the theme.
 
 ## Reading a dry run before you commit to it
 

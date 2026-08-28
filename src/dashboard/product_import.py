@@ -396,6 +396,17 @@ def _one_product(
             vendor=vendor or source.vendor,
         )
 
+        # The store's naming standard, applied here rather than left to the
+        # model: brand, range, type, colour. Done before the row is written
+        # so a dry run shows the name the product would actually get.
+        copy.title = product_copy.compose_title(
+            brand=vendor or source.vendor,
+            collection=collection_title,
+            product_type=copy.product_type or source.product_type,
+            color=copy.color,
+            fallback=copy.title or source.title,
+        )
+
         with get_session() as session:
             row = session.get(ImportProduct, product_id)
             row.title = copy.title
@@ -537,9 +548,11 @@ def _create_in_shopify(
 
     locale = product_copy.locale_text()
     brand = product_copy.brand_blurb_text()
+    banner = product_copy.banner_text()
     body = product_copy.render_description(
         copy, docs=source.docs, doc_urls={}, source_url=source.source_url,
         locale=locale, brand=brand, collection_title=collection_title,
+        banner=banner,
     )
 
     created = client.create_product(
@@ -566,7 +579,7 @@ def _create_in_shopify(
         body = product_copy.render_description(
             copy, docs=source.docs, doc_urls=doc_urls,
             source_url=source.source_url, locale=locale, brand=brand,
-            collection_title=collection_title,
+            collection_title=collection_title, banner=banner,
         )
         client.update_product(product_gid, description_html=body)
 
@@ -1003,6 +1016,7 @@ def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
         locale=product_copy.locale_text(),
         brand=product_copy.brand_blurb_text(),
         collection_title=collection_title,
+        banner=product_copy.banner_text(),
     )
     client.update_product(item["gid"], description_html=body)
 
@@ -1202,6 +1216,7 @@ def product_preview(run_id: int, product_id: int) -> dict:
                 source_url=row.source_url,
                 locale=product_copy.locale_text(),
                 brand=product_copy.brand_blurb_text(),
+                banner=product_copy.banner_text(),
             )
 
     tags = list(copy.tags) if copy else list(generated.get("tags") or [])

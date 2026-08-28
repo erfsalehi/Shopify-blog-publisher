@@ -62,6 +62,7 @@ IMPORT_MAX_DOCS = "import.max_docs_per_product"
 IMPORT_PUBLISH_STATUS = "import.publish_status"
 IMPORT_TAG_PREFIX = "import.source_tag"
 IMPORT_BRAND_BLURB = "import.brand_blurb"
+IMPORT_TOP_BANNER = "import.top_banner"
 IMPORT_RELATED_LIMIT = "import.related_limit"
 
 
@@ -560,6 +561,21 @@ IMPORT_SPECS: tuple[Spec, ...] = (
         kind="text",
         coerce=_as_optional_str,
         maximum=4000,
+    ),
+    Spec(
+        key=IMPORT_TOP_BANNER,
+        default="For SPECIAL prices, call us NOW at (604) 532-2211",
+        label="Line at the top of every product",
+        help=(
+            "The first thing on every imported product page. Almost nothing "
+            "in this catalogue is bought online — the conversion is a phone "
+            "call — so this is the only line on the page asking for it. "
+            "Bare URLs become links; no HTML. Empty adds nothing."
+        ),
+        group="Product import",
+        kind="text",
+        coerce=_as_optional_str,
+        maximum=400,
     ),
     Spec(
         key=IMPORT_RELATED_LIMIT,

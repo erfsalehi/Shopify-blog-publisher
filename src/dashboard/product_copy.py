@@ -80,6 +80,15 @@ class ProductCopy(BaseModel):
     the model."""
 
     title: str = Field(description="Product title for our store, under 70 characters")
+    color: str = Field(
+        default="",
+        description=(
+            "The colour, decor or finish name that distinguishes THIS item "
+            "from the rest of its range, and nothing else — 'Bassano', "
+            "'Emerald Bevel Gloss', 'Natural Oak'. Not the range name, not "
+            "the size, not the material. Empty if the range has only one."
+        ),
+    )
     product_type: str = Field(description="Shopify product type, e.g. 'Wall Tile'")
     summary: str = Field(description="One sentence: what this is and who it suits")
     paragraphs: list[str] = Field(
@@ -136,6 +145,12 @@ importance:
    other context, should get a complete and correct one.
 6. The SEO title and description are what appears in Google's results. Lead
    with what the product is, not the brand's internal range name.
+7. `color` is the one field that separates this item from its siblings. A
+   manufacturer usually puts it in the product title after the range name
+   and the size — "3D Bars | 5\"x10\" Emerald Bevel Gloss" is the range,
+   the size, then the colour. Give the colour alone. The store's own title
+   is assembled from it, so a size or a range name here ends up duplicated
+   on the shelf.
 """
 
 
@@ -354,6 +369,66 @@ def _one_line(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+#: Longest a composed title may get. Shopify accepts more, but a title that
+#: wraps to three lines in search results and in the admin list is one
+#: nobody can scan.
+MAX_TITLE = 160
+
+
+def compose_title(
+    *, brand: str | None, collection: str | None,
+    product_type: str | None, color: str | None,
+    fallback: str = "",
+) -> str:
+    """The store's naming standard: brand, range, type, then colour.
+
+    "EUROSTYLE Venice Grand PRO Waterproof Luxury Vinyl Plank - Bassano".
+
+    Assembled here rather than asked of the model, because a standard a
+    model is *asked* to follow is a standard that holds for most of a
+    catalogue. The parts are things the app already knows — the vendor, the
+    collection being imported, the product type — and only the colour needs
+    reading off the source, which is why that is the single field the model
+    contributes.
+
+    Each part is dropped when it's missing rather than leaving a gap or a
+    stray dash, and a repeated part is dropped too: a manufacturer whose
+    range name already contains the brand would otherwise produce
+    "EUROSTYLE EUROSTYLE Venice".
+    """
+    # Without a colour there is nothing in the standard that separates one
+    # item in a range from the next, so every product would compose to the
+    # same name — and the handle is derived from the name, so the second
+    # onwards would be skipped as "already in the store". A range silently
+    # importing as one product is far worse than a name off-standard, so the
+    # source's own title wins whenever the discriminator is missing.
+    if not _one_line(color or "").strip(" -|,"):
+        return _one_line(fallback)[:MAX_TITLE].strip()
+
+    parts: list[str] = []
+    for raw in (brand, collection, product_type):
+        piece = _one_line(raw or "").strip(" -|,")
+        if not piece:
+            continue
+        # Overlap runs both ways. A range named "Venice Grand PRO" under the
+        # brand "EUROSTYLE" is fine, but manufacturers also publish the range
+        # as "EUROSTYLE Venice Grand PRO" — so the part already said is
+        # trimmed off the front of the next one rather than only skipping an
+        # exact repeat.
+        for said in parts:
+            if piece.lower().startswith(said.lower()):
+                piece = piece[len(said):].strip(" -|,")
+        if not piece or piece.lower() in " ".join(parts).lower():
+            continue
+        parts.append(piece)
+
+    stem = " ".join(parts).strip()
+    shade = _one_line(color).strip(" -|,")
+    if shade.lower() not in stem.lower():
+        stem = f"{stem} - {shade}" if stem else shade
+    return (stem or _one_line(fallback))[:MAX_TITLE].strip()
+
+
 def clean_tags(tags: list[str]) -> list[str]:
     """De-duplicate case-insensitively, drop junk, cap the count.
 
@@ -400,6 +475,7 @@ def render_description(
     locale: str = "",
     brand: str = "",
     collection_title: str = "",
+    banner: str = "",
 ) -> str:
     """The product description body, assembled from the copy's fields.
 
@@ -410,6 +486,10 @@ def render_description(
     empty headings.
     """
     parts: list[str] = []
+
+    banner_html = render_banner(banner)
+    if banner_html:
+        parts.append(banner_html)
 
     if copy.summary:
         parts.append(f'<p class="product-summary"><strong>{_esc(copy.summary)}</strong></p>')
@@ -465,13 +545,6 @@ def render_description(
     if related:
         parts.append(render_related(related, collection_title))
 
-    if source_url:
-        parts.append(
-            '<p class="product-source"><small>Specifications published by the '
-            f'manufacturer: <a href="{_esc(source_url)}" rel="nofollow noopener" '
-            'target="_blank">product documentation</a>.</small></p>'
-        )
-
     faq_ld = faq_jsonld(copy)
     if faq_ld:
         parts.append(faq_ld)
@@ -486,6 +559,41 @@ _BARE_URL = re.compile(r"(https?://[^\s<>\"']+|www\.[^\s<>\"']+)", re.I)
 #: Guard against a paste that runs away. The description is a product page,
 #: not a newsletter.
 MAX_BLURB = 4000
+
+
+# Bold and a touch larger than body copy, but no colour: the storefront's
+# own palette should decide that, and a hardcoded brand colour here would be
+# the one thing on the page that clashes after a theme change.
+_BANNER_STYLE = "font-weight:600;font-size:1.05em;margin:0 0 12px"
+
+
+def banner_text() -> str:
+    """The line that opens every product page, read from settings."""
+    from dashboard import store
+
+    return str(store.get(store.IMPORT_TOP_BANNER) or "")
+
+
+def render_banner(text: str) -> str:
+    """The call-to-action at the top of the description.
+
+    First thing on the page because it is the only thing on the page asking
+    for the conversion this store actually has. Almost nothing here is bought
+    online — 94% of the catalogue hides its price behind "Call for price" —
+    so a product page whose first line is a specification is a page that
+    buries its own purpose.
+
+    Escaped and linkified exactly like the brand block, and for the same
+    reason: a settings field that can put arbitrary markup at the top of
+    every product in the store is not a trade worth making for one link.
+    """
+    raw = str(text or "").strip()[:400]
+    if not raw:
+        return ""
+    return (
+        f'<p class="product-banner" style="{_BANNER_STYLE}">'
+        f"{_linkify(raw)}</p>"
+    )
 
 
 def brand_blurb_text() -> str:
@@ -514,33 +622,49 @@ def render_brand_blurb(text: str) -> str:
     accepting HTML to get one link would mean a settings field that can put
     arbitrary markup on every product in the store.
     """
-    raw = str(text or "").strip()[:MAX_BLURB]
+    body = _linkify_paragraphs(text, limit=MAX_BLURB)
+    return f'<div class="product-brand">{body}</div>' if body else ""
+
+
+def _linkify(chunk: str) -> str:
+    """One line of owner-written text, safe to put in a description.
+
+    Unescaped first, then escaped. That looks like a no-op and isn't: the
+    owner pastes text out of a browser or an old product page, so it arrives
+    carrying entities — a leading `&nbsp;` for indentation is the common one
+    — and escaping those directly publishes the literal characters
+    "&nbsp;" to the customer. Decoding first turns it into the space it was
+    meant to be, and escaping after means the round trip still cannot emit
+    markup: `&lt;script&gt;` decodes to `<script>` and re-encodes right back.
+    """
+    text = html.unescape(str(chunk))
+    pieces: list[str] = []
+    last = 0
+    for match in _BARE_URL.finditer(text):
+        pieces.append(_esc(text[last:match.start()]))
+        url = match.group(0).rstrip(".,;:)")
+        trailing = match.group(0)[len(url):]
+        href = url if url.lower().startswith("http") else f"https://{url}"
+        pieces.append(
+            f'<a href="{_esc(href)}" rel="noopener" target="_blank">'
+            f"{_esc(url)}</a>{_esc(trailing)}"
+        )
+        last = match.end()
+    pieces.append(_esc(text[last:]))
+    return "".join(pieces)
+
+
+def _linkify_paragraphs(text: str, *, limit: int) -> str:
+    """Owner-written text as paragraphs, blank lines splitting them."""
+    raw = str(text or "").strip()[:limit]
     if not raw:
         return ""
-
-    paragraphs: list[str] = []
-    for chunk in re.split(r"\n\s*\n", raw):
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        pieces: list[str] = []
-        last = 0
-        for match in _BARE_URL.finditer(chunk):
-            pieces.append(_esc(chunk[last:match.start()]))
-            url = match.group(0).rstrip(".,;:)")
-            trailing = match.group(0)[len(url):]
-            href = url if url.lower().startswith("http") else f"https://{url}"
-            pieces.append(
-                f'<a href="{_esc(href)}" rel="noopener" target="_blank">'
-                f"{_esc(url)}</a>{_esc(trailing)}"
-            )
-            last = match.end()
-        pieces.append(_esc(chunk[last:]))
-        paragraphs.append("<p>" + "".join(pieces).replace("\n", "<br>") + "</p>")
-
-    if not paragraphs:
-        return ""
-    return '<div class="product-brand">' + "".join(paragraphs) + "</div>"
+    paragraphs = [
+        "<p>" + _linkify(chunk.strip()).replace("\n", "<br>") + "</p>"
+        for chunk in re.split(r"\n\s*\n", raw)
+        if chunk.strip()
+    ]
+    return "".join(paragraphs)
 
 
 def render_downloads(docs: list[SourceDoc], doc_urls: dict[str, str]) -> str:
@@ -573,6 +697,27 @@ def render_downloads(docs: list[SourceDoc], doc_urls: dict[str, str]) -> str:
     )
 
 
+# Inline styles, not classes. This markup is written into a Shopify product
+# description, and the theme rendering it has never heard of
+# `.related-grid` — so a class-only version fell back to browser defaults:
+# a bulleted list, one full-width image per row, the title floating beside
+# it. Whatever the theme's own CSS is, these rules ship with the content.
+#
+# Kept to layout only. Nothing here sets a colour or a font, so the block
+# still inherits the storefront's typography instead of fighting it.
+_GRID_STYLE = (
+    "list-style:none;padding:0;margin:16px 0 0;display:grid;"
+    "grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:18px"
+)
+_CARD_STYLE = "margin:0;padding:0;list-style:none"
+_LINK_STYLE = "display:block;text-decoration:none"
+_IMG_STYLE = (
+    "display:block;width:100%;height:auto;aspect-ratio:1/1;"
+    "object-fit:cover;border-radius:6px;margin:0"
+)
+_CAPTION_STYLE = "display:block;margin-top:8px;line-height:1.35"
+
+
 def render_related(related: list[dict], collection_title: str = "") -> str:
     """The rest of the collection, with a picture each.
 
@@ -595,13 +740,14 @@ def render_related(related: list[dict], collection_title: str = "") -> str:
         image = item.get("image")
         picture = (
             f'<img src="{_esc(image)}" alt="{_esc(title)}" loading="lazy" '
-            'width="200" height="200">'
+            f'width="300" height="300" style="{_IMG_STYLE}">'
             if image
             else ""
         )
         cards.append(
-            f'<li class="related-product"><a href="{_esc(url)}">{picture}'
-            f"<span>{_esc(title)}</span></a></li>"
+            f'<li class="related-product" style="{_CARD_STYLE}">'
+            f'<a href="{_esc(url)}" style="{_LINK_STYLE}">{picture}'
+            f'<span style="{_CAPTION_STYLE}">{_esc(title)}</span></a></li>'
         )
     if not cards:
         return ""
@@ -614,7 +760,9 @@ def render_related(related: list[dict], collection_title: str = "") -> str:
     )
     return (
         f'<div class="product-related"><h2>{heading}</h2>'
-        '<ul class="related-grid">' + "".join(cards) + "</ul></div>"
+        f'<ul class="related-grid" style="{_GRID_STYLE}">'
+        + "".join(cards)
+        + "</ul></div>"
     )
 
 
