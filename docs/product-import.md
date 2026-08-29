@@ -208,9 +208,20 @@ collection tags picks them up anyway.
 Every imported product is named to the store's standard:
 
 ```
-Brand + Collection + Type - Colour
+Brand + Collection + Type + Size - Colour
+
 EUROSTYLE Venice Grand PRO Waterproof Luxury Vinyl Plank - Bassano
+Ames Tile 3D Bars Porcelain Wall Tile 5"x10" - Emerald Bevel Gloss
 ```
+
+The size sits with the type because that is what it qualifies, and is left
+out when the source doesn't state one rather than guessed at.
+
+**The brand is required on the import form.** It used to say "left blank:
+taken from the source", which is true of a Shopify supplier and false of
+most others — a Magento catalogue publishes no brand anywhere a scraper can
+read, so leaving it blank silently dropped the brand from every name in the
+range.
 
 Assembled by the app, not requested from the model. Three of the four parts
 are things the import already knows — the vendor, the collection being

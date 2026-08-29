@@ -80,6 +80,14 @@ class ProductCopy(BaseModel):
     the model."""
 
     title: str = Field(description="Product title for our store, under 70 characters")
+    size: str = Field(
+        default="",
+        description=(
+            "The nominal size exactly as the source writes it, units and "
+            "punctuation included — '5\"x10\"', '7mm', '12x24'. Empty if "
+            "the source does not state one. Never invent or convert it."
+        ),
+    )
     color: str = Field(
         default="",
         description=(
@@ -145,7 +153,10 @@ importance:
    other context, should get a complete and correct one.
 6. The SEO title and description are what appears in Google's results. Lead
    with what the product is, not the brand's internal range name.
-7. `color` is the one field that separates this item from its siblings. A
+7. `product_type` should name the material as well as the format when the
+   source gives it — "Porcelain Wall Tile", "Waterproof Luxury Vinyl Plank",
+   not "Tile" or "Flooring". The store's product titles are built from it.
+8. `color` is the one field that separates this item from its siblings. A
    manufacturer usually puts it in the product title after the range name
    and the size — "3D Bars | 5\"x10\" Emerald Bevel Gloss" is the range,
    the size, then the colour. Give the colour alone. The store's own title
@@ -377,12 +388,17 @@ MAX_TITLE = 160
 
 def compose_title(
     *, brand: str | None, collection: str | None,
-    product_type: str | None, color: str | None,
+    product_type: str | None, color: str | None, size: str | None = None,
     fallback: str = "",
 ) -> str:
-    """The store's naming standard: brand, range, type, then colour.
+    """The store's naming standard: brand, range, type, size, then colour.
 
-    "EUROSTYLE Venice Grand PRO Waterproof Luxury Vinyl Plank - Bassano".
+    "EUROSTYLE Venice Grand PRO Waterproof Luxury Vinyl Plank - Bassano"
+    "Ames Tile 3D Bars Porcelain Wall Tile 5\"x10\" - Emerald Bevel Gloss"
+
+    The size sits with the type because that is what it qualifies, and it is
+    omitted when the source doesn't state one rather than guessed at — a
+    range sold in one size shouldn't grow a size in its name.
 
     Assembled here rather than asked of the model, because a standard a
     model is *asked* to follow is a standard that holds for most of a
@@ -406,7 +422,7 @@ def compose_title(
         return _one_line(fallback)[:MAX_TITLE].strip()
 
     parts: list[str] = []
-    for raw in (brand, collection, product_type):
+    for raw in (brand, collection, product_type, size):
         piece = _one_line(raw or "").strip(" -|,")
         if not piece:
             continue

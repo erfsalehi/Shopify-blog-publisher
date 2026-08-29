@@ -53,9 +53,17 @@
     </div>
 
     <div class="field">
-      <label for="vendor">Vendor / brand (optional)</label>
-      <input type="text" class="wide" id="vendor" name="vendor"
-             placeholder="Left blank: taken from the source">
+      <label for="vendor">Brand</label>
+      <input type="text" class="wide" id="vendor" name="vendor" required
+             placeholder="EUROSTYLE, Ames Tile, …">
+      <p class="help">
+        Required, because every product name starts with it — "Brand
+        Collection Type Size - Colour". It used to say "left blank: taken
+        from the source", which is true of a Shopify supplier and false of
+        most others: a Magento catalogue publishes no brand anywhere a
+        scraper can read, so leaving it blank silently dropped the brand
+        from every name in the range.
+      </p>
     </div>
 
     <div class="field">

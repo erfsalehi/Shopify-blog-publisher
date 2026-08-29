@@ -470,6 +470,17 @@ def create_app() -> FastAPI:
         if not url:
             return RedirectResponse("/import?error=Paste+a+collection+URL+first.",
                                     status_code=303)
+        # Enforced here as well as by the form's `required`, because the
+        # brand is the first word of every product name and a request that
+        # skipped the browser would otherwise import a whole range unnamed.
+        if not (vendor or "").strip():
+            return RedirectResponse(
+                "/import?error=" + quote(
+                    "Set the brand — every product name begins with it, and "
+                    "most suppliers don't publish it anywhere readable."
+                ),
+                status_code=303,
+            )
         run_id = product_import.start_run(
             url,
             dry_run=bool(dry_run),

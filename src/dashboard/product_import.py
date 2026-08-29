@@ -403,6 +403,7 @@ def _one_product(
             brand=vendor or source.vendor,
             collection=collection_title,
             product_type=copy.product_type or source.product_type,
+            size=copy.size,
             color=copy.color,
             fallback=copy.title or source.title,
         )

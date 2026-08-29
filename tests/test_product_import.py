@@ -779,6 +779,7 @@ def test_submitting_the_form_creates_a_run_and_redirects_to_it(client, fake_site
         "/import",
         data={
             "source_url": "https://maker.test/collections/3dbars",
+            "vendor": "Ames Tile",
             "dry_run": "1",
             "make_collection": "1",
             "link_products": "1",
@@ -829,3 +830,18 @@ def test_the_run_page_shows_what_a_finished_run_created(
 
 def test_an_unknown_run_is_a_404_not_a_crash(client):
     assert client.get("/import/999/status").status_code == 404
+
+
+def test_a_run_without_a_brand_is_refused_before_any_work(client, fake_site):
+    """Every product name begins with the brand, and most suppliers publish
+    it nowhere a scraper can read. Starting the run anyway would spend a
+    scrape and a model call per product on a range named wrongly."""
+    response = client.post(
+        "/import",
+        data={"source_url": "https://maker.test/collections/3dbars",
+              "vendor": "  ", "dry_run": "1"},
+        follow_redirects=False,
+    )
+    assert response.status_code == 303
+    assert "error=" in response.headers["location"]
+    assert "/import/" not in response.headers["location"]

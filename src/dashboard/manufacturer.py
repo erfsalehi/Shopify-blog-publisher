@@ -714,15 +714,30 @@ def _grid_product_links(soup: BeautifulSoup, base: str, page_url: str) -> list[s
     collection page with a `#` on the end — which, once the fragment is
     stripped, is the page we're already on.
     """
+    return [card["url"] for card in _grid_cards(soup, base, page_url)]
+
+
+def _grid_cards(soup: BeautifulSoup, base: str, page_url: str) -> list[dict]:
+    """Each product card in the grid: its link, and the picture beside it.
+
+    The picture matters as much as the link. A manufacturer's product page
+    can fail to yield any photograph — a template without a gallery, a
+    render that didn't happen — and the range page has been showing one for
+    that product the whole time. Throwing it away at discovery meant a
+    product arriving in the store with no image while its thumbnail sat one
+    click away in the collection we had just read.
+    """
     here = page_url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
-    urls: list[str] = []
+    cards: list[dict] = []
+    seen: set[str] = set()
     for selector in _ITEM_SELECTORS:
         try:
-            cards = soup.select(selector)
+            elements = soup.select(selector)
         except Exception:  # noqa: BLE001 - a bad selector must not kill a run
             continue
-        for card in cards:
-            for tag in card.find_all("a", href=True):
+        for element in elements:
+            found = None
+            for tag in element.find_all("a", href=True):
                 href = tag["href"]
                 if "#" in href:
                     continue
@@ -730,15 +745,51 @@ def _grid_product_links(soup: BeautifulSoup, base: str, page_url: str) -> list[s
                 if not url or not same_host(base, url):
                     continue
                 clean = url.split("?", 1)[0].split("#", 1)[0]
-                if clean.rstrip("/") == here:
+                if clean.rstrip("/") == here or clean in seen:
                     continue
-                urls.append(clean)
+                found = clean
                 break
-        if urls:
+            if not found:
+                continue
+            seen.add(found)
+            cards.append({
+                "url": found,
+                "title": _card_title(element),
+                "image": _card_image(element, base),
+            })
+        if cards:
             # A page whose cards were found under one selector shouldn't have
             # a second, looser one bolted on top of the result.
             break
-    return _dedupe(urls)
+    return cards
+
+
+def _card_title(element) -> str | None:
+    """The product's name as the range page gives it.
+
+    Taken from the image's alt text before the link text, because a grid
+    that shows only a picture still has to name it for a screen reader, and
+    a grid that shows a name often wraps it in the same anchor as "Add to
+    Favorites".
+    """
+    image = element.find("img", alt=True)
+    if image and image["alt"].strip():
+        return image["alt"].strip()[:600]
+    link = element.find("a", href=True)
+    text = link.get_text(" ", strip=True) if link else ""
+    return text[:600] or None
+
+
+def _card_image(element, base: str) -> str | None:
+    for tag in element.find_all("img"):
+        raw = (
+            tag.get("src") or tag.get("data-src") or tag.get("data-original")
+            or tag.get("data-lazy") or tag.get("data-image")
+        )
+        url = absolute(base, raw) if raw else None
+        if url and _looks_like_photo(url):
+            return url
+    return None
 
 
 def _product_links(soup: BeautifulSoup, base: str) -> list[str]:
@@ -751,6 +802,31 @@ def _product_links(soup: BeautifulSoup, base: str) -> list[str]:
         if _PRODUCT_PATH.search(urlparse(clean).path):
             urls.append(clean)
     return _dedupe(urls)
+
+
+def _seed_from_grid(
+    out: SourceCollection, soup: BeautifulSoup, base: str, page_url: str
+) -> None:
+    """Keep each card's picture and name against its URL.
+
+    The Shopify path gets seeds from `products.json` for free. Everything
+    else had none, so the thumbnail the range page was already showing was
+    read, used to find the link, and thrown away — and a product whose own
+    page yields no photograph then arrived in the store with no image at
+    all, one click from the picture we had just looked at.
+    """
+    for card in _grid_cards(soup, base, page_url):
+        if card["url"] in out.seeds or not (card["image"] or card["title"]):
+            continue
+        seed = SourceProduct(
+            source_url=card["url"], handle=handle_from_url(card["url"])
+        )
+        if card["title"]:
+            seed.title = card["title"]
+        if card["image"]:
+            seed.images = [SourceImage(url=card["image"], position=1)]
+            seed.sources["images"] = "collection-grid"
+        out.seeds[card["url"]] = seed
 
 
 def _extract_products(soup: BeautifulSoup, base: str, page_url: str) -> list[str]:
@@ -879,6 +955,7 @@ def discover_collection(
                 page_url = f"{base}{path}"
                 found = _extract_products(soup, base, page_url)
                 out.product_urls.extend(found)
+                _seed_from_grid(out, soup, base, page_url)
                 # Paginate while a page keeps naming products we haven't seen.
                 param = _page_param(soup, base, path)
                 for page in range(2, MAX_COLLECTION_PAGES + 1):
@@ -889,7 +966,9 @@ def discover_collection(
                     if not more_html:
                         break
                     out.pages += 1
-                    more = _extract_products(soup_of(more_html), base, page_url)
+                    more_soup = soup_of(more_html)
+                    more = _extract_products(more_soup, base, page_url)
+                    _seed_from_grid(out, more_soup, base, page_url)
                     fresh = [u for u in more if u not in set(out.product_urls)]
                     if not fresh:
                         break
@@ -910,6 +989,7 @@ def discover_collection(
                     out.title, out.description = _collection_meta(soup)
                 found = _extract_products(soup, base, f"{base}{path}")
                 out.product_urls = _dedupe(found)[:max_products]
+                _seed_from_grid(out, soup, base, f"{base}{path}")
                 if out.product_urls:
                     page_error = None
             elif render_error and not render_error.startswith("Firecrawl isn't configured"):
@@ -1117,26 +1197,42 @@ def _merge_page(product: SourceProduct, soup: BeautifulSoup, base: str) -> None:
     if not product.sku and ld_product.get("sku"):
         product.sku = str(ld_product["sku"])[:100]
 
-    if not product.images:
-        images = _ld_images(ld_product, base)
-        if images:
-            product.images = images
-            product.sources["images"] = "json-ld"
-        else:
-            og_image = _meta(soup, prop="og:image")
-            gathered = collect_images(soup, base)
-            if og_image:
-                resolved = absolute(base, og_image)
-                if resolved and all(
-                    _normalize_image_url(resolved) != _normalize_image_url(i.url)
-                    for i in gathered
-                ):
-                    gathered.insert(0, SourceImage(url=resolved, position=0))
-            if gathered:
-                for position, image in enumerate(gathered, start=1):
-                    image.position = position
-                product.images = gathered
-                product.sources["images"] = "html"
+    # Images are additive when the page states them structurally, and a
+    # fallback otherwise. The distinction is what lets a collection-grid
+    # thumbnail be the cover *and* the product page's own gallery follow it:
+    # a gap-only rule would see the seed's one image and skip the gallery
+    # entirely, which is how "two photographs" became "the thumbnail".
+    #
+    # Loose `<img>` scanning stays gap-only. On a feed-seeded product it
+    # would append the site's furniture to a set that was already right.
+    structured = _ld_images(ld_product, base) or _gallery_images(soup, base, 20)
+    if structured:
+        known = {_gallery_key(i.url) for i in product.images}
+        for image in structured:
+            key = _gallery_key(image.url)
+            if key in known:
+                continue
+            known.add(key)
+            product.images.append(image)
+        product.sources.setdefault(
+            "images", "json-ld" if _ld_images(ld_product, base) else "gallery"
+        )
+    elif not product.images:
+        og_image = _meta(soup, prop="og:image")
+        gathered = collect_images(soup, base)
+        if og_image:
+            resolved = absolute(base, og_image)
+            if resolved and all(
+                _normalize_image_url(resolved) != _normalize_image_url(i.url)
+                for i in gathered
+            ):
+                gathered.insert(0, SourceImage(url=resolved, position=0))
+        if gathered:
+            product.images = gathered
+            product.sources["images"] = "html"
+
+    for position, image in enumerate(product.images, start=1):
+        image.position = position
 
     # Additive: the page's documents and specs join the feed's.
     known_docs = {d.url.split("?", 1)[0] for d in product.docs}

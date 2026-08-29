@@ -181,3 +181,28 @@ def test_an_empty_banner_adds_nothing(dashboard_db):
 def test_the_number_is_editable_without_a_deploy(dashboard_db):
     store.set(store.IMPORT_TOP_BANNER, "Call (604) 000-0000")
     assert "000-0000" in product_copy.render_banner(product_copy.banner_text())
+
+
+# ── Size ───────────────────────────────────────────────────────────
+
+
+def test_the_size_sits_with_the_type(dashboard_db):
+    assert compose_title(
+        brand="Ames Tile", collection="3D Bars",
+        product_type="Porcelain Wall Tile", size='5"x10"',
+        color="Emerald Bevel Gloss",
+    ) == 'Ames Tile 3D Bars Porcelain Wall Tile 5"x10" - Emerald Bevel Gloss'
+
+
+def test_a_range_sold_in_one_size_does_not_grow_one(dashboard_db):
+    """Omitted when the source doesn't state it, rather than guessed at."""
+    assert compose_title(**TITLE_PARTS, size="") == (
+        "EUROSTYLE Venice Grand PRO Waterproof Luxury Vinyl Plank - Bassano"
+    )
+
+
+def test_a_size_already_in_the_type_is_not_said_twice(dashboard_db):
+    assert compose_title(
+        brand="Ames", collection="3D Bars", product_type='Wall Tile 5"x10"',
+        size='5"x10"', color="Jade",
+    ) == 'Ames 3D Bars Wall Tile 5"x10" - Jade'
