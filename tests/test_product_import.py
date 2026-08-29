@@ -215,7 +215,16 @@ class FakeShopify:
 
     def add_product_media(self, gid, media, dry_run=False):
         self.media.setdefault(gid, []).extend(media)
-        return media
+        # Ids, because the caller now has to ask what became of each one:
+        # the real mutation only queues the fetch.
+        return [
+            {"id": self._gid("MediaImage"), "status": "PROCESSING"}
+            for _ in media
+        ]
+
+    def wait_for_media(self, media_ids, **kwargs):
+        """This fake's Shopify always manages the fetch."""
+        return {mid: "READY" for mid in media_ids if mid}
 
     def upload_file(self, data, filename, mime_type="application/pdf", alt=None, wait=True):
         record = {

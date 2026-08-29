@@ -634,16 +634,38 @@ def _attach_images(client, product_gid: str, source: SourceProduct, copy) -> int
         }
         for index, image in enumerate(source.images)
     ]
+    # What Shopify accepted is not what Shopify fetched. The mutation
+    # queues each URL and returns immediately, so the only honest count
+    # comes from asking afterwards which media went READY and which went
+    # FAILED — a CDN with hotlink protection produces a clean mutation and
+    # no picture, which is how a product came to be recorded as having two
+    # photographs and to show none.
+    retry: list[int] = []
     try:
-        client.add_product_media(product_gid, media)
-        return len(media)
+        accepted = client.add_product_media(product_gid, media)
+        statuses = client.wait_for_media([m.get("id") for m in accepted])
+        for index, entry in enumerate(accepted):
+            if statuses.get(entry.get("id")) == "FAILED":
+                retry.append(index)
+        # Anything Shopify never acknowledged is retried too: fewer media
+        # back than sent means the rest were dropped, not queued.
+        retry.extend(range(len(accepted), len(media)))
+        if not retry:
+            return len(media)
+        log.info(
+            "%d of %d images failed Shopify's own fetch for %s; uploading bytes",
+            len(retry), len(media), product_gid,
+        )
     except ShopifyError as e:
         log.info("media by URL failed for %s (%s); uploading bytes", product_gid, e)
+        retry = list(range(len(source.images)))
 
-    saved = 0
+    saved = len(media) - len(retry)
     http = source_client()
     try:
         for index, image in enumerate(source.images):
+            if index not in retry:
+                continue
             try:
                 resp = http.get(image.url)
                 resp.raise_for_status()

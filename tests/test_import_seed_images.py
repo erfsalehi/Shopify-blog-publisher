@@ -189,3 +189,96 @@ def test_the_same_photo_from_both_sources_is_not_imported_twice(
     names = [i.url.rsplit("/", 1)[-1] for i in product.images]
     assert names.count("3dbbemg510.jpg") == 1
     assert len(names) == len(set(names)) == 2
+
+
+# ── What Shopify accepted vs what it fetched ───────────────────────
+#
+# `productCreateMedia` queues a URL and returns immediately. A manufacturer
+# CDN with hotlink protection then refuses Shopify's fetch, and the media
+# turns FAILED a second later — with the mutation already reported clean.
+# Twelve products were imported reporting their photographs attached; four
+# of them had none in the store.
+
+
+class MediaShopify:
+    """A Shopify whose fetch fails for the URLs named in `refuse`."""
+
+    def __init__(self, refuse=()):
+        self.refuse = set(refuse)
+        self.media: list[dict] = []
+        self.uploaded: list[str] = []
+
+    def add_product_media(self, product_gid, media, *, dry_run=False):
+        out = []
+        for item in media:
+            mid = f"gid://shopify/MediaImage/{len(self.media) + 1}"
+            failed = item["originalSource"] in self.refuse
+            self.media.append({"id": mid, "src": item["originalSource"],
+                               "status": "FAILED" if failed else "READY"})
+            out.append({"id": mid, "status": "PROCESSING"})
+        return out
+
+    def wait_for_media(self, ids, **kwargs):
+        return {m["id"]: m["status"] for m in self.media if m["id"] in set(ids)}
+
+    def upload_image(self, data, filename, mime):
+        self.uploaded.append(filename)
+        return {"url": f"https://cdn.shopify.test/{filename}"}
+
+
+def _source(*urls):
+    from dashboard.manufacturer import SourceImage, SourceProduct
+
+    product = SourceProduct(source_url="https://m.test/p", handle="p")
+    product.images = [
+        SourceImage(url=u, position=n) for n, u in enumerate(urls, start=1)
+    ]
+    return product
+
+
+class _Copy:
+    title = "A tile"
+    image_alts: list[str] = []
+
+
+def test_a_queued_image_that_never_arrives_is_uploaded_as_bytes(
+    dashboard_db, monkeypatch
+):
+    """The reported symptom: products recorded with photographs, showing
+    none. A clean mutation is not a delivered picture."""
+    from dashboard import product_import
+
+    monkeypatch.setattr(
+        product_import, "source_client",
+        lambda: httpx.Client(transport=httpx.MockTransport(
+            lambda r: httpx.Response(200, content=b"jpegbytes",
+                                     headers={"content-type": "image/jpeg"})
+        )),
+    )
+    fake = MediaShopify(refuse=["https://m.test/a.jpg"])
+    saved = product_import._attach_images(
+        fake, "gid://shopify/Product/1",
+        _source("https://m.test/a.jpg", "https://m.test/b.jpg"), _Copy(),
+    )
+    assert saved == 2
+    assert len(fake.uploaded) == 1   # only the one that failed
+
+
+def test_an_image_shopify_did_fetch_is_not_downloaded_again(
+    dashboard_db, monkeypatch
+):
+    """Bytes only move when they have to. The whole point of handing Shopify
+    a URL is that no photography passes through this process."""
+    from dashboard import product_import
+
+    def explode():
+        raise AssertionError("should not download when Shopify succeeded")
+
+    monkeypatch.setattr(product_import, "source_client", explode)
+    fake = MediaShopify()
+    saved = product_import._attach_images(
+        fake, "gid://shopify/Product/1",
+        _source("https://m.test/a.jpg", "https://m.test/b.jpg"), _Copy(),
+    )
+    assert saved == 2
+    assert fake.uploaded == []

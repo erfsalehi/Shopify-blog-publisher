@@ -153,9 +153,13 @@ importance:
    other context, should get a complete and correct one.
 6. The SEO title and description are what appears in Google's results. Lead
    with what the product is, not the brand's internal range name.
-7. `product_type` should name the material as well as the format when the
-   source gives it — "Porcelain Wall Tile", "Waterproof Luxury Vinyl Plank",
-   not "Tile" or "Flooring". The store's product titles are built from it.
+7. `product_type` is how a SHOPPER would describe the thing — "Porcelain
+   Wall Tile", "Ceramic Wall Tile", "Waterproof Luxury Vinyl Plank". It
+   must end in the format being sold (Tile, Plank, Mosaic, Moulding), and
+   must never be a specification value copied off the page: "Glazed
+   Ceramic/Non-porcelain" is a body classification, not a product type. Say
+   "Glazed Ceramic Wall Tile" instead. The store's product titles are built
+   from this field, so it appears on the shelf.
 8. `color` is the one field that separates this item from its siblings. A
    manufacturer usually puts it in the product title after the range name
    and the size — "3D Bars | 5\"x10\" Emerald Bevel Gloss" is the range,

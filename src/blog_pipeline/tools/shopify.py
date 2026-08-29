@@ -621,10 +621,14 @@ class ShopifyClient:
         CDN — so this both saves the picture and avoids downloading megabytes
         of photography through this process to upload it straight back out.
 
-        `media` is [{"originalSource": url, "alt": text}]. A source that
-        Shopify can't fetch comes back in `mediaUserErrors`, which is raised:
-        a product silently missing its photographs looks fine in the API
-        response and wrong on the storefront.
+        `media` is [{"originalSource": url, "alt": text}].
+
+        **Returning without error does not mean the pictures arrived.**
+        `mediaUserErrors` catches malformed input and nothing else: Shopify
+        queues each URL and fetches it afterwards, so a CDN that refuses the
+        fetch produces a perfectly successful mutation and a media object
+        that turns `FAILED` a second later. Call `wait_for_media` on the ids
+        returned here to find out what actually happened.
         """
         if not media:
             return []
@@ -653,6 +657,49 @@ class ShopifyClient:
         if errors:
             raise ShopifyError(f"productCreateMedia userErrors: {errors}")
         return data.get("media") or []
+
+    def wait_for_media(
+        self, media_ids: list[str], *, attempts: int = 6, pause: float = 1.0
+    ) -> dict[str, str]:
+        """Poll queued media until each is READY or FAILED. {id: status}.
+
+        The other half of `add_product_media`. Ingestion is asynchronous, so
+        the only way to learn that a manufacturer's CDN refused Shopify's
+        fetch is to ask afterwards — and it is worth asking, because the
+        alternative is a product recorded as having two photographs and
+        showing none.
+
+        Anything still PROCESSING when the attempts run out is reported as
+        it stands rather than waited on further: this runs inside a request
+        with a hard ceiling, and a slow image is not a failed one.
+        """
+        pending = [_as_gid(m, "MediaImage") for m in media_ids if m]
+        if not pending:
+            return {}
+        seen: dict[str, str] = {}
+        for attempt in range(attempts):
+            data = self.graphql(
+                """
+                query($ids: [ID!]!) {
+                  nodes(ids: $ids) {
+                    ... on MediaImage { id status }
+                  }
+                }
+                """,
+                {"ids": pending},
+            )
+            for node in data.get("nodes") or []:
+                if node and node.get("id"):
+                    seen[node["id"]] = node.get("status") or "UNKNOWN"
+            pending = [
+                mid for mid in pending
+                if seen.get(mid) in (None, "UPLOADED", "PROCESSING")
+            ]
+            if not pending:
+                break
+            if attempt < attempts - 1:
+                time.sleep(pause)
+        return seen
 
     def set_metafields(self, metafields: list[dict]) -> list[dict]:
         """Write metafields on any resource. Each entry needs ownerId,
