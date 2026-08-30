@@ -206,3 +206,56 @@ def test_a_size_already_in_the_type_is_not_said_twice(dashboard_db):
         brand="Ames", collection="3D Bars", product_type='Wall Tile 5"x10"',
         size='5"x10"', color="Jade",
     ) == 'Ames 3D Bars Wall Tile 5"x10" - Jade'
+
+
+# ── What a range is called on the shelf ────────────────────────────
+
+
+def test_the_collection_standard_is_produced_exactly(dashboard_db):
+    """The store's existing collections read this way — "Cyrus Luxury Vinyl
+    Collection", "Simba Engineered Flooring Collection"."""
+    assert product_copy.compose_collection_title(
+        brand="Cyrus", collection="Luxury Vinyl"
+    ) == "Cyrus Luxury Vinyl Collection"
+
+
+def test_the_handle_matches_the_stores_existing_ones(dashboard_db):
+    """`cyrus-craftsman-collection` is a handle that already exists. A new
+    import of that range must land on it rather than beside it."""
+    title = product_copy.compose_collection_title(
+        brand="Cyrus", collection="Craftsman"
+    )
+    assert product_copy.slugify(title) == "cyrus-craftsman-collection"
+
+
+def test_a_brand_repeated_in_the_range_name_is_not_said_twice(dashboard_db):
+    assert product_copy.compose_collection_title(
+        brand="Cyrus", collection="Cyrus Craftsman"
+    ) == "Cyrus Craftsman Collection"
+
+
+def test_the_word_collection_is_not_added_twice(dashboard_db):
+    """A manufacturer publishing a range as "Craftsman Collection" should not
+    become "Craftsman Collection Collection"."""
+    assert product_copy.compose_collection_title(
+        brand="Simba", collection="Engineered Flooring Collection"
+    ) == "Simba Engineered Flooring Collection"
+
+
+def test_without_a_brand_the_range_still_gets_a_name(dashboard_db):
+    assert product_copy.compose_collection_title(
+        brand=None, collection="3D Bars"
+    ) == "3D Bars Collection"
+
+
+def test_the_shelf_name_is_not_the_tag(dashboard_db):
+    """The tag is what a smart collection is defined on and what the "more
+    from this range" heading reads. "Ames Tile & Stone 3D Bars Collection" is
+    a mouthful in a heading and a filter, so the two are composed apart."""
+    shelf = product_copy.compose_collection_title(
+        brand="Ames Tile & Stone", collection="3D Bars"
+    )
+    heading = product_copy.render_related(RELATED, "3D Bars")
+    assert shelf == "Ames Tile & Stone 3D Bars Collection"
+    assert "from 3D Bars," in heading
+    assert "Collection," not in heading

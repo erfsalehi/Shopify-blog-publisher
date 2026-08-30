@@ -25,7 +25,7 @@ import json
 
 import pytest
 
-from dashboard import product_import
+from dashboard import product_copy, product_import
 from dashboard.db import get_session
 from dashboard.models import (
     ImportProduct,
@@ -69,6 +69,7 @@ def run_factory(dashboard_db, monkeypatch):
             run = ImportRun(
                 source_url="https://maker.test/collections/berlin",
                 source_base="https://maker.test",
+                vendor="Toucan",
                 collection_title="Berlin Series",
                 collection_handle="berlin-series",
                 stage=ImportStage.collection.value,
@@ -96,6 +97,15 @@ def run_factory(dashboard_db, monkeypatch):
             session.flush()
             return run.id, fake
     return build
+
+
+#: What "Berlin Series" by "Toucan" is called on the shelf, and the handle
+#: that follows from it. Composed rather than written out, so this test moves
+#: with the standard instead of quietly pinning an old one.
+SHELF_TITLE = product_copy.compose_collection_title(
+    brand="Toucan", collection="Berlin Series"
+)
+HANDLE = product_copy.slugify(SHELF_TITLE)
 
 
 def _note(run_id: int) -> str:
@@ -128,7 +138,7 @@ def test_an_existing_page_is_added_to_not_rewritten(run_factory):
     """It may have been edited by hand since it was made. A re-import that
     restored a generated description would throw that away silently."""
     fake = FakeShopify([
-        {"id": "gid://shopify/Collection/9", "handle": "berlin-series",
+        {"id": "gid://shopify/Collection/9", "handle": HANDLE,
          "title": "Berlin Series (edited by hand)"},
     ])
     run_id, fake = run_factory(mode="update", shopify=fake)
@@ -142,7 +152,7 @@ def test_a_supplier_dropping_a_product_does_not_remove_ours(run_factory):
     """Nothing in this stage deletes. Their catalogue is a record of what
     they sell, not of what we do."""
     fake = FakeShopify([
-        {"id": "gid://shopify/Collection/9", "handle": "berlin-series",
+        {"id": "gid://shopify/Collection/9", "handle": HANDLE,
          "title": "Berlin Series"},
     ])
     run_id, fake = run_factory(mode="update", shopify=fake)
@@ -183,7 +193,7 @@ def test_a_new_range_gets_its_page(run_factory):
     run_id, fake = run_factory(mode="new", created=3)
     product_import.advance(run_id)
     assert len(fake.created) == 1
-    assert fake.created[0]["handle"] == "berlin-series"
+    assert fake.created[0]["handle"] == HANDLE
 
 
 def test_calling_it_new_when_it_is_not_says_so_rather_than_duplicating(
@@ -192,7 +202,7 @@ def test_calling_it_new_when_it_is_not_says_so_rather_than_duplicating(
     """The owner picked wrong. Making a second page for a range that already
     has one is the expensive way to be right about the label."""
     fake = FakeShopify([
-        {"id": "gid://shopify/Collection/9", "handle": "berlin-series",
+        {"id": "gid://shopify/Collection/9", "handle": HANDLE,
          "title": "Berlin Series"},
     ])
     run_id, fake = run_factory(mode="new", shopify=fake)

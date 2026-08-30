@@ -241,6 +241,28 @@ since the handle comes from the name, everything after the first would be
 skipped as already in the store. A range silently importing as one product
 is much worse than a name off-standard.
 
+## Collection names
+
+A created collection is named to the store's standard:
+
+```
+Brand + Range + "Collection"
+Cyrus Luxury Vinyl Collection      →  /collections/cyrus-luxury-vinyl-collection
+Simba Engineered Flooring Collection
+```
+
+The handle follows from the title, which is what makes a re-import land on
+the collection that already exists rather than beside it.
+
+The brand is not repeated when the range name already carries it, and the
+suffix is not doubled — a range published as "Craftsman Collection" stays
+"Cyrus Craftsman Collection".
+
+**This is deliberately not the collection tag.** The tag is what a smart
+collection is defined on and what the "more from this range" heading reads,
+so it stays the bare range name: "3D Bars", not "Ames Tile & Stone 3D Bars
+Collection", which is a mouthful in a heading and unusable as a filter.
+
 ## Tags
 
 Three tags are written by the app rather than left to the model, and they go

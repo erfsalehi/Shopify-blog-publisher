@@ -817,8 +817,15 @@ def _collection(run_id: int) -> PassResult:
     with get_session() as session:
         run = session.get(ImportRun, run_id)
         options, dry_run = run.options, run.dry_run
-        title = run.collection_title or "Imported collection"
-        handle = run.collection_handle or product_copy.slugify(title)
+        # The range name is what the products are tagged with and what the
+        # "more from this range" heading reads. What goes on the shelf is
+        # the store's own standard — brand, range, "Collection" — so the two
+        # are composed separately rather than one being reused as the other.
+        range_name = run.collection_title or "Imported collection"
+        title = product_copy.compose_collection_title(
+            brand=run.vendor, collection=range_name,
+        ) or range_name
+        handle = product_copy.slugify(title, fallback="imported-collection")
         description = options.get("collection_description")
         rows = (
             session.query(ImportProduct)
@@ -907,6 +914,8 @@ def _collection(run_id: int) -> PassResult:
     with get_session() as session:
         run = session.get(ImportRun, run_id)
         run.collection_gid = collection_gid
+        # Recorded from the composed title, not the one guessed at discovery
+        # time, so the run page links to the collection that exists.
         run.collection_handle = handle
         run.note(message)
         next_stage = (

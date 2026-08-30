@@ -449,6 +449,42 @@ def compose_title(
     return (stem or _one_line(fallback))[:MAX_TITLE].strip()
 
 
+#: What a range is called on the shelf. The store's existing collections
+#: read "Cyrus Luxury Vinyl Collection", "Simba Engineered Flooring
+#: Collection" — brand, range, then the word itself.
+COLLECTION_SUFFIX = "Collection"
+
+
+def compose_collection_title(*, brand: str | None, collection: str | None) -> str:
+    """The store's naming standard for a collection: brand, range, Collection.
+
+    Deliberately not the same string as the products' collection *tag*. The
+    tag is what a smart collection is defined on and what the "more from
+    this range" heading reads, so it stays the bare range name — "3D Bars",
+    not "Ames Tile & Stone 3D Bars Collection", which is a mouthful in a
+    heading and a filter.
+
+    Overlap is trimmed the way `compose_title` trims it, and the suffix is
+    not added twice: a manufacturer whose range is already published as
+    "Craftsman Collection" should not become "Craftsman Collection
+    Collection".
+    """
+    range_name = _one_line(collection or "").strip(" -|,")
+    house = _one_line(brand or "").strip(" -|,")
+    if not range_name:
+        return f"{house} {COLLECTION_SUFFIX}".strip() if house else ""
+
+    if house and range_name.lower().startswith(house.lower()):
+        range_name = range_name[len(house):].strip(" -|,")
+    parts = [p for p in (house, range_name) if p]
+    stem = " ".join(parts).strip()
+    if not stem:
+        return ""
+    if stem.lower().endswith(COLLECTION_SUFFIX.lower()):
+        return stem[:MAX_TITLE]
+    return f"{stem} {COLLECTION_SUFFIX}"[:MAX_TITLE]
+
+
 def clean_tags(tags: list[str]) -> list[str]:
     """De-duplicate case-insensitively, drop junk, cap the count.
 
