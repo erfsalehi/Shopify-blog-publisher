@@ -547,15 +547,17 @@ IMPORT_SPECS: tuple[Spec, ...] = (
     ),
     Spec(
         key=IMPORT_BRAND_BLURB,
-        default='D&R Flooring and Renovations is on the Langley Bypass. We stock Vinyl flooring, Laminate flooring, Engineered Hardwood, Moldings, Stair noses, Baseboards, Self Leveling, Underlayment and more.\n\nSpend $2,000 or more on materials, installation or renovation and delivery is free to Langley, Surrey, Maple Ridge, Port Coquitlam and Coquitlam, BC. Spend $7,000 or more and delivery is free to Vancouver, Burnaby, Richmond, North Vancouver, West Vancouver, Squamish, Whistler, Abbotsford, Chilliwack and Mission.\n\nCall us about this product and our current offers — D&R Flooring and Renovations, https://www.drflooring.ca',
+        default='D&R Flooring and Renovations is on the Langley Bypass. We stock many <a href="https://drflooring.ca/collections/vinyl-flooring">Vinyl flooring</a>, <a href="https://drflooring.ca/collections/laminate-flooring">Laminate flooring</a>, <a href="https://drflooring.ca/collections/engineered-flooring">Engineered Hardwood</a>, <a href="https://drflooring.ca/collections/transition-and-moulding">Transitions and Mouldings</a>, <a href="https://drflooring.ca/collections/stair-nose">Stair noses</a>, <a href="https://drflooring.ca/collections/baseboard">Baseboards</a>, self-levelling, <a href="https://drflooring.ca/collections/underlay">Underlayment</a>, <a href="https://drflooring.ca/collections/glue-and-ahdesive">Glue and adhesives</a>, and more.\n\nSpend $2,000 or more on materials, installation or renovation and delivery is free to Langley, Surrey, Maple Ridge, Port Coquitlam and Coquitlam, BC. Spend $7,000 or more and delivery is free to Vancouver, Burnaby, Richmond, North Vancouver, West Vancouver, Squamish, Whistler, Abbotsford, Chilliwack and Mission.\n\nCall us about this product and our current offers — D&R Flooring and Renovations, https://www.drflooring.ca',
         label="Brand and offers block",
         help=(
             "Added to the end of every imported product description. This is "
             "where the offer lives, so it is a setting rather than code — a "
             "delivery threshold or a date written into the app would need a "
             "deploy to change, and would sit stale on the whole catalogue "
-            "until someone noticed. Blank lines start new paragraphs and bare "
-            "URLs become links; no HTML. Leave it empty to add nothing."
+            "until someone noticed. Blank lines start new paragraphs, bare "
+            "URLs become links, and <a href=\"...\"> works so the store's "
+            "own categories can be linked — everything else is reduced to "
+            "its text. Leave it empty to add nothing."
         ),
         group="Product import",
         kind="text",

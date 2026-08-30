@@ -485,6 +485,17 @@ def _esc(text: str) -> str:
     return html.escape(str(text or "").strip())
 
 
+def _esc_inline(text: str) -> str:
+    """Escape without trimming.
+
+    `_esc` strips, which is right for a whole field and wrong for one text
+    node among several: stripping each in turn deletes the spaces between
+    them, and "stock <span>many</span> Vinyl flooring" renders as
+    "stockmanyVinyl flooring".
+    """
+    return html.escape(str(text or ""))
+
+
 def render_description(
     copy: ProductCopy,
     *,
@@ -574,7 +585,7 @@ def render_description(
 
 #: A bare URL in the blurb, so the store's own address can be a link without
 #: the setting having to accept HTML.
-_BARE_URL = re.compile(r"(https?://[^\s<>\"']+|www\.[^\s<>\"']+)", re.I)
+_BARE_URL = re.compile(r"(https?://[^\s<>\"']+|\bwww\.[^\s<>\"']+)", re.I)
 
 #: Guard against a paste that runs away. The description is a product page,
 #: not a newsletter.
@@ -646,31 +657,117 @@ def render_brand_blurb(text: str) -> str:
     return f'<div class="product-brand">{body}</div>' if body else ""
 
 
+#: Inline tags the owner may use in a settings field. Links are the point —
+#: the store's own categories should be reachable from every product — and
+#: the rest are what someone pastes alongside them without meaning anything
+#: by it. Everything else is unwrapped to its text.
+_ALLOWED_TAGS = {"a", "br", "strong", "b", "em", "i"}
+
+#: Schemes a link may use. `javascript:` and `data:` are the reason this is
+#: a list of what's allowed rather than a list of what isn't.
+_SAFE_SCHEMES = ("http://", "https://", "mailto:", "tel:", "/", "#")
+
+
+def _safe_href(raw: str) -> str | None:
+    href = html.unescape(str(raw or "")).strip()
+    if not href:
+        return None
+    lowered = href.lower()
+    if lowered.startswith(_SAFE_SCHEMES):
+        return href
+    # A bare domain typed without a scheme is a link the owner meant.
+    if re.match(r"^[a-z0-9.-]+\.[a-z]{2,}(/|$)", lowered):
+        return f"https://{href}"
+    return None
+
+
+def _sanitize_inline(fragment: str) -> str:
+    """Owner-written HTML reduced to the inline markup we allow.
+
+    The brand block has to carry links — a product page that names the
+    ranges the store stocks and links none of them is a dead end — and the
+    owner authors it by pasting from an existing page. That paste arrives
+    wrapped in `<span>`, `<div>` and `<p>` from whatever editor produced it,
+    and carrying entities.
+
+    So this keeps `<a>` and a few inline tags, unwraps everything else to
+    its text, and drops `<script>`/`<style>` outright. An href that isn't a
+    scheme on the allow-list loses its link and keeps its words: a settings
+    field is not a place to discover that `javascript:` works.
+    """
+    from bs4 import BeautifulSoup, NavigableString, Tag
+
+    soup = BeautifulSoup(str(fragment or ""), "html.parser")
+    for bad in soup(["script", "style"]):
+        bad.decompose()
+
+    def render(node) -> str:
+        if isinstance(node, NavigableString):
+            return _esc_inline(html.unescape(str(node)))
+        if not isinstance(node, Tag):
+            return ""
+        inner = "".join(render(child) for child in node.children)
+        name = node.name.lower()
+        if name == "br":
+            return "<br>"
+        if name not in _ALLOWED_TAGS:
+            return inner  # unwrapped: the words survive, the markup doesn't
+        if name != "a":
+            return f"<{name}>{inner}</{name}>"
+        href = _safe_href(node.get("href", ""))
+        if not href:
+            return inner
+        target = ' target="_blank"' if node.get("target") == "_blank" else ""
+        return f'<a href="{_esc(href)}" rel="noopener"{target}>{inner}</a>'
+
+    return "".join(render(child) for child in soup.children)
+
+
 def _linkify(chunk: str) -> str:
     """One line of owner-written text, safe to put in a description.
 
-    Unescaped first, then escaped. That looks like a no-op and isn't: the
-    owner pastes text out of a browser or an old product page, so it arrives
-    carrying entities — a leading `&nbsp;` for indentation is the common one
-    — and escaping those directly publishes the literal characters
-    "&nbsp;" to the customer. Decoding first turns it into the space it was
-    meant to be, and escaping after means the round trip still cannot emit
-    markup: `&lt;script&gt;` decodes to `<script>` and re-encodes right back.
+    Two passes. First the markup is reduced to the inline tags we allow, so
+    a pasted `<a href>` survives and a pasted `<div>` becomes its text.
+    Then any bare URL in what's left becomes a link too — the owner writes
+    "drflooring.ca" as often as they paste an anchor.
+
+    Text is unescaped before being escaped, which is not the no-op it looks
+    like: the paste arrives carrying entities, and a leading `&nbsp;` for
+    indentation would otherwise publish those six characters to the
+    customer. The decode happens inside `_sanitize_inline`, on text nodes
+    only, so it can never turn escaped markup into real markup.
     """
-    text = html.unescape(str(chunk))
+    safe = _sanitize_inline(chunk)
     pieces: list[str] = []
-    last = 0
-    for match in _BARE_URL.finditer(text):
-        pieces.append(_esc(text[last:match.start()]))
-        url = match.group(0).rstrip(".,;:)")
-        trailing = match.group(0)[len(url):]
-        href = url if url.lower().startswith("http") else f"https://{url}"
-        pieces.append(
-            f'<a href="{_esc(href)}" rel="noopener" target="_blank">'
-            f"{_esc(url)}</a>{_esc(trailing)}"
-        )
-        last = match.end()
-    pieces.append(_esc(text[last:]))
+    depth = 0  # how many <a> elements deep this segment sits
+    for segment in re.finditer(r"<[^>]+>|[^<]+", safe):
+        text = segment.group(0)
+        if text.startswith("<"):
+            lowered = text.lower()
+            if lowered.startswith("<a "):
+                depth += 1
+            elif lowered.startswith("</a"):
+                depth = max(0, depth - 1)
+            pieces.append(text)
+            continue
+        # Text already inside a link is left alone: a URL used as the label
+        # of an anchor would otherwise get a second anchor nested in the
+        # first, which no browser renders the way it reads.
+        if depth:
+            pieces.append(text)
+            continue
+        last = 0
+        for match in _BARE_URL.finditer(text):
+            pieces.append(text[last:match.start()])
+            url = match.group(0).rstrip(".,;:)")
+            trailing = match.group(0)[len(url):]
+            href = url if url.lower().startswith("http") else f"https://{url}"
+            pieces.append(
+                f'<a href="{_esc(href)}" rel="noopener" target="_blank">'
+                f"{url}</a>{trailing}"
+            )
+            last = match.end()
+        pieces.append(text[last:])
     return "".join(pieces)
 
 

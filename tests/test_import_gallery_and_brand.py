@@ -178,14 +178,16 @@ def test_the_store_address_becomes_a_link(dashboard_db):
     assert '<a href="https://www.drflooring.ca"' in body
 
 
-def test_html_in_the_setting_is_escaped_not_rendered(dashboard_db):
-    """One clickable link is worth having; a settings field that can put
-    arbitrary markup on every product in the store is not."""
+def test_markup_the_setting_does_not_allow_is_not_rendered(dashboard_db):
+    """The field accepts `<a href>` so categories can be linked, which means
+    it has to refuse the rest by name — it reaches every product in the
+    store. A script is dropped whole rather than shown as text: publishing
+    "&lt;script&gt;alert(1)&lt;/script&gt;" to a customer is no better."""
     body = product_copy.render_brand_blurb(
         "Sale <script>alert(1)</script> & more"
     )
     assert "<script>" not in body
-    assert "&lt;script&gt;" in body
+    assert "alert(1)" not in body
     assert "&amp; more" in body
 
 
@@ -213,3 +215,98 @@ def test_rendering_needs_no_database(dashboard_db):
     assert product_copy.render_brand_blurb("Call us.") == (
         '<div class="product-brand"><p>Call us.</p></div>'
     )
+
+
+# ── Linking the store's own categories ─────────────────────────────
+#
+# The block names the ranges the store stocks, and naming them without
+# linking them is a dead end on every product page. So the setting accepts
+# `<a href>` — which means it also has to refuse everything else, because it
+# is one field that reaches every product in the store.
+
+
+def test_a_pasted_link_survives(dashboard_db):
+    body = product_copy.render_brand_blurb(
+        'We stock <a href="https://drflooring.ca/collections/vinyl-flooring">'
+        "Vinyl flooring</a> and more."
+    )
+    assert '<a href="https://drflooring.ca/collections/vinyl-flooring"' in body
+    assert ">Vinyl flooring</a>" in body
+
+
+def test_a_root_relative_link_survives(dashboard_db):
+    """The store's own pages are usually written without the domain."""
+    body = product_copy.render_brand_blurb('<a href="/collections/underlay">U</a>')
+    assert '<a href="/collections/underlay"' in body
+
+
+def test_the_editors_wrapper_tags_are_unwrapped_not_published(dashboard_db):
+    """The owner authors this by pasting from an existing page, so it
+    arrives wrapped in whatever that editor produced."""
+    body = product_copy.render_brand_blurb(
+        "<div><p><span>We stock </span>"
+        '<a href="/collections/underlay">Underlayment</a><span>.</span></p></div>'
+    )
+    assert "<span>" not in body and "<div>" not in body
+    assert "We stock " in body
+    assert '<a href="/collections/underlay"' in body
+
+
+def test_spacing_between_wrapped_runs_is_kept(dashboard_db):
+    """Escaping each text node with a strip deletes the spaces between them,
+    and "stock <span>many</span> Vinyl" renders as "stockmanyVinyl"."""
+    body = product_copy.render_brand_blurb(
+        'We stock <span>many </span><a href="/collections/x">Vinyl</a> today'
+    )
+    assert "We stock many " in body
+    assert "</a> today" in body
+
+
+def test_a_javascript_href_loses_its_link_and_keeps_its_words(dashboard_db):
+    """A settings field is not the place to discover that javascript: works."""
+    body = product_copy.render_brand_blurb('<a href="javascript:alert(1)">Sale</a>')
+    assert "javascript:" not in body
+    assert "Sale" in body
+
+
+def test_a_data_uri_href_is_refused(dashboard_db):
+    body = product_copy.render_brand_blurb('<a href="data:text/html,<b>x">Sale</a>')
+    assert "data:" not in body
+
+
+def test_a_script_tag_is_removed_with_its_contents(dashboard_db):
+    """Unwrapping this one would publish the script body as visible text."""
+    body = product_copy.render_brand_blurb("Before<script>alert(1)</script>after")
+    assert "alert(1)" not in body
+    assert "Before" in body and "after" in body
+
+
+def test_a_bare_www_address_still_becomes_a_link(dashboard_db):
+    """Regression: the word-boundary in `_BARE_URL` was once written as a
+    literal backspace character, so this alternative could never match and
+    every bare www address shipped as plain text."""
+    body = product_copy.render_brand_blurb("See www.drflooring.ca today")
+    assert '<a href="https://www.drflooring.ca"' in body
+
+
+def test_a_url_used_as_link_text_is_not_double_wrapped(dashboard_db):
+    """An anchor nested inside an anchor is not something a browser renders
+    the way it reads."""
+    body = product_copy.render_brand_blurb(
+        '<a href="https://drflooring.ca/collections/x">www.drflooring.ca</a>'
+    )
+    assert body.count("<a ") == 1
+
+
+def test_every_shipped_category_link_points_at_a_real_collection(dashboard_db):
+    """The owner's own text linked four WordPress paths — /product-category/…
+    — that do not exist on the Shopify store. Handles here were taken from
+    the live store's collection list."""
+    body = product_copy.render_brand_blurb(product_copy.brand_blurb_text())
+    assert "/product-category/" not in body
+    for handle in (
+        "vinyl-flooring", "laminate-flooring", "engineered-flooring",
+        "transition-and-moulding", "stair-nose", "baseboard", "underlay",
+        "glue-and-ahdesive",
+    ):
+        assert f"/collections/{handle}" in body

@@ -255,6 +255,25 @@ time, not usually. A product the model happened to tag differently is a
 product missing from its own collection page, with nothing about the page
 saying so.
 
+## The brand block, and linking your own categories
+
+The block lives in Settings, and it accepts `<a href="...">` so the ranges it
+names can be reached from every product page — naming them without linking
+them is a dead end. Everything else is reduced to its text: paste from an
+existing page and the editor's `<span>`, `<div>` and `<p>` wrappers are
+unwrapped while the links survive.
+
+That has to be a list of what's allowed rather than what isn't, because one
+settings field reaches every product in the store. `javascript:` and `data:`
+hrefs lose their link and keep their words; `<script>` is dropped with its
+contents. Bare URLs still become links, so `www.drflooring.ca` works without
+an anchor.
+
+**Link Shopify collection handles, not WordPress paths.** The store's old
+`/product-category/…` URLs do not exist on Shopify. The handles shipped by
+default were read off the live store; check a new one against
+`/collections/<handle>` before adding it.
+
 ## The description, top to bottom
 
 1. **The call line** — "For SPECIAL prices, call us NOW at (604) 532-2211".
