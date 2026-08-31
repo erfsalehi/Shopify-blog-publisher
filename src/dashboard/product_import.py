@@ -953,7 +953,19 @@ def _linking(run_id: int) -> PassResult:
             session.query(ImportProduct)
             .filter(
                 ImportProduct.run_id == run_id,
-                ImportProduct.status == ImportProductStatus.created.value,
+                # Products already in the store belong in the grid too. This
+                # asked for `created` alone, so the range each product linked
+                # to was not the range — it was whichever part of the range
+                # that particular run happened to create. Re-importing a
+                # collection where eleven of thirteen already existed left
+                # every product linking to one other product, and the log
+                # said "Cross-linked 2 products" as though that were the
+                # whole of it. `_collection` has always used both statuses;
+                # this is the same question and deserves the same answer.
+                ImportProduct.status.in_([
+                    ImportProductStatus.created.value,
+                    ImportProductStatus.skipped.value,
+                ]),
             )
             .order_by(ImportProduct.position)
             .all()
@@ -967,6 +979,7 @@ def _linking(run_id: int) -> PassResult:
                 "handle": r.handle,
                 "image": _first_image(r.extracted),
                 "linked": r.linked,
+                "existing": r.status == ImportProductStatus.skipped.value,
             }
             for r in rows
             if r.product_gid
@@ -984,7 +997,17 @@ def _linking(run_id: int) -> PassResult:
             elif len(siblings) < 2:
                 run.note("Only one product, so there was nothing to cross-link.")
             else:
-                run.note(f"Cross-linked {len(siblings)} products.")
+                # Said plainly, because linking a product that was reported
+                # "left untouched" a minute earlier does touch it: the
+                # description is rewritten to carry the grid. The title,
+                # images and documents of an existing product are not.
+                existing = sum(1 for s in siblings if s["existing"])
+                extra = (
+                    f" {existing} of them were already in the store, and had "
+                    "their descriptions rewritten to carry the range."
+                    if existing else ""
+                )
+                run.note(f"Cross-linked {len(siblings)} products.{extra}")
             _set_stage(session, run, ImportStage.done, "Done.")
         return PassResult(run_id, ImportStage.done.value, done=True)
 

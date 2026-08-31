@@ -305,7 +305,9 @@ default were read off the live store; check a new one against
 2. Summary, description, key features, specifications, where to use it.
 3. The local-availability line, then the **brand and offers block**.
 4. Downloads — the manufacturer's PDFs, re-hosted on the store.
-5. **The rest of the range**, each with a thumbnail and a link.
+5. **The rest of the range**, each with a thumbnail and a link — every
+   other product in the collection, whether this run created it or found it
+   already in the store.
 
 There is deliberately **no link to the manufacturer's page**. Sending a
 ready-to-buy customer to the supplier is the one link a retailer should not
@@ -316,6 +318,17 @@ ends up inside a Shopify product description rendered by a theme that has
 never heard of this app, so `.related-grid` styles nothing — the block once
 rendered as a bulleted list of full-width images for exactly that reason.
 Only layout is set inline; colours and fonts are left to the theme.
+
+### Re-importing rewrites descriptions
+
+A product already in the store is left alone in every respect but one: its
+description is rewritten so it carries the grid of the full range. It has to
+be, or the range only links itself together for whichever products happened
+to be new that day — and on a re-import that is most of them missing.
+
+Titles, images and documents of an existing product are never touched. The
+run note says how many descriptions were rewritten, because "left untouched"
+appears against those same products a minute earlier in the log.
 
 ## Reading a dry run before you commit to it
 
