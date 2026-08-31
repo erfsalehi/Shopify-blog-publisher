@@ -352,6 +352,40 @@ def _products(run_id: int) -> PassResult:
     )
 
 
+def _range_shape(run_id: int, *, size: str, kind: str) -> tuple[str, str]:
+    """Settle the range's size and product type once, then reuse them.
+
+    Both describe the range rather than the item — every product in a tile
+    series is the same size and the same kind of tile — and both were being
+    asked per product, which is how one range came to ship under three
+    different naming patterns in a single run.
+
+    First non-empty answer wins and is kept on the run. That leaves one
+    residual case honestly: if the first product yields nothing and a later
+    one does, the first keeps the shorter name. One product off-pattern is a
+    great deal better than nine, and the alternative — holding every create
+    until the whole range has been read — would cost a pass per product and
+    still guess for a range where no product ever answers.
+    """
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        options = run.options
+        settled_size = str(options.get("range_size") or "")
+        settled_kind = str(options.get("range_product_type") or "")
+
+        changed = False
+        if not settled_size and size:
+            options["range_size"] = settled_size = size
+            changed = True
+        if not settled_kind and kind:
+            options["range_product_type"] = settled_kind = kind
+            changed = True
+        if changed:
+            run.options_json = json.dumps(options)
+
+    return settled_size or size, settled_kind or kind
+
+
 def _one_product(
     product_id: int,
     *,
@@ -406,15 +440,26 @@ def _one_product(
         # one it answered it said "Onix" — dropping the finish, which is
         # half the discriminator in a range where "Onix Bevel Gloss" and
         # "Onix Diamond Gloss" are different products.
+        # Type and size describe the RANGE, not the item: every product in
+        # "3D Bars" is the same 5"x10" glazed ceramic wall tile. Asked per
+        # product they came back three ways — the full type for four of
+        # thirteen and nothing for the rest, the size as 5"x10" once, 5" x
+        # 10" once and absent otherwise — so one range shipped under three
+        # different naming patterns. They are settled once and reused.
+        size = product_copy.derive_size(source.title, source.specs) or copy.size
+        product_type = copy.product_type or source.product_type or ""
+        size, product_type = _range_shape(run_id, size=size, kind=product_type)
+        copy.size, copy.product_type = size, product_type or copy.product_type
+
         variant = product_copy.derive_variant(
-            source.title, collection=collection_title, size=copy.size,
+            source.title, collection=collection_title, size=size,
         ) or copy.color
         copy.color = variant
         copy.title = product_copy.compose_title(
             brand=vendor or source.vendor,
             collection=collection_title,
-            product_type=copy.product_type or source.product_type,
-            size=copy.size,
+            product_type=product_type,
+            size=size,
             color=variant,
             fallback=copy.title or source.title,
         )

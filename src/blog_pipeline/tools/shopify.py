@@ -195,23 +195,32 @@ class ShopifyClient:
         self,
         article_id: str,
         *,
-        body_html: str,
+        body_html: str | None = None,
         title: str | None = None,
         summary: str | None = None,
         seo_title: str | None = None,
         seo_description: str | None = None,
         dry_run: bool = False,
     ) -> PublishResult:
-        """Overwrite a live post's body in place.
+        """Overwrite a live post's fields in place.
 
         There is no hidden/staged variant of this: an already-published
         Shopify article has no draft revision, so this edits public content
-        the moment it runs. Callers are expected to snapshot the previous body
-        first (see db.ArticleRevision) — this is not reversible from Shopify's
-        side. `isPublished` is deliberately never sent, so a refresh can't
-        accidentally unpublish a page that's already ranking.
+        the moment it runs. Callers passing a body are expected to snapshot
+        the previous one first (see db.ArticleRevision) — that is not
+        reversible from Shopify's side. `isPublished` is deliberately never
+        sent, so a refresh can't accidentally unpublish a page that's already
+        ranking.
+
+        `body_html` is optional so an SEO-only change can leave the prose
+        alone. Sending the body back unchanged would still rewrite it, and
+        Shopify does not return what it was given — it reformats — so a
+        title-only edit would show up as a body edit and cost a revision for
+        nothing.
         """
-        article: dict[str, Any] = {"body": body_html}
+        article: dict[str, Any] = {}
+        if body_html is not None:
+            article["body"] = body_html
         if title:
             article["title"] = title
         if summary:
@@ -237,6 +246,9 @@ class ShopifyClient:
             })
         if metafields:
             article["metafields"] = metafields
+
+        if not article:
+            raise ShopifyError("update_article called with nothing to change.")
 
         gid = _as_gid(article_id, "Article")
         if dry_run:

@@ -234,6 +234,19 @@ contained in the next one is not repeated: a manufacturer publishing its
 range as "EUROSTYLE Venice Grand PRO" under the brand "EUROSTYLE" still
 produces one "EUROSTYLE".
 
+**Type and size are settled once per range, not per product.** Every product
+in a tile series is the same size and the same kind of tile, so asking the
+model each time is asking a question whose answer must not vary — and it did:
+one range came back with the full type for four products of thirteen and
+nothing for the rest, and with the size written `5"x10"` once, `5" x 10"`
+once and omitted otherwise. The first non-empty answer is kept on the run and
+reused. The size is also read off the source and normalised, so a maker's
+spacing cannot produce two names for one shape.
+
+One residual: if the *first* product yields no type and a later one does, the
+first keeps the shorter name. One product off-pattern beats nine, and the
+alternative is holding every create until the whole range has been read.
+
 **When the source names no colour, the source's own title is used instead.**
 The colour is the only part that separates one item in a range from the
 next, so composing without it would give every product the same name — and

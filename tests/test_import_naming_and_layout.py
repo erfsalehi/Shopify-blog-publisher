@@ -331,3 +331,74 @@ def test_a_title_that_is_only_the_range_derives_nothing(dashboard_db):
     assert product_copy.derive_variant(
         "3D Bars", collection="3D Bars", size=""
     ) == ""
+
+
+# ── Type and size describe the range, not the item ─────────────────
+#
+# Asked per product, they came back three ways across one range: the full
+# type for four of thirteen and nothing for the rest, the size as 5"x10"
+# once, 5" x 10" once and absent otherwise. One collection shipped under
+# three naming patterns in a single run.
+
+
+def test_the_size_is_spelled_one_way(dashboard_db):
+    """"5" x 10"" and "5"x10"" are the same size, and only one of them can
+    be the store's — the size goes in the title."""
+    spaced = product_copy.derive_size('3D Bars | 5" x 10" Emerald Diamond Gloss')
+    tight = product_copy.derive_size('3D Bars | 5"x10" Emerald Bevel Gloss')
+    assert spaced == tight == '5"x10"'
+
+
+def test_the_size_is_found_in_the_specification_table(dashboard_db):
+    """Not every maker puts it in the title."""
+    assert product_copy.derive_size(
+        "Emerald Bevel Gloss", {"Nominal Size": '5" x 10"'}
+    ) == '5"x10"'
+
+
+def test_a_product_with_no_stated_size_invents_none(dashboard_db):
+    assert product_copy.derive_size("Underlay roll", {"Colour": "Blue"}) == ""
+
+
+def test_the_range_settles_its_shape_once(dashboard_db):
+    """The fix for the three patterns. The first answer is kept on the run
+    and reused, so a later product whose type the model omitted is named the
+    same way as the first."""
+    from dashboard.db import get_session
+    from dashboard.models import ImportRun, ImportStage
+    from dashboard.product_import import _range_shape
+
+    with get_session() as session:
+        run = ImportRun(
+            source_url="https://maker.test/collections/bars",
+            collection_title="3D Bars", stage=ImportStage.products.value,
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    first = _range_shape(run_id, size='5"x10"', kind="Glazed Ceramic Wall Tile")
+    # The model gave nothing for the next product in the range.
+    second = _range_shape(run_id, size="", kind="")
+    assert first == second == ('5"x10"', "Glazed Ceramic Wall Tile")
+
+
+def test_a_settled_range_is_not_overwritten_by_a_later_answer(dashboard_db):
+    """One range, one shape. A model that changes its mind halfway through
+    would otherwise split the collection across two patterns again."""
+    from dashboard.db import get_session
+    from dashboard.models import ImportRun, ImportStage
+    from dashboard.product_import import _range_shape
+
+    with get_session() as session:
+        run = ImportRun(
+            source_url="https://maker.test/collections/bars",
+            collection_title="3D Bars", stage=ImportStage.products.value,
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    _range_shape(run_id, size='5"x10"', kind="Glazed Ceramic Wall Tile")
+    later = _range_shape(run_id, size='12"x24"', kind="Porcelain Floor Tile")
+    assert later == ('5"x10"', "Glazed Ceramic Wall Tile")

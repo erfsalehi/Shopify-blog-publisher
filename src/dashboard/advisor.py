@@ -42,6 +42,7 @@ from dashboard.db import get_session
 from dashboard.models import (
     AdvisorAction,
     AdvisorNote,
+    BlogArticle,
     ShopifyProduct,
     StepKind,
 )
@@ -93,6 +94,11 @@ button instead of retyping it. Use ONLY handles that appear in the context \
 table; a handle you invent makes the whole suggestion untrustworthy. Group \
 the products that share one rationale into a single action — a test across \
 five products can be measured and a test across one cannot.
+7. A blog post's meta title or description is an `article_seo` action, given \
+the same way: the post's handle exactly as the blog table's `handle` column \
+shows it, plus the full new text. This writes the meta tag only and never \
+touches the article body, so it is safe to propose for a post you would not \
+want rewritten.
 
 Reply as JSON with exactly this shape:
 {"summary": "one or two sentences on how this area is doing",
@@ -103,10 +109,16 @@ Reply as JSON with exactly this shape:
     "kind": "product_seo",
     "products": [{"handle": "exact-handle-from-the-table",
                   "seo_title": "the full new title, under 60 characters",
+                  "seo_description": "the full new meta description, optional"}]},
+   {"text": "Retitle this post to lead with the location",
+    "kind": "article_seo",
+    "articles": [{"handle": "exact-handle-from-the-blog-table",
+                  "seo_title": "the full new title, under 60 characters",
                   "seo_description": "the full new meta description, optional"}]}
  ]}
-`kind` is "product_seo" or "manual". Use "manual" for anything else — \
-there is no shame in it and most good advice is manual. No other keys."""
+`kind` is "product_seo", "article_seo" or "manual". Use "manual" for anything \
+else — there is no shame in it and most good advice is manual. No other \
+keys."""
 
 # Appended rather than interpolated. This prompt contains literal percent
 # signs ("94% of the catalogue") and literal braces (the JSON example), so
@@ -130,6 +142,9 @@ MAX_SEO_DESCRIPTION = 400
 #: proposing to rewrite the entire catalogue behind one button is not a
 #: suggestion, it is a migration.
 MAX_ACTION_PRODUCTS = 25
+# Blog posts are advised one or two at a time, never in a cohort the way
+# products are — a title test across five articles isn't a thing.
+MAX_ACTION_ARTICLES = 10
 
 
 @dataclass(frozen=True)
@@ -231,7 +246,22 @@ def _valid_action(raw) -> ProposedAction | None:
         return None
     action = ProposedAction(text=text[:2000])
 
-    if str(raw.get("kind") or "").strip() != StepKind.product_seo.value:
+    kind = str(raw.get("kind") or "").strip()
+
+    if kind == StepKind.article_seo.value:
+        articles = _resolve_articles(raw.get("articles"))
+        if not articles:
+            # Named no post that exists, or no post that is actually live on
+            # Shopify. Same rule as products: the advice survives, the button
+            # doesn't.
+            return action
+        return ProposedAction(
+            text=action.text,
+            kind=StepKind.article_seo.value,
+            payload={"articles": articles},
+        )
+
+    if kind != StepKind.product_seo.value:
         return action
     products = _resolve_products(raw.get("products"))
     if not products:
@@ -244,6 +274,70 @@ def _valid_action(raw) -> ProposedAction | None:
         kind=StepKind.product_seo.value,
         payload={"products": products},
     )
+
+
+def _article_handle(value: str) -> str:
+    """The handle out of whatever the model wrote.
+
+    It cites blog posts the way the context table shows them — sometimes a
+    bare handle, sometimes the path `/blogs/news/<handle>`, sometimes a full
+    URL. All three mean one post, and rejecting two of the three spellings
+    would downgrade good advice over punctuation.
+    """
+    text = (value or "").strip().lower().split("?")[0].split("#")[0].rstrip("/")
+    return text.rsplit("/", 1)[-1] if "/" in text else text
+
+
+def _resolve_articles(raw) -> list[dict]:
+    """Turn the model's blog handles into rows that exist and are live.
+
+    Same contract as `_resolve_products`: resolved once here, at generation
+    time, pinned to the Shopify article id it meant. A post with no
+    `shopify_article_id` is dropped — it was never published, so there is
+    nothing on the site to retitle.
+    """
+    if not isinstance(raw, list):
+        return []
+
+    wanted: dict[str, dict] = {}
+    for item in raw[:MAX_ACTION_ARTICLES]:
+        if not isinstance(item, dict):
+            continue
+        handle = _article_handle(str(item.get("handle") or item.get("url") or ""))
+        title = str(item.get("seo_title") or "").strip()
+        description = str(item.get("seo_description") or "").strip()
+        if not handle or handle in wanted:
+            continue
+        if not title and not description:
+            continue  # Nothing to write is not a write.
+        if len(title) > MAX_SEO_TITLE or len(description) > MAX_SEO_DESCRIPTION:
+            continue
+        wanted[handle] = {"seo_title": title, "seo_description": description}
+    if not wanted:
+        return []
+
+    with get_session() as session:
+        rows = (
+            session.query(BlogArticle)
+            .filter(BlogArticle.shopify_article_id.isnot(None))
+            .all()
+        )
+        found = []
+        for row in rows:
+            handle = _article_handle(row.shopify_url or "")
+            if handle not in wanted:
+                continue
+            found.append(
+                {
+                    "article_id": row.id,
+                    "shopify_article_id": row.shopify_article_id,
+                    "handle": handle,
+                    "title": row.title,
+                    "url": row.shopify_url,
+                    **wanted[handle],
+                }
+            )
+    return found
 
 
 def _resolve_products(raw) -> list[dict]:
@@ -483,6 +577,8 @@ def run_action(action_id: int) -> AdvisorAction:
 
     if already == "done":
         return _reload(action_id)
+    if kind == StepKind.article_seo.value:
+        return _run_article_seo(action_id)
     if kind != StepKind.product_seo.value:
         raise ActionError(
             f"'{kind}' suggestions are tracked, not automated — this app has "
@@ -526,6 +622,63 @@ def run_action(action_id: int) -> AdvisorAction:
         if row.run_status == "done":
             # A suggestion the app carried out is done by definition, and the
             # memory should say so next time the advisor runs.
+            row.status = "done"
+            row.note = "applied from the dashboard"
+            row.resolved_at = row.run_at
+    return _reload(action_id)
+
+
+def _run_article_seo(action_id: int) -> AdvisorAction:
+    """Write the meta title/description of one or more live blog posts.
+
+    Only metafields are sent — `update_article` takes no body here, so the
+    prose is untouched and the post keeps its revision history. That also
+    means there is nothing to snapshot: this cannot destroy writing, only a
+    meta tag, and the previous value is recorded in `run_result` so it can be
+    put back by hand.
+
+    Each post is attempted independently, for the same reason the product
+    path does it — one failure must not leave half the set written with no
+    record of which half.
+    """
+    from blog_pipeline.tools.shopify import ShopifyClient
+
+    with get_session() as session:
+        action = session.get(AdvisorAction, action_id)
+        articles = action.articles
+    if not articles:
+        raise ActionError("This suggestion has no blog posts to write to.")
+
+    client = ShopifyClient()
+    done: list[str] = []
+    failed: list[str] = []
+    try:
+        for item in articles:
+            label = item.get("title") or item.get("handle")
+            try:
+                client.update_article(
+                    item["shopify_article_id"],
+                    seo_title=item.get("seo_title") or None,
+                    seo_description=item.get("seo_description") or None,
+                )
+            except Exception as exc:  # noqa: BLE001 - reported on the row
+                log.warning("advisor action %s failed on %s: %s", action_id, label, exc)
+                failed.append(f"{label}: {exc}")
+                continue
+            done.append(f"{label} → {item.get('seo_title') or item.get('seo_description')}")
+    finally:
+        client.close()
+
+    lines = [f"Updated {len(done)} of {len(articles)} blog posts."]
+    lines += [f"  ok  {line}" for line in done]
+    lines += [f"  ✗   {line}" for line in failed]
+
+    with get_session() as session:
+        row = session.get(AdvisorAction, action_id)
+        row.run_status = "done" if done and not failed else "failed"
+        row.run_result = "\n".join(lines)[:4000]
+        row.run_at = datetime.now(timezone.utc)
+        if row.run_status == "done":
             row.status = "done"
             row.note = "applied from the dashboard"
             row.resolved_at = row.run_at

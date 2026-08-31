@@ -60,13 +60,16 @@
           {# The proposed change, shown in full. A button that writes to live
              products without first showing exactly what it will write is a
              button nobody should press. #}
-          {% if action.products %}
+          {% if action.targets %}
           <table class="advisor-payload">
             <thead>
-              <tr><th>Product</th><th>Would become</th></tr>
+              <tr>
+                <th>{{ 'Blog post' if action.articles else 'Product' }}</th>
+                <th>Would become</th>
+              </tr>
             </thead>
             <tbody>
-              {% for item in action.products %}
+              {% for item in action.targets %}
               <tr>
                 <td class="page-cell">
                   {{ item.title }}
@@ -93,12 +96,16 @@
           {% endif %}
         </td>
         <td class="nowrap advisor-buttons">
-          {% if action.executable and action.products %}
+          {% if action.executable and action.targets %}
           <form method="post" action="/advisor/action/{{ action.id }}/run"
-                onsubmit="return confirm('Write these values to live products on drflooring.ca?');">
+                onsubmit="return confirm({{ ('Write these meta titles to live blog posts on drflooring.ca? The article text is not touched.' if action.articles else 'Write these values to live products on drflooring.ca?') | tojson }});">
             <input type="hidden" name="back" value="{{ advisor_back }}">
             <button type="submit" class="small-btn primary">Apply</button>
           </form>
+          {# No "Test it" for a blog post. An experiment needs a control
+             cohort, and one article measured against its own past is a
+             before/after, not a test — see the products branch below. #}
+          {% if action.products %}
           {% if action.experiment_id %}
           <a class="small-btn" href="/experiments/{{ action.experiment_id }}">Experiment →</a>
           {% else %}
@@ -106,6 +113,7 @@
             <input type="hidden" name="back" value="{{ advisor_back }}">
             <button type="submit" class="small-btn">Test it</button>
           </form>
+          {% endif %}
           {% endif %}
           {% endif %}
           <form method="post" action="/advisor/action/{{ action.id }}">
@@ -133,9 +141,11 @@
     <strong>Test it</strong> writes nothing — it builds an experiment with a
     matched control group, and the change is applied there once you've
     reviewed the controls and frozen a baseline, which is the only order that
-    can tell you afterwards whether it worked. Suggestions without buttons are
-    ones this app has no write access for; do those yourself and mark them
-    done.
+    can tell you afterwards whether it worked. It appears on product
+    suggestions only: a control group needs comparable pages, and one blog
+    post measured against its own past is a before-and-after, not a test.
+    Suggestions without buttons are ones this app has no write access for; do
+    those yourself and mark them done.
   </p>
   {% endif %}
 

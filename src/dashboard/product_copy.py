@@ -401,6 +401,34 @@ _SIZE_IN_TEXT = re.compile(
     re.I,
 )
 
+#: Where a specification table hides the dimension.
+_SIZE_KEYS = ("size", "nominal size", "dimensions", "dimension", "format")
+
+
+def derive_size(source_title: str, specs: dict | None = None) -> str:
+    """The dimension as the manufacturer writes it, spelled one way.
+
+    Asked of the model this came back three ways across one range — `5"x10"`
+    for one product, `5" x 10"` for another, nothing at all for nine — and
+    since the size goes in the product title, a range came out with three
+    different names for the same shape.
+
+    So it is read off the source and normalised: inner spacing removed and
+    the separator lowercased, because `5" x 10"` and `5"x10"` are the same
+    size and only one of them can be the store's.
+    """
+    for text in (source_title or "", *_spec_sizes(specs)):
+        match = _SIZE_IN_TEXT.search(str(text))
+        if match:
+            return re.sub(r"\s+", "", match.group(0)).replace("×", "x").replace("X", "x")
+    return ""
+
+
+def _spec_sizes(specs: dict | None):
+    for key, value in (specs or {}).items():
+        if any(word in str(key).lower() for word in _SIZE_KEYS):
+            yield value
+
 
 def derive_variant(
     source_title: str, *, collection: str | None = None, size: str | None = None

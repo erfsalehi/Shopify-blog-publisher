@@ -395,6 +395,21 @@ class AdvisorAction(Base):
         found = self.payload.get("products")
         return found if isinstance(found, list) else []
 
+    @property
+    def articles(self) -> list[dict]:
+        """The resolved blog posts this suggestion would write to, if any."""
+        found = self.payload.get("articles")
+        return found if isinstance(found, list) else []
+
+    @property
+    def targets(self) -> list[dict]:
+        """Whatever this suggestion writes to — what the button is drawn for.
+
+        One accessor so the template asks "is there something to write to?"
+        rather than growing a branch per kind.
+        """
+        return self.products or self.articles
+
 
 class ShopifyProduct(Base):
     """A product as it existed at the last catalogue sync.
@@ -803,6 +818,9 @@ class StepKind(str, enum.Enum):
         and produces a diff for review. Never publishes on its own.
       * `product_seo` — writes a title/description through the same
         `productUpdate` path the Products page uses.
+      * `article_seo` — writes a blog post's meta title/description through
+        `articleUpdate`, touching the `global.title_tag` metafield and not
+        the prose.
 
     Everything else is a checklist item with a due date and a place to record
     what happened. `gbp` exists as its own kind rather than folding into
@@ -814,6 +832,7 @@ class StepKind(str, enum.Enum):
     blog_topic = "blog_topic"
     article_refresh = "article_refresh"
     product_seo = "product_seo"
+    article_seo = "article_seo"
     page_content = "page_content"
     ads = "ads"
     gbp = "gbp"
@@ -825,6 +844,7 @@ EXECUTABLE_KINDS = frozenset({
     StepKind.blog_topic.value,
     StepKind.article_refresh.value,
     StepKind.product_seo.value,
+    StepKind.article_seo.value,
 })
 
 

@@ -201,11 +201,17 @@ def _blog(today: date) -> str:
         "to 5,497 is only -70% and worth 12,775.",
         "",
         "WORST DECAY:",
+        # The handle is here so an `article_seo` action can name a post the
+        # resolver will actually find. Without it the model can only cite a
+        # title, every action fails resolution, and the advice silently
+        # degrades to prose with no button.
         _table(
-            ["article", "impressions", "lost", "clicks", "position", "last refreshed"],
+            ["article", "handle", "impressions", "lost", "clicks", "position",
+             "last refreshed"],
             [
                 [
                     r["article"].title[:52],
+                    (r["article"].shopify_url or "").rstrip("/").rsplit("/", 1)[-1],
                     r["current"].impressions,
                     r["impressions_lost"],
                     r["current"].clicks,
