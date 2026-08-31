@@ -155,24 +155,35 @@ class AnalyticsClient:
         start_date: date,
         end_date: date,
         limit: int = 50000,
+        dimension_filter: dict | None = None,
     ) -> list[dict]:
-        """runReport rows as {dimensions: [...], metrics: [...]}."""
+        """runReport rows as {dimensions: [...], metrics: [...]}.
+
+        `dimension_filter` is a GA4 FilterExpression, applied by the API
+        before the row limit. Filtering here rather than in Python is not a
+        tidiness preference: every extra dimension multiplies the row count,
+        and a report that exceeds `limit` is truncated silently — which drops
+        rare rows first and reads as "no conversions" rather than as an error.
+        """
         if not self.enabled:
             return []
+        payload: dict = {
+            "dimensions": [{"name": d} for d in dimensions],
+            "metrics": [{"name": m} for m in metrics],
+            "dateRanges": [
+                {
+                    "startDate": start_date.isoformat(),
+                    "endDate": end_date.isoformat(),
+                }
+            ],
+            "limit": limit,
+        }
+        if dimension_filter:
+            payload["dimensionFilter"] = dimension_filter
         resp = httpx.post(
             f"{DATA_API}/properties/{self.property_id}:runReport",
             headers=self._headers(),
-            json={
-                "dimensions": [{"name": d} for d in dimensions],
-                "metrics": [{"name": m} for m in metrics],
-                "dateRanges": [
-                    {
-                        "startDate": start_date.isoformat(),
-                        "endDate": end_date.isoformat(),
-                    }
-                ],
-                "limit": limit,
-            },
+            json=payload,
             timeout=60.0,
         )
         if resp.status_code == 403:

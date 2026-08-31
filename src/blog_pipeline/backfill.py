@@ -18,8 +18,16 @@ them.
 
 from __future__ import annotations
 
+import html as html_module
+import re
 from datetime import datetime
 
+from blog_pipeline.agents.convert import (
+    BLOCK_MARKERS,
+    apply_conversion_blocks,
+    blocks_present,
+    strip_blocks,
+)
 from blog_pipeline.config import get_settings
 from blog_pipeline.db import Article, ArticleRevision, get_session
 from blog_pipeline.db.models import ArticleStatus, RevisionReason, TopicSource
@@ -112,6 +120,165 @@ def import_shopify_articles(*, limit: int = 250, dry_run: bool = False) -> dict:
         "updated": updated,
         "unchanged": unchanged,
         "dry_run": dry_run,
+    }
+
+
+def _same_markup(a: str, b: str) -> bool:
+    """Whether two bodies are the same page, ignoring how Shopify stored it.
+
+    Shopify does not hand back what it was given: it inserts newlines inside
+    our markup and returns `&rarr;` re-escaped as `&amp;rarr;` (which still
+    renders as the arrow, so this is serialization, not corruption). Comparing
+    raw strings therefore says "changed" on every single run, and a --replace
+    would rewrite all 63 posts forever, each one taking a fresh revision
+    snapshot for an edit that changes nothing a reader sees.
+
+    Unescaping twice is what makes `&amp;rarr;` and `&rarr;` converge. Used
+    only to compare — never to build what gets written.
+    """
+    def norm(markup: str) -> str:
+        text = html_module.unescape(html_module.unescape(markup))
+        # Attribute delimiters too, not just entities. A product whose title
+        # contains an inch mark ("Moulding Baseboard 1/2\" x 2") is written
+        # with `&quot;` inside a double-quoted attribute and handed back with
+        # a literal quote inside a single-quoted one. Same page, and without
+        # this that one post is rewritten on every run forever.
+        return re.sub(r"\s+", " ", re.sub(r">\s+<", "><", text)).replace("'", '"').strip()
+
+    return norm(a) == norm(b)
+
+
+def backfill_conversion_blocks(
+    *, limit: int = 250, dry_run: bool = True, replace: bool = False
+) -> dict:
+    """Inject the mid-article conversion blocks into already-published posts.
+
+    The back catalogue is where the impressions already are, so it is where
+    the blocks are worth the most — but these are live pages, and
+    `update_article` edits public content the moment it runs with no staged
+    variant to review.
+
+    Three rules keep that safe:
+
+      * **Dry run by default.** The caller has to ask for the write.
+      * **No snapshot, no edit.** A post without an `Article` row can't have
+        an `ArticleRevision` written for it, which means `rollback-refresh`
+        couldn't undo it. Those are skipped and counted, not edited — run
+        `import-existing` first to bring them in.
+      * **Idempotent.** A post that already carries a block is left alone, so
+        re-running tops up the remainder instead of stacking duplicates.
+
+    Snapshots use `RevisionReason.pre_refresh`, the same reason the refresh
+    agent writes, so `rollback-refresh <id>` is the undo for this too rather
+    than a second mechanism doing the same job.
+    """
+    client = ShopifyClient()
+    changed = skipped_existing = skipped_no_row = skipped_no_break = failed = 0
+    touched: list[dict] = []
+    errors: list[dict] = []
+    posts: list[dict] = []
+    try:
+        products = client.list_product_cards()
+        collections = client.list_collection_cards()
+        posts = client.list_published(limit=limit)
+
+        with get_session() as session:
+            rows = {
+                a.shopify_article_id: a.id
+                for a in session.query(Article)
+                .filter(Article.shopify_article_id.isnot(None))
+                .all()
+            }
+
+        for post in posts:
+            gid = post.get("id")
+            title = (post.get("title") or "").strip()
+            if not gid:
+                continue
+            article_id = rows.get(gid)
+            if article_id is None:
+                skipped_no_row += 1
+                continue
+            try:
+                live = client.fetch_article(gid)
+            except Exception as e:
+                # Not just ShopifyError: a read timeout or a 5xx surfaces as
+                # an httpx error, and letting one propagate aborts the whole
+                # run part-written — which is exactly what happened on a live
+                # run of 63 posts. One bad post costs that post, not the rest.
+                failed += 1
+                errors.append({"title": title, "error": f"{type(e).__name__}: {e}"})
+                continue
+            body = live.get("body") or ""
+            # `replace` throws away what a previous run injected and starts
+            # from the original prose, which is how an improvement to
+            # placement or matching reaches posts that already have blocks.
+            source = strip_blocks(body) if replace else body
+            # Per block, not per post: a post that got cards before the phone
+            # number was configured still needs its banner, and re-running is
+            # how it gets one.
+            present = blocks_present(source)
+            if len(present) == len(BLOCK_MARKERS):
+                skipped_existing += 1
+                continue
+
+            new_body = apply_conversion_blocks(
+                body_html=source,
+                campaign=title or live.get("handle") or "post",
+                keywords=[title],
+                products=products,
+                collections=collections,
+                skip=present,
+            )
+            if new_body == source:
+                # Nothing placed: the post has fewer than two <h2> sections,
+                # so there is no break to put a block at without splitting a
+                # paragraph. Left alone rather than appended to.
+                skipped_no_break += 1
+                continue
+            if _same_markup(new_body, body):
+                # A --replace run that rebuilt exactly what is already live.
+                # Counted as done rather than changed, so the summary doesn't
+                # claim work that produced no edit.
+                skipped_existing += 1
+                continue
+
+            if not dry_run:
+                with get_session() as session:
+                    session.add(
+                        ArticleRevision(
+                            article_id=article_id,
+                            body_html=body,
+                            title=live.get("title"),
+                            reason=RevisionReason.pre_refresh,
+                        )
+                    )
+                try:
+                    client.update_article(gid, body_html=new_body)
+                except Exception as e:
+                    failed += 1
+                    errors.append({"title": title, "error": f"{type(e).__name__}: {e}"})
+                    continue
+                with get_session() as session:
+                    row = session.get(Article, article_id)
+                    if row:
+                        row.draft_html = new_body
+            changed += 1
+            touched.append({"article_id": article_id, "title": title})
+    finally:
+        client.close()
+
+    return {
+        "fetched": len(posts),
+        "changed": changed,
+        "skipped_already_had_blocks": skipped_existing,
+        "skipped_not_imported": skipped_no_row,
+        "skipped_no_section_break": skipped_no_break,
+        "failed": failed,
+        "errors": errors,
+        "touched": touched,
+        "dry_run": dry_run,
+        "replace": replace,
     }
 
 

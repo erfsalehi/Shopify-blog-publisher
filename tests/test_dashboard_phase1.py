@@ -51,14 +51,27 @@ class FakeGA4:
         self.enabled = enabled
         self.property_id = "272416383"
         self._events = event_names
+        self.filters: list[dict | None] = []
 
-    def run_report(self, *, dimensions, metrics, start_date, end_date, limit=50000):
+    def run_report(
+        self, *, dimensions, metrics, start_date, end_date, limit=50000,
+        dimension_filter=None,
+    ):
+        self.filters.append(dimension_filter)
         rows = []
         day = start_date
         while day <= end_date:
             stamp = day.strftime("%Y%m%d")
             if dimensions == ["date"]:
                 rows.append({"dimensions": [stamp], "metrics": ["100", "80", "60"]})
+            elif dimensions == ["date", "eventName", "pagePath"]:
+                # A filtered API returns only what was asked for; the job must
+                # not depend on filtering these in Python.
+                for name in self._events:
+                    rows.append({
+                        "dimensions": [stamp, name, "/blogs/news/spc-guide"],
+                        "metrics": ["1"],
+                    })
             else:
                 for name in self._events:
                     rows.append({"dimensions": [stamp, name], "metrics": ["2"]})
@@ -78,6 +91,62 @@ def test_ga4_rows_are_read_in_the_clients_own_shape(dashboard_db, monkeypatch):
     with get_session() as session:
         assert session.query(Ga4Daily).count() == 5
         assert session.query(Ga4EventDaily).count() == 10
+
+
+def test_blog_conversions_are_attributed_to_the_page(dashboard_db, monkeypatch):
+    """Sessions can be attributed by UTM; a phone call can't. GA4 stamps the
+    page on the event, so the attribution is a dimension, not a new tag."""
+    from dashboard.models import Ga4BlogEventDaily
+
+    monkeypatch.setattr(store, "get", _stub_store({
+        store.GA4_BACKFILL_DAYS: 4, store.GA4_RECENT_DAYS: 2,
+        store.GA4_EVENTS: ["call_click", "whatsapp_click"],
+    }))
+    sync_ga4_daily(client=FakeGA4(), today=TODAY)
+    with get_session() as session:
+        rows = session.query(Ga4BlogEventDaily).all()
+        assert rows, "no blog-attributed conversions stored"
+        assert {r.page_path for r in rows} == {"/blogs/news/spc-guide"}
+
+
+def test_the_blog_report_is_filtered_by_the_api_not_in_python(
+    dashboard_db, monkeypatch
+):
+    """Regression: three dimensions over a 180-day backfill exceeds the row
+    limit, and GA4 truncates silently — dropping the handful of blog
+    conversions and reporting a confident zero."""
+    monkeypatch.setattr(store, "get", _stub_store({
+        store.GA4_BACKFILL_DAYS: 4, store.GA4_RECENT_DAYS: 2,
+        store.GA4_EVENTS: ["call_click"],
+    }))
+    client = FakeGA4(event_names=("call_click",))
+    sync_ga4_daily(client=client, today=TODAY)
+
+    sent = [f for f in client.filters if f]
+    assert len(sent) == 1, "the blog report must be the filtered one"
+    fields = {
+        e["filter"]["fieldName"] for e in sent[0]["andGroup"]["expressions"]
+    }
+    assert fields == {"pagePath", "eventName"}
+
+
+def test_blog_rows_do_not_double_count_the_conversion_total(
+    dashboard_db, monkeypatch
+):
+    """The blog rows are a subset of the event rows. Kept in their own table
+    so no existing SUM over ga4_event_daily silently doubles."""
+    from dashboard.models import Ga4BlogEventDaily
+
+    monkeypatch.setattr(store, "get", _stub_store({
+        store.GA4_BACKFILL_DAYS: 3, store.GA4_RECENT_DAYS: 1,
+        store.GA4_EVENTS: ["call_click"],
+    }))
+    sync_ga4_daily(client=FakeGA4(event_names=("call_click",)), today=TODAY)
+    with get_session() as session:
+        totals = session.query(Ga4EventDaily).count()
+        blog = session.query(Ga4BlogEventDaily).count()
+    assert totals and blog
+    assert Ga4EventDaily.__tablename__ != Ga4BlogEventDaily.__tablename__
 
 
 def test_ga4_only_stores_configured_events(dashboard_db, monkeypatch):

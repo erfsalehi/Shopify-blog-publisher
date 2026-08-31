@@ -1,6 +1,7 @@
-"""GA4 → `ga4_daily` / `ga4_event_daily`.
+"""GA4 → `ga4_daily` / `ga4_event_daily` / `ga4_blog_event_daily`.
 
-Two reports, and the second one is the important one.
+Three reports, and the second one is the important one — the third says
+which page earned it.
 
 Sessions tell you how many people arrived. On this store that is not the
 outcome: ~94% of the catalogue hides its price behind "Call for price", so
@@ -24,7 +25,7 @@ from dashboard import store
 from dashboard.db import get_session
 from dashboard.jobs.registry import JobResult, JobSpec, register
 from dashboard.jobs.windows import plan_window
-from dashboard.models import Ga4Daily, Ga4EventDaily, GscFetchDay
+from dashboard.models import Ga4BlogEventDaily, Ga4Daily, Ga4EventDaily, GscFetchDay
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +38,7 @@ SETTLING_DAYS = 2
 # values. Separate kinds because the two sources cover different day ranges.
 _KIND_TOTALS = "ga4_totals"
 _KIND_EVENTS = "ga4_events"
+_KIND_BLOG_EVENTS = "ga4_blog_events"
 
 
 def settled_through(today: date | None = None) -> date:
@@ -120,6 +122,7 @@ def sync_ga4_daily(
     with get_session() as session:
         totals_have = _fetched_days(session, _KIND_TOTALS)
         events_have = _fetched_days(session, _KIND_EVENTS)
+        blog_have = _fetched_days(session, _KIND_BLOG_EVENTS)
 
     detail: dict = {
         "property": client.property_id,
@@ -209,9 +212,78 @@ def sync_ga4_daily(
             detail["events_not_found_in_ga4"] = missing
             log.warning("GA4 reported no rows for configured events: %s", missing)
 
+    # ── The same events, attributed to the post that earned them ───
+    # Sessions can be attributed to a post by UTM, but a phone call cannot:
+    # the tel: link leaves no web trail, and GTM's site-wide call_click tag
+    # doesn't know it fired on an article. GA4 does know — it stamps every
+    # event with the page — so the attribution is a dimension we weren't
+    # asking for rather than a tag we need to add.
+    #
+    # Its own fetch bookkeeping, not the event report's: sharing that marker
+    # meant every day synced before this report existed counted as done, so
+    # the history it was added to measure could never be backfilled.
+    #
+    # Deliberately NOT merged into the event report either — these rows are a
+    # subset of it, and summing both would double every blog conversion, the
+    # same shape of bug as the duplicate GTM tag documented in
+    # store.GA4_EVENTS.
+    blog_rows = 0
+    _, _, wanted_blog = plan_window(
+        blog_have, backfill_days=backfill, recent_days=recent, today=today
+    )
+    if wanted_blog and events:
+        start, end = min(wanted_blog), max(wanted_blog)
+        blog_report = client.run_report(
+            dimensions=["date", "eventName", "pagePath"],
+            metrics=["eventCount"],
+            start_date=start,
+            end_date=end,
+            # Filtered by the API, not by us. Three dimensions over a
+            # 180-day backfill runs to far more rows than the request limit,
+            # and GA4 truncates silently — which drops the handful of blog
+            # conversions this table exists to record and reports zero.
+            dimension_filter={
+                "andGroup": {"expressions": [
+                    {"filter": {
+                        "fieldName": "pagePath",
+                        "stringFilter": {"matchType": "CONTAINS", "value": "/blogs/"},
+                    }},
+                    {"filter": {
+                        "fieldName": "eventName",
+                        "inListFilter": {"values": list(events)},
+                    }},
+                ]}
+            },
+        )
+        detail["api_calls"] += 1
+        wanted_events = set(events)
+        now = datetime.now(timezone.utc)
+        with get_session() as session:
+            session.query(Ga4BlogEventDaily).filter(
+                Ga4BlogEventDaily.date >= start, Ga4BlogEventDaily.date <= end
+            ).delete(synchronize_session=False)
+            for dims, mets in _rows_of(blog_report):
+                day = _parse_day(dims[0] if dims else None)
+                name = dims[1] if len(dims) > 1 else None
+                path = dims[2] if len(dims) > 2 else None
+                if day is None or not name or not path:
+                    continue
+                if "/blogs/" not in path or name not in wanted_events:
+                    continue
+                if not (start <= day <= end):
+                    continue
+                session.add(Ga4BlogEventDaily(
+                    date=day, event_name=name, page_path=path[:500],
+                    event_count=_int(mets[0] if mets else 0),
+                    fetched_at=now,
+                ))
+                blog_rows += 1
+            _mark_fetched(session, _KIND_BLOG_EVENTS, start, end)
+    detail["blog_event_rows"] = blog_rows
+
     detail["total_days"] = total_rows
     detail["event_rows"] = event_rows
-    return JobResult(rows=total_rows + event_rows, detail=detail)
+    return JobResult(rows=total_rows + event_rows + blog_rows, detail=detail)
 
 
 register(

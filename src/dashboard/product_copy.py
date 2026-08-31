@@ -91,10 +91,12 @@ class ProductCopy(BaseModel):
     color: str = Field(
         default="",
         description=(
-            "The colour, decor or finish name that distinguishes THIS item "
-            "from the rest of its range, and nothing else — 'Bassano', "
-            "'Emerald Bevel Gloss', 'Natural Oak'. Not the range name, not "
-            "the size, not the material. Empty if the range has only one."
+            "EVERYTHING that distinguishes THIS item from the rest of its "
+            "range — colour and finish together, not colour alone: "
+            "'Emerald Bevel Gloss', not 'Emerald', because 'Emerald Diamond "
+            "Gloss' is a different product. Also 'Bassano', 'Natural Oak'. "
+            "Not the range name, not the size, not the material. Only give "
+            "nothing when the range genuinely has one item."
         ),
     )
     product_type: str = Field(description="Shopify product type, e.g. 'Wall Tile'")
@@ -388,6 +390,48 @@ def _one_line(text: str) -> str:
 #: wraps to three lines in search results and in the admin list is one
 #: nobody can scan.
 MAX_TITLE = 160
+
+
+#: A dimension as manufacturers write it: 5"x10", 12 x 24, 7-1/2" X 48".
+#: Stripped out of a derived variant name, because a variant is never a
+#: size, and the maker's spelling of one rarely matches the model's.
+_SIZE_IN_TEXT = re.compile(
+    r'["”’]?\d+(?:[./-]\d+)*\s*["”’]?'
+    r'\s*[x×]\s*\d+(?:[./-]\d+)*\s*["”’]?',
+    re.I,
+)
+
+
+def derive_variant(
+    source_title: str, *, collection: str | None = None, size: str | None = None
+) -> str:
+    """What the manufacturer's own title says separates this item from its
+    siblings: everything left once the range name and the size are removed.
+
+    Derived rather than asked for. The model was given the job and returned
+    nothing for twelve products out of fourteen, and for the one it did
+    answer it said "Onix" — dropping the finish, which is half the
+    discriminator in a range where "Onix Bevel Gloss" and "Onix Diamond
+    Gloss" are different products. Two products reduced to one name is two
+    products reduced to one product, because the handle follows the name.
+
+    The manufacturer already encodes this properly, every time, in the title
+    they publish: "3D Bars | 5\"x10\" Emerald Bevel Gloss" is the range, the
+    size, then the variant. Taking the first two away leaves the third.
+    """
+    text = _one_line(source_title or "")
+    if not text:
+        return ""
+    for part in (collection, size):
+        piece = _one_line(part or "").strip()
+        if piece:
+            text = re.sub(re.escape(piece), " ", text, flags=re.I)
+    # The size again, generically: the model's `size` and the maker's own
+    # spelling of it rarely match character for character ("5\" x 10\"" against
+    # "5\"x10\""), and a dimension left behind would be repeated in the title.
+    text = _SIZE_IN_TEXT.sub(" ", text)
+    text = re.sub(r"[|/,;:–—-]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip(" -|,")
 
 
 def compose_title(

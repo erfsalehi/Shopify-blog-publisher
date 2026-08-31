@@ -29,6 +29,11 @@ def _csv(value: str) -> list[str]:
     return [v.strip() for v in value.split(",") if v.strip()]
 
 
+def _digits(value: str) -> str:
+    """Just the dialable digits of a phone number, punctuation dropped."""
+    return "".join(c for c in (value or "") if c.isdigit())
+
+
 # Fields where a blank value must NOT be read as "unset". Only database_url:
 # its class default is SQLite, and blank in practice means a GitHub Actions
 # `${{ secrets.DATABASE_URL }}` that was never populated — i.e. exactly the
@@ -256,6 +261,19 @@ class Settings(BaseSettings):
     # is written in the business's own voice.
     business_name: str = ""
     business_description: str = ""
+    # Public, callable phone number for the in-article call banner, in any
+    # readable form ("(604) 555-0134"). The tel: href is derived from the
+    # digits, so what's written here is purely what the reader sees.
+    business_phone: str = ""
+    # Optional line under the number ("Mon-Sat, 9am-6pm"). Answering when the
+    # reader calls is the whole point of the banner, so say when that is.
+    business_hours: str = ""
+    # Mid-article conversion blocks: a call banner, a featured product card,
+    # and a row of collection cards placed at section breaks partway down the
+    # article, so a reader who is convinced halfway has somewhere to go
+    # without scrolling to the end. Each block is skipped when the settings or
+    # catalogue data it needs are missing, so this can stay on safely.
+    enable_conversion_blocks: bool = True
 
     # ── Convenience flags ────────────────────────────────────────
     @property
@@ -273,6 +291,11 @@ class Settings(BaseSettings):
     @property
     def has_linear(self) -> bool:
         return bool(self.linear_api_key and self.linear_team)
+
+    @property
+    def has_call_cta(self) -> bool:
+        """A call banner needs a number with enough digits to dial."""
+        return self.enable_conversion_blocks and len(_digits(self.business_phone)) >= 7
 
     @property
     def has_shopify(self) -> bool:

@@ -466,6 +466,36 @@ class Ga4Daily(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class Ga4BlogEventDaily(Base):
+    """One conversion event, for one day, on one blog post.
+
+    The same events as `Ga4EventDaily`, sliced by the page they happened on
+    and kept only for `/blogs/` paths. Separate table rather than a column on
+    that one, because the two answer different questions and are summed
+    differently: `Ga4EventDaily` is the store's conversion total, and adding a
+    page dimension to it would turn every existing SUM into a double count.
+
+    Read this one to ask "which posts earn calls" — the question the article
+    pipeline is judged on. Blog conversions are rare enough (3 in six months
+    when this was written) that per-post counts are mostly zero; that is the
+    finding, not a bug.
+    """
+
+    __tablename__ = "ga4_blog_event_daily"
+    __table_args__ = (
+        UniqueConstraint(
+            "date", "event_name", "page_path", name="uq_ga4_blog_event_daily"
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    date: Mapped[date] = mapped_column(Date, index=True, nullable=False)
+    event_name: Mapped[str] = mapped_column(String(120), index=True, nullable=False)
+    page_path: Mapped[str] = mapped_column(String(500), index=True, nullable=False)
+    event_count: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class Ga4EventDaily(Base):
     """One GA4 event's count for one day.
 

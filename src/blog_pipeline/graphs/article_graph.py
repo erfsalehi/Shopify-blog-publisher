@@ -34,6 +34,7 @@ from blog_pipeline.config import get_settings
 from blog_pipeline.db import Article, ArticleStatus, get_session
 from blog_pipeline.db.models import CalendarEntry, EntryStatus
 from blog_pipeline.llm import CostTracker
+from blog_pipeline.agents.convert import apply_conversion_blocks
 from blog_pipeline.agents.geo import apply_geo
 from blog_pipeline.schemas import Draft, FAQItem, ImageSlot, Outline
 from blog_pipeline.tools.linear import IssueResult, LinearClient, LinearError
@@ -290,6 +291,51 @@ def node_images(state: ArticleState) -> dict:
         "images": records,
         "featured_image_url": featured,
     }
+
+
+def node_convert(state: ArticleState) -> dict:
+    """Mid-article conversion blocks: a call banner, a featured product card,
+    and a row of collection cards, placed at section breaks partway down the
+    body so a reader who is convinced halfway has somewhere to go.
+
+    Runs before GEO so it sees the article's own headings rather than the
+    takeaways/FAQ/sources sections GEO appends, and before QA so the blocks
+    are reviewed like the closing CTA already is. Catalogue reads are
+    best-effort: a Shopify hiccup costs the cards, not the article.
+    """
+    settings = get_settings()
+    if not settings.enable_conversion_blocks:
+        return {}
+
+    products: list[dict] = []
+    collections: list[dict] = []
+    if settings.has_shopify:
+        try:
+            client = ShopifyClient()
+            products = client.list_product_cards()
+            collections = client.list_collection_cards()
+            client.close()
+        except Exception:
+            products, collections = [], []
+
+    outline = state.get("outline", {})
+    keywords = [
+        outline.get("primary_keyword") or "",
+        *outline.get("secondary_keywords", []),
+        state.get("title") or state["topic"],
+    ]
+    body = apply_conversion_blocks(
+        body_html=state["body_html"],
+        campaign=state.get("seo_title") or state.get("title") or state["topic"],
+        keywords=[k for k in keywords if k],
+        products=products,
+        collections=collections,
+    )
+    if body == state["body_html"]:
+        return {}
+    if state.get("article_id"):
+        _update_article(state["article_id"], draft_html=body)
+    return {"body_html": body}
 
 
 def node_geo(state: ArticleState) -> dict:
@@ -755,6 +801,7 @@ def build_article_graph(checkpointer=None):
     g.add_node("seo", node_seo)
     g.add_node("images", node_images)
     g.add_node("revise", node_revise)
+    g.add_node("convert", node_convert)
     g.add_node("geo", node_geo)
     g.add_node("qa", node_qa)
     g.add_node("publish", node_publish_shopify)
@@ -767,7 +814,8 @@ def build_article_graph(checkpointer=None):
         "seo", route_after_seo, {"revise": "revise", "images": "images"}
     )
     g.add_edge("revise", "seo")
-    g.add_edge("images", "geo")
+    g.add_edge("images", "convert")
+    g.add_edge("convert", "geo")
     g.add_edge("geo", "qa")
     g.add_conditional_edges(
         "qa", route_after_qa,

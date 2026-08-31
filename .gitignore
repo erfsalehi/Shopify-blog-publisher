@@ -47,3 +47,4 @@ service-account*.json
 .vercel
 neon-url.txt
 *-url.txt
+preview_convert.html

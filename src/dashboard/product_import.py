@@ -399,12 +399,23 @@ def _one_product(
         # The store's naming standard, applied here rather than left to the
         # model: brand, range, type, colour. Done before the row is written
         # so a dry run shows the name the product would actually get.
+        # The manufacturer's own title is the better source for what
+        # separates this item from its siblings, and the model is the
+        # fallback rather than the other way round. Asked for it directly it
+        # returned nothing for twelve products out of fourteen, and for the
+        # one it answered it said "Onix" — dropping the finish, which is
+        # half the discriminator in a range where "Onix Bevel Gloss" and
+        # "Onix Diamond Gloss" are different products.
+        variant = product_copy.derive_variant(
+            source.title, collection=collection_title, size=copy.size,
+        ) or copy.color
+        copy.color = variant
         copy.title = product_copy.compose_title(
             brand=vendor or source.vendor,
             collection=collection_title,
             product_type=copy.product_type or source.product_type,
             size=copy.size,
-            color=copy.color,
+            color=variant,
             fallback=copy.title or source.title,
         )
 

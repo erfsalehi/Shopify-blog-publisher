@@ -6,6 +6,8 @@ Two groups of operations share one client, because they share one store:
   * default_blog_id   — resolve the store's first blog if none configured
   * list_published    — published article titles/handles for dedup + internal links
   * list_link_targets — products/pages/articles used as internal-link anchors
+  * list_collection_cards / list_product_cards — catalogue entries with
+    imagery, for the mid-article conversion cards
   * upload_image      — stagedUploadsCreate -> POST -> fileCreate (returns file id/url)
   * create_article    — articleCreate mutation, published immediately
 
@@ -35,6 +37,29 @@ from blog_pipeline.config import get_settings
 
 class ShopifyError(RuntimeError):
     pass
+
+
+def _usable_target(title: str, handle: str) -> bool:
+    """Whether a collection/page is fit to show a reader.
+
+    Junk targets (theme sitemap pages, the home page, brand sub-collections,
+    encoding-glitched titles) are excluded — they read as broken in an article
+    whether they're a text link or a card.
+    """
+    t = (title or "").strip().lower()
+    if not t or "�" in title:  # blank or encoding-glitched
+        return False
+    if t.startswith(("html sitemap", "brands -")):  # theme junk / brand SKUs
+        return False
+    if handle in {"frontpage"} or handle.startswith("avada-sitemap"):
+        return False
+    # Brand sub-collections are named for the manufacturer, not the product
+    # ("Canadian Flooring Casablanca"), so they match no article and read as
+    # noise in a card row. The title check above catches the ones prefixed
+    # "Brands -"; this catches the rest, which only the handle reveals.
+    if handle.startswith("brands-"):
+        return False
+    return True
 
 
 @dataclass
@@ -265,26 +290,133 @@ class ShopifyClient:
         # (e.g. drflooring.ca) rather than the *.myshopify.com URL.
         base = get_settings().store_link_base or f"https://{self.domain}"
 
-        def _ok(title: str, handle: str) -> bool:
-            t = (title or "").strip().lower()
-            if not t or "�" in title:  # blank or encoding-glitched
-                return False
-            if t.startswith(("html sitemap", "brands -")):  # theme junk / brand SKUs
-                return False
-            if handle in {"frontpage"} or handle.startswith("avada-sitemap"):
-                return False
-            return True
-
         targets: list[dict] = []
         for pg in data["pages"]["nodes"]:
-            if _ok(pg["title"], pg["handle"]):
+            if _usable_target(pg["title"], pg["handle"]):
                 targets.append({"title": pg["title"], "url": f"{base}/pages/{pg['handle']}"})
         for col in data["collections"]["nodes"]:
-            if _ok(col["title"], col["handle"]):
+            if _usable_target(col["title"], col["handle"]):
                 targets.append(
                     {"title": col["title"], "url": f"{base}/collections/{col['handle']}"}
                 )
         return targets
+
+    def list_collection_cards(self, limit: int = 100) -> list[dict]:
+        """Collections rich enough to render as a card: {title, url, image}.
+
+        Same catalogue as `list_link_targets`, read for a different job — a
+        card shows a picture, so a collection with no image of its own falls
+        back to its first product's photo, and one with neither is dropped
+        rather than rendered as an empty box. Pages are excluded: a service
+        page has no product imagery worth putting in a card.
+        """
+        data = self.graphql(
+            """
+            query($n: Int!) {
+              collections(first: $n) {
+                nodes {
+                  title
+                  handle
+                  image { url }
+                  products(first: 1) { nodes { featuredImage { url } } }
+                }
+              }
+            }
+            """,
+            {"n": limit},
+        )
+        base = get_settings().store_link_base or f"https://{self.domain}"
+        cards: list[dict] = []
+        for col in data["collections"]["nodes"]:
+            # Collection images are optional in Shopify and this store sets
+            # none of them, so the first product's photo stands in. Without
+            # the fallback the card row renders for nobody.
+            image = (col.get("image") or {}).get("url")
+            if not image:
+                first = ((col.get("products") or {}).get("nodes") or [{}])[0]
+                image = (first.get("featuredImage") or {}).get("url")
+            if not image or not _usable_target(col["title"], col["handle"]):
+                continue
+            cards.append(
+                {
+                    "title": col["title"],
+                    "url": f"{base}/collections/{col['handle']}",
+                    "image": image,
+                    "match_text": col["title"],
+                }
+            )
+        return cards
+
+    def list_product_cards(self, limit: int = 5000) -> list[dict]:
+        """Buyable products as cards: {title, url, image, price, match_text}.
+
+        Only active products that have a picture and are actually orderable —
+        sending a reader mid-article to a sold-out SKU is worse than sending
+        them nowhere. Products that don't track inventory are kept, since a
+        zero there means "not counted", not "none left".
+
+        **Paginates the whole catalogue.** The first version took one page of
+        100 out of 2,908, so the matcher chose the most relevant product from
+        3% of the store and a ceramics article got an SPC plank. Relevance
+        can't beat a candidate list that never contained the right answer.
+
+        `match_text` is what the article is matched against, and it is
+        deliberately more than the title: these titles lead with the brand
+        ("AquaFix SPC Plank - Aqua"), so the words a reader would search for
+        live in the product's collections ("SPC", "Vinyl Flooring") and its
+        useful tags. Import bookkeeping and brand tags are dropped — they
+        appear on most of the catalogue and so distinguish nothing.
+        """
+        query = """
+        query($n: Int!, $after: String) {
+          products(first: $n, after: $after, query: "status:ACTIVE") {
+            nodes {
+              title
+              handle
+              tags
+              totalInventory
+              tracksInventory
+              featuredImage { url }
+              priceRangeV2 { minVariantPrice { amount currencyCode } }
+              collections(first: 20) { nodes { title handle } }
+            }
+            pageInfo { hasNextPage endCursor }
+          }
+        }
+        """
+        base = get_settings().store_link_base or f"https://{self.domain}"
+        cards: list[dict] = []
+        cursor: str | None = None
+        while len(cards) < limit:
+            data = self.graphql(query, {"n": 250, "after": cursor})["products"]
+            for prod in data["nodes"]:
+                image = (prod.get("featuredImage") or {}).get("url")
+                if not image:
+                    continue
+                inventory = prod.get("totalInventory")
+                if (
+                    prod.get("tracksInventory")
+                    and inventory is not None
+                    and inventory <= 0
+                ):
+                    continue
+                money = (prod.get("priceRangeV2") or {}).get("minVariantPrice") or {}
+                cards.append(
+                    {
+                        "title": prod["title"],
+                        "url": f"{base}/products/{prod['handle']}",
+                        "image": image,
+                        "price": _format_money(
+                            money.get("amount"), money.get("currencyCode")
+                        ),
+                        "match_text": _match_text(prod),
+                    }
+                )
+            info = data["pageInfo"]
+            if not data["nodes"] or not info["hasNextPage"]:
+                break
+            cursor = info["endCursor"]
+        return cards[:limit]
 
     # ── file upload ──────────────────────────────────────────────
     def _stage_upload(
@@ -825,6 +957,50 @@ class ShopifyClient:
 
     def close(self) -> None:
         self._client.close()
+
+
+# Tags that sit on most of the catalogue and so separate nothing: import
+# bookkeeping, the blanket "Brands" tag, and the location-marketing tags
+# ("Best Laminate Flooring Langley"), which otherwise let any product match
+# any article that mentions a place.
+_JUNK_TAG_PREFIXES = (
+    "import_", "validate-", "joined-", "brands", "best ", "wood and laminate",
+)
+_JUNK_COLLECTION_TITLES = {"home page", "all products"}
+
+
+def _match_text(product: dict) -> str:
+    """The words a product should be findable by.
+
+    The title alone is not enough: it leads with the brand, so "AquaFix SPC
+    Plank - Aqua" never matches an article about vinyl. Its collections say
+    what it actually is.
+    """
+    parts = [product.get("title") or ""]
+    for col in ((product.get("collections") or {}).get("nodes") or []):
+        handle, title = col.get("handle") or "", col.get("title") or ""
+        if handle.startswith("brands-") or title.lower() in _JUNK_COLLECTION_TITLES:
+            continue
+        parts.append(title)
+    for tag in (product.get("tags") or []):
+        if not tag.lower().startswith(_JUNK_TAG_PREFIXES):
+            parts.append(tag)
+    return " ".join(p for p in parts if p)
+
+
+_CURRENCY_SYMBOLS = {"USD": "$", "CAD": "$", "AUD": "$", "EUR": "€", "GBP": "£"}
+
+
+def _format_money(amount: str | None, currency: str | None) -> str:
+    """A price a reader recognises, or "" when the store didn't give us one."""
+    if amount in (None, ""):
+        return ""
+    try:
+        value = float(amount)
+    except (TypeError, ValueError):
+        return ""
+    symbol = _CURRENCY_SYMBOLS.get((currency or "").upper())
+    return f"{symbol}{value:,.2f}" if symbol else f"{value:,.2f} {currency or ''}".strip()
 
 
 def _as_gid(value: str, resource: str) -> str:

@@ -602,8 +602,13 @@ def test_a_collection_becomes_draft_products_a_collection_and_cross_links(
     assert status["counts"]["created"] == 2
 
     # Products: drafts, with the vendor and SEO fields from the source.
-    assert set(fake_shopify.products) == {"3d-bars-white", "3d-bars-black"}
-    white = fake_shopify.products["3d-bars-white"]
+    # Handles follow the composed title, not the supplier's own: brand,
+    # range, type, then the variant read off their title ("White").
+    assert set(fake_shopify.products) == {
+        "ames-tile-3d-bars-wall-tile-white",
+        "ames-tile-3d-bars-wall-tile-black",
+    }
+    white = fake_shopify.products["ames-tile-3d-bars-wall-tile-white"]
     assert white["status"] == "DRAFT"
     assert white["vendor"] == "Ames Tile"
     assert white["seo"]["title"] and white["seo"]["title"] != white["title"]
@@ -638,7 +643,9 @@ def test_a_collection_becomes_draft_products_a_collection_and_cross_links(
     # an anchor context that says what they are.
     assert "you can find them in the following list" in white["descriptionHtml"]
     assert "3D Bars" in white["descriptionHtml"]
-    assert "3D Bars Black" in white["descriptionHtml"]
+    # The sibling is linked under its composed name, the one it carries in
+    # the store — not the supplier's title it was imported from.
+    assert "Ames Tile 3D Bars Wall Tile - Black" in white["descriptionHtml"]
 
     # The tags the storefront is built on are present, not merely likely: a
     # smart collection defined as brand + collection needs both on every

@@ -259,3 +259,75 @@ def test_the_shelf_name_is_not_the_tag(dashboard_db):
     assert shelf == "Ames Tile & Stone 3D Bars Collection"
     assert "from 3D Bars," in heading
     assert "Collection," not in heading
+
+
+# ── Where the discriminator comes from ─────────────────────────────
+#
+# It was asked of the model, and the model returned nothing for twelve
+# products out of fourteen. Composition then fell back to the source title,
+# every name came out unchanged, and — because the handle follows the name —
+# a re-import skipped eleven of them as "already in the store". The whole
+# range stayed on its old names and the log said everything was fine.
+
+
+def test_the_variant_is_read_off_the_makers_own_title(dashboard_db):
+    assert product_copy.derive_variant(
+        '3D Bars | 5"x10" Emerald Bevel Gloss',
+        collection="3D Bars", size='5"x10"',
+    ) == "Emerald Bevel Gloss"
+
+
+def test_the_finish_is_part_of_the_discriminator(dashboard_db):
+    """The one answer the model did give was "Onix" — colour alone. "Onix
+    Bevel Gloss" and "Onix Diamond Gloss" are different products, so colour
+    alone collapses two of them onto one name and one handle."""
+    bevel = product_copy.derive_variant(
+        '3D Bars | 5"x10" Onix Bevel Gloss', collection="3D Bars", size='5"x10"'
+    )
+    diamond = product_copy.derive_variant(
+        '3D Bars | 5"x10" Onix Diamond Gloss', collection="3D Bars", size='5"x10"'
+    )
+    assert bevel != diamond
+    assert bevel == "Onix Bevel Gloss"
+
+
+def test_a_size_spelled_differently_is_still_removed(dashboard_db):
+    """The model's `size` and the maker's spelling rarely match character for
+    character, and a dimension left in the variant is repeated in the title."""
+    assert product_copy.derive_variant(
+        '3D Bars | 5" x 10" Jade Bevel Gloss',
+        collection="3D Bars", size='5"x10"',
+    ) == "Jade Bevel Gloss"
+
+
+def test_a_whole_range_comes_out_with_distinct_names(dashboard_db):
+    """The property that actually matters. Six products, six names — if any
+    two collapse, the second is skipped as already in the store."""
+    titles = [
+        '3D Bars | 5"x10" Emerald Bevel Gloss',
+        '3D Bars | 5"x10" Emerald Diamond Gloss',
+        '3D Bars | 5"x10" Onix Bevel Gloss',
+        '3D Bars | 5"x10" Onix Diamond Gloss',
+        '3D Bars | 5"x10" Quartz Bevel Matte',
+        '3D Bars | 5"x10" Sapphire Diamond Gloss',
+    ]
+    names = {
+        compose_title(
+            brand="Ames Tile & Stone", collection="3D Bars",
+            product_type="Glazed Ceramic Wall Tile", size='5"x10"',
+            color=product_copy.derive_variant(
+                t, collection="3D Bars", size='5"x10"'
+            ),
+            fallback=t,
+        )
+        for t in titles
+    }
+    assert len(names) == len(titles)
+
+
+def test_a_title_that_is_only_the_range_derives_nothing(dashboard_db):
+    """No discriminator in the source means none invented here — the
+    fallback to the source title is what keeps the range from collapsing."""
+    assert product_copy.derive_variant(
+        "3D Bars", collection="3D Bars", size=""
+    ) == ""

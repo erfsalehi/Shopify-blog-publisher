@@ -560,6 +560,51 @@ def run_refresh_cmd(
         console.print("[dim]Dry run — Shopify untouched. Re-run with --apply.[/dim]")
 
 
+@app.command("backfill-cta")
+def backfill_cta_cmd(
+    limit: int = typer.Option(250, "--limit", help="Most posts to consider."),
+    apply: bool = typer.Option(False, "--apply", help="Actually write to Shopify."),
+    replace: bool = typer.Option(
+        False, "--replace", help="Redo posts that already have blocks."
+    ),
+) -> None:
+    """Add the mid-article conversion blocks to already-published posts.
+
+    Dry run by default; `--apply` edits live pages. Every edited post gets a
+    pre-refresh snapshot first, so `rollback-refresh <id>` undoes it.
+
+    `--replace` strips what an earlier run injected and re-injects from the
+    original prose — use it after improving placement or product matching,
+    since posts that already have blocks are otherwise left alone.
+    """
+    from blog_pipeline.backfill import backfill_conversion_blocks
+
+    result = backfill_conversion_blocks(
+        limit=limit, dry_run=not apply, replace=replace
+    )
+    console.print(
+        f"Considered {result['fetched']} published posts: "
+        f"[bold]{result['changed']}[/bold] to update, "
+        f"{result['skipped_already_had_blocks']} already done, "
+        f"{result['skipped_not_imported']} not imported, "
+        f"{result['skipped_no_section_break']} with no section break."
+    )
+    for item in result["touched"][:20]:
+        console.print(f"  [dim]{item['article_id']:>5}[/dim]  {item['title']}")
+    if len(result["touched"]) > 20:
+        console.print(f"  [dim]... and {len(result['touched']) - 20} more[/dim]")
+    if result["skipped_not_imported"]:
+        console.print(
+            "[yellow]Posts with no Article row were skipped — they'd have no "
+            "rollback snapshot. Run `import-existing` first to include "
+            "them.[/yellow]"
+        )
+    for err in result["errors"]:
+        console.print(_error(f"{err['title']}: {err['error']}"))
+    if result["dry_run"]:
+        console.print("[dim]Dry run — Shopify untouched. Re-run with --apply.[/dim]")
+
+
 @app.command("rollback-refresh")
 def rollback_refresh_cmd(
     article_id: int = typer.Argument(..., help="Article id to restore."),
