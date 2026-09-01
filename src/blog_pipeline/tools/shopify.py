@@ -101,6 +101,9 @@ class ShopifyClient:
             },
             timeout=60.0,
         )
+        #: The store's sales channels, fetched once per client. See
+        #: `list_publications` — one run asks this per product.
+        self._publications: list[dict] | None = None
 
     # ── core request with basic throttle backoff ─────────────────
     def graphql(self, query: str, variables: dict | None = None) -> dict:
@@ -724,6 +727,56 @@ class ShopifyClient:
         )["productCreate"]
         self._check_user_errors(data, "productCreate")
         return data["product"]
+
+    def list_publications(self) -> list[dict]:
+        """The store's sales channels. Cached for the client's lifetime.
+
+        One import run creates dozens of products and every one of them asks
+        the same question, whose answer cannot change mid-run.
+        """
+        if self._publications is None:
+            data = self.graphql(
+                "{ publications(first: 50) { edges { node { id name } } } }"
+            )
+            self._publications = [
+                e["node"] for e in data["publications"]["edges"] if e.get("node")
+            ]
+        return self._publications
+
+    def publish_to_all_channels(self, resource_gid: str) -> list[str]:
+        """Publish a product (or collection) to every sales channel.
+
+        Not the same switch as `status`. A product's status decides whether
+        it is for sale at all; publications decide which channels carry it,
+        and a product can be ACTIVE and still absent from the Online Store.
+        Publishing a DRAFT is therefore safe — it stays invisible until the
+        status says otherwise — which is why this runs on create regardless.
+
+        It has been working without this, but by luck rather than by asking:
+        each channel has its own "automatically publish new products"
+        setting, and a store where one of those is off silently loses that
+        channel for everything the importer makes.
+
+        Idempotent — republishing something already published is a no-op.
+        """
+        publications = self.list_publications()
+        if not publications:
+            return []
+        data = self.graphql(
+            """
+            mutation($id: ID!, $input: [PublicationInput!]!) {
+              publishablePublish(id: $id, input: $input) {
+                userErrors { field message }
+              }
+            }
+            """,
+            {
+                "id": resource_gid,
+                "input": [{"publicationId": p["id"]} for p in publications],
+            },
+        )["publishablePublish"]
+        self._check_user_errors(data, "publishablePublish")
+        return [p["name"] for p in publications]
 
     def update_product(
         self,

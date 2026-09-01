@@ -19,11 +19,18 @@ that doesn't exist yet. So the descriptions are written twice: once at
 creation, and once more at the end when every product has an ID and a URL.
 
 **What it refuses to do.** Prices are never set — manufacturer pages don't
-publish retail prices and inventing one is not an option. Products are
-created as drafts by default, so nothing reaches the storefront until someone
-looks at it. And an existing product with the same handle is left completely
-alone: the second run of an import finds what the first one made rather than
-duplicating or overwriting it.
+publish retail prices and inventing one is not an option. And an existing
+product with the same handle is left completely alone: the second run of an
+import finds what the first one made rather than duplicating or overwriting
+it.
+
+**What it does do, loudly.** Products are created Active and published to
+every sales channel, which means an import is live to customers as it runs.
+That is the owner's setting and their decision — the previous default was
+Draft, and it meant every import finished with a second, manual pass in
+Shopify admin that was easy to forget and left the catalogue half-published.
+The dry run is what stands between a bad extraction and the storefront now,
+so it earns its minutes.
 """
 
 from __future__ import annotations
@@ -132,6 +139,7 @@ def start_run(
             "update" if str(collection_mode).lower() == "update" else "new"
         ),
         "build_page": bool(build_page),
+        "all_channels": bool(store.get(store.IMPORT_ALL_CHANNELS)),
         "max_images": int(store.get(store.IMPORT_MAX_IMAGES)),
         "max_docs": int(store.get(store.IMPORT_MAX_DOCS)),
         "batch": int(store.get(store.IMPORT_BATCH)),
@@ -624,6 +632,20 @@ def _create_in_shopify(
         status=options.get("publish_status", "DRAFT"),
     )
     product_gid = created["id"]
+
+    # Asked for rather than assumed. Every channel has its own "automatically
+    # publish new products" setting, so an import that never mentions
+    # channels reaches whichever ones happen to have it on — which looks
+    # identical to working right up until a store has one switched off.
+    # Safe on a draft: the status still decides whether anyone can see it.
+    if options.get("all_channels", True):
+        try:
+            client.publish_to_all_channels(product_gid)
+        except ShopifyError as exc:
+            # Not fatal. The product exists and is correct; it is a
+            # permission or a channel problem, and failing the whole import
+            # over it would throw away the work that did succeed.
+            log.warning("could not publish %s to all channels: %s", product_gid, exc)
 
     images_saved = _attach_images(client, product_gid, source, copy)
     doc_urls, docs_saved = _attach_docs(client, product_gid, source)

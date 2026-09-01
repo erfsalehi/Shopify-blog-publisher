@@ -13,7 +13,9 @@ measures the change against itself.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
+
+from dashboard.jobs.gsc import settled_through
 
 import pytest
 
@@ -294,10 +296,15 @@ def test_controls_are_matched_and_added(dashboard_db, monkeypatch):
     so a one-click experiment that skipped them would quietly be a
     before-and-after."""
     _catalogue("oak-12mm", *[f"other-{n}" for n in range(8)])
+    # Dated relative to today, not written out. `propose_controls` matches on
+    # impressions in a 28-day window ending at the last settled day, so a
+    # hard-coded date is a test that passes when written and fails weeks
+    # later for a reason that has nothing to do with the code.
+    seeded = settled_through(date.today()) - timedelta(days=5)
     with get_session() as session:
         for n in range(8):
             session.add(GscPageDaily(
-                date=date(2026, 8, 1),
+                date=seeded,
                 page=f"https://drflooring.ca/products/other-{n}",
                 clicks=2, impressions=200, ctr=0.01, position=5.0,
             ))

@@ -11,7 +11,10 @@ The page is **Import** in the top nav (`/import`).
 
 The Shopify token needs two scopes the blog pipeline never asked for:
 **`write_products`** (products, media, collections, metafields) and
-**`write_files`** (re-hosting the manufacturer's PDFs). Shopify admin →
+**`write_files`** (re-hosting the manufacturer's PDFs). Publishing to sales
+channels additionally needs **`write_publications`**; without it the products
+are still created and the run still finishes, with a warning in the log and
+whichever channels their own auto-publish setting happened to cover. Shopify admin →
 Settings → Apps and sales channels → Develop apps → your app → Configure
 Admin API scopes → tick both → **Save**, then **Install app** again. The
 token string doesn't change.
@@ -202,6 +205,29 @@ The run note says which is which — "3 new, 9 already in the store" — because
 range whose page you maintain yourself. Untick it and the products are still
 created and tagged, so a smart collection defined on the brand and
 collection tags picks them up anyway.
+
+## Live on creation
+
+Two switches, and a product needs both to be seen:
+
+- **Status** — `ACTIVE` by default. The product is for sale the moment it is
+  created.
+- **Sales channels** — published to all of them by default: Online Store,
+  Shop, Google & YouTube, Facebook & Instagram, Buy Button, whatever the
+  store has.
+
+They are genuinely separate: a product can be Active and still missing from
+the Online Store, which is what makes "it's active, why can't I see it" a
+real half-hour. Publishing a *draft* to channels is harmless — the status
+still decides whether anyone can see it — so it happens on every create.
+
+The previous default was `DRAFT` and no channel publishing at all, which
+meant an import finished needing a second manual pass in Shopify admin to be
+worth anything. That pass was easy to forget and left the catalogue
+half-published. Both are settings if you want the old behaviour back.
+
+**An import is now live to customers as it runs**, so a dry run first earns
+its minutes — it is what stands between a bad extraction and the storefront.
 
 ## Product names
 

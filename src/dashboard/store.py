@@ -63,6 +63,7 @@ IMPORT_PUBLISH_STATUS = "import.publish_status"
 IMPORT_TAG_PREFIX = "import.source_tag"
 IMPORT_BRAND_BLURB = "import.brand_blurb"
 IMPORT_TOP_BANNER = "import.top_banner"
+IMPORT_ALL_CHANNELS = "import.all_channels"
 IMPORT_RELATED_LIMIT = "import.related_limit"
 
 
@@ -598,14 +599,34 @@ IMPORT_SPECS: tuple[Spec, ...] = (
         maximum=250,
     ),
     Spec(
+        key=IMPORT_ALL_CHANNELS,
+        default=True,
+        label="Publish to every sales channel",
+        help=(
+            "Online Store, Shop, Google & YouTube, Facebook & Instagram, Buy "
+            "Button — whatever the store has. A different switch from the "
+            "status above: status decides whether a product is for sale at "
+            "all, channels decide which ones carry it, and a product can be "
+            "Active and still missing from the Online Store. Publishing a "
+            "draft is safe, because it stays invisible until the status says "
+            "otherwise. Without this it depends on each channel's own "
+            "'automatically publish new products' setting."
+        ),
+        group="Product import",
+        kind="bool",
+        coerce=_as_bool,
+    ),
+    Spec(
         key=IMPORT_PUBLISH_STATUS,
-        default="DRAFT",
+        default="ACTIVE",
         label="Status new products are created with",
         help=(
-            "DRAFT keeps everything off the storefront until you set it "
-            "active in Shopify admin, which is the point of importing this "
-            "way. ACTIVE publishes each product the moment it is created — "
-            "including any mistake in the extraction."
+            "ACTIVE puts each product on sale the moment it is created — "
+            "including any mistake in the extraction, so a dry run first is "
+            "worth the minutes. DRAFT keeps everything off the storefront "
+            "until you set it active in Shopify admin. Separate from the "
+            "channel setting above: a product has to be Active AND on a "
+            "channel to be seen there."
         ),
         group="Product import",
         kind="str",

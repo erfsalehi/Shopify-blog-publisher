@@ -179,6 +179,7 @@ class FakeShopify:
         self.metafields: list[dict] = []
         self.collections: list[dict] = []
         self.updates: list[dict] = []
+        self.published: list[str] = []
         self._next = 100
 
     def _gid(self, kind: str) -> str:
@@ -225,6 +226,13 @@ class FakeShopify:
     def wait_for_media(self, media_ids, **kwargs):
         """This fake's Shopify always manages the fetch."""
         return {mid: "READY" for mid in media_ids if mid}
+
+    def list_publications(self):
+        return [{"id": "gid://shopify/Publication/1", "name": "Online Store"}]
+
+    def publish_to_all_channels(self, resource_gid):
+        self.published.append(resource_gid)
+        return ["Online Store"]
 
     def upload_file(self, data, filename, mime_type="application/pdf", alt=None, wait=True):
         record = {
@@ -591,7 +599,7 @@ def _drive(run_id: int, passes: int = 20) -> None:
     raise AssertionError("the run never finished")
 
 
-def test_a_collection_becomes_draft_products_a_collection_and_cross_links(
+def test_a_collection_becomes_live_products_a_collection_and_cross_links(
     dashboard_db, fake_site, fake_shopify, no_llm
 ):
     run_id = product_import.start_run("https://maker.test/collections/3dbars")
@@ -609,7 +617,11 @@ def test_a_collection_becomes_draft_products_a_collection_and_cross_links(
         "ames-tile-3d-bars-wall-tile-black",
     }
     white = fake_shopify.products["ames-tile-3d-bars-wall-tile-white"]
-    assert white["status"] == "DRAFT"
+    # Active and on every channel, because an import that finished Draft
+    # needed a second manual pass in Shopify admin to be worth anything, and
+    # that pass was easy to forget. Both are settings; these are the defaults.
+    assert white["status"] == "ACTIVE"
+    assert white["id"] in fake_shopify.published
     assert white["vendor"] == "Ames Tile"
     assert white["seo"]["title"] and white["seo"]["title"] != white["title"]
     assert "imported" in white["tags"]
@@ -861,3 +873,92 @@ def test_a_run_without_a_brand_is_refused_before_any_work(client, fake_site):
     assert response.status_code == 303
     assert "error=" in response.headers["location"]
     assert "/import/" not in response.headers["location"]
+
+
+# ── Sales channels ─────────────────────────────────────────────────
+#
+# Status and channels are two switches, and a product needs both: Active
+# decides whether it is for sale, publications decide which channels carry
+# it. An import that never mentioned channels reached whichever ones had
+# "automatically publish new products" left on — which looks exactly like
+# working until a store has one of them off.
+
+
+class ChannelShopify(FakeShopify):
+    """A store with five sales channels, recording what gets published."""
+
+    def __init__(self, fail=False):
+        super().__init__()
+        self.published: list[str] = []
+        self.fail = fail
+
+    def list_publications(self):
+        return [
+            {"id": f"gid://shopify/Publication/{n}", "name": name}
+            for n, name in enumerate(
+                ["Online Store", "Buy Button", "Google & YouTube", "Shop",
+                 "Facebook & Instagram"], start=1,
+            )
+        ]
+
+    def publish_to_all_channels(self, resource_gid):
+        from blog_pipeline.tools.shopify import ShopifyError
+
+        if self.fail:
+            raise ShopifyError("publishablePublish: access denied")
+        self.published.append(resource_gid)
+        return [p["name"] for p in self.list_publications()]
+
+
+def test_a_new_product_is_published_to_every_channel(
+    dashboard_db, fake_site, no_llm, monkeypatch
+):
+    fake = ChannelShopify()
+    monkeypatch.setattr(product_import, "_shopify_client", lambda: fake)
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    for _ in range(40):
+        if product_import.advance(run_id).done:
+            break
+
+    assert len(fake.published) == len(fake.products)
+    assert fake.published
+
+
+def test_a_channel_refusal_does_not_fail_the_import(
+    dashboard_db, fake_site, no_llm, monkeypatch
+):
+    """The product exists and is correct. Losing the run over a permission
+    problem would throw away the work that did succeed."""
+    fake = ChannelShopify(fail=True)
+    monkeypatch.setattr(product_import, "_shopify_client", lambda: fake)
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    for _ in range(40):
+        if product_import.advance(run_id).done:
+            break
+
+    assert fake.products
+    with get_session() as session:
+        assert session.get(ImportRun, run_id).error is None
+
+
+def test_publishing_can_be_turned_off(
+    dashboard_db, fake_site, no_llm, monkeypatch
+):
+    from dashboard import store
+
+    store.set(store.IMPORT_ALL_CHANNELS, False)
+    fake = ChannelShopify()
+    monkeypatch.setattr(product_import, "_shopify_client", lambda: fake)
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    for _ in range(40):
+        if product_import.advance(run_id).done:
+            break
+
+    assert fake.products
+    assert fake.published == []
