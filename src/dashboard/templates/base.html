@@ -49,6 +49,13 @@
 <footer>
   Local only · reads the dashboard database, never a live API ·
   <a href="/jobs">job log</a>
+  {# What is actually running. Absent when the host publishes nothing about
+     the build, rather than shown as "unknown" — a footer that says it does
+     not know which code this is answers nothing and takes up the space of
+     something that would. #}
+  {% if build_commit %}
+  · build <code>{{ build_commit }}</code>{% if build_branch %} on {{ build_branch }}{% endif %}
+  {% endif %}
 </footer>
 <script src="/static/app.js"></script>
 </body>

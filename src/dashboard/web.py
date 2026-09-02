@@ -30,7 +30,9 @@ from dashboard import (
 )
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
-from dashboard.config import get_settings, is_serverless, pipeline
+from dashboard.config import (
+    build_branch, build_commit, get_settings, is_serverless, pipeline,
+)
 from dashboard.db import init_db, init_pipeline_db
 from dashboard.jobs import all_jobs
 from dashboard.jobs.gsc import SETTLING_DAYS
@@ -348,6 +350,11 @@ def create_app() -> FastAPI:
         # to remember to go and look at is one you stop looking at.
         context.setdefault("open_alerts", alerts.open_count())
         context.setdefault("auth_required", get_settings().auth_required)
+        # On every page, because the question it answers — "is what I just
+        # fixed actually running?" — is asked from wherever the owner
+        # happens to be standing when something behaves like the old code.
+        context.setdefault("build_commit", build_commit())
+        context.setdefault("build_branch", build_branch())
         return templates.TemplateResponse(request, name, context)
 
     # ── Overview ────────────────────────────────────────────────────

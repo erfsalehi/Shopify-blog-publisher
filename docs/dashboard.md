@@ -890,6 +890,20 @@ dashboard actually reaches, which is much smaller than the pipeline's
 typer). Add exactly what a new import needs rather than switching to the
 full set.
 
+**Which code is running.** The footer names the commit, and the branch it was
+built from, on every page. Vercel publishes both as `VERCEL_GIT_COMMIT_SHA`
+and `VERCEL_GIT_COMMIT_REF` with nothing to configure; Railway, Render and
+Heroku's own names are read too, and `GIT_COMMIT_SHA` is a plain override for
+a host that publishes neither. A host that says nothing shows nothing — a
+footer admitting it cannot tell you which code this is answers nothing.
+
+It is there because the question is asked at the worst possible moment. A
+product import reproduced the same bug across three runs after it had been
+fixed, and the fix was on a branch the deployment does not build. Nothing on
+screen said so, so the only evidence was the *wording* of a log line, which
+happened to have changed with the fix. Comparing a footer against a commit
+takes a second and needs no reasoning at all.
+
 **Database.** Neon Postgres, connected through Vercel's Storage tab, which
 auto-populates `DATABASE_URL`. `DashboardSettings.database_url` reads
 `DASHBOARD_DATABASE_URL` first and falls back to `DATABASE_URL` /
