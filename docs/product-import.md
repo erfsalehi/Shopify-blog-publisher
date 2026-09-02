@@ -307,6 +307,17 @@ contained in the next one is not repeated: a manufacturer publishing its
 range as "EUROSTYLE Venice Grand PRO" under the brand "EUROSTYLE" still
 produces one "EUROSTYLE".
 
+**Which title the size is read from matters as much as reading it.** On a
+Shopify source the title is the product record's own. Everywhere else it comes
+from the collection grid's card, and a card names its product three ways: a
+name element, the anchor pointing at the product, and the alt text on its
+photograph. They are taken in that order — the alt is a description of a
+*picture*, and on some grids it is the SKU or the filename. A card that yields
+`ADGAM2448` costs the size and the colour both, which is a range composing one
+name for several products. Where the product's own page states its name in
+JSON-LD, that outranks a card title (and only a card title: a title from a
+structured feed is the product record and is not second-guessed).
+
 **The size is the product's own, read off the maker's title and normalised.**
 A range is routinely several sizes — Ames' "Advantage" is four colours in
 24"x24", 24"x48" and 36"x72" — and where it is, the size is the only thing
