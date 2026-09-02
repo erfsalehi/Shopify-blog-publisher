@@ -114,10 +114,56 @@ def _pdf_bytes(text: str = "Wear layer 20 mil") -> bytes:
     return bytes(out)
 
 
+#: A range in three sizes, which is the ordinary case and was the broken
+#: one: Ames' "Advantage" is four colours in 24"x24", 24"x48" and 36"x72".
+#: The maker writes the size into every title, exactly like this.
+_ADVANTAGE_SIZES = ('24"x 24"', '24"x 48"', '36"x 72"')
+#: Colour, and the maker's own two-letter code for it — "Greige" and
+#: "Graphite" both start "Gr", and the source handles have to stay distinct
+#: or the test would be about the wrong collision.
+_ADVANTAGE_COLOURS = (
+    ("Chalk", "ch"), ("Graphite", "ga"), ("Greige", "ge"), ("Silver", "sv"),
+)
+
+
+def _advantage_feed() -> dict:
+    products = []
+    for size in _ADVANTAGE_SIZES:
+        for colour, code in _ADVANTAGE_COLOURS:
+            index = len(products) + 1
+            digits = "".join(c for c in size if c.isdigit())
+            handle = "ad" + code + "m" + digits
+            products.append({
+                "id": index,
+                "handle": handle,
+                "title": "Advantage | " + size + " " + colour + " Matte",
+                "body_html": "<p>Through-body porcelain.</p>",
+                "vendor": "Ames Tile",
+                "product_type": "Porcelain Tile",
+                "images": [{"src": "https://cdn.maker.test/ad%d.jpg" % index}],
+                "variants": [{"sku": "AD-%d" % index}],
+            })
+    return {"products": products}
+
+
+ADVANTAGE_FEED = _advantage_feed()
+
+
 def maker_handler(request: httpx.Request) -> httpx.Response:
     path = request.url.path
     if path == "/robots.txt":
         return httpx.Response(200, text="User-agent: *\nAllow: /\n")
+    if path == "/collections/advantage/products.json":
+        page = request.url.params.get("page", "1")
+        return httpx.Response(
+            200, json=ADVANTAGE_FEED if page == "1" else {"products": []}
+        )
+    if path == "/collections/advantage":
+        return httpx.Response(
+            200,
+            html='<html><head><meta name="description" content="Advantage.">'
+                 "</head><body><h1>Advantage</h1></body></html>",
+        )
     if path == "/collections/3dbars/products.json":
         page = request.url.params.get("page", "1")
         return httpx.Response(
@@ -739,6 +785,74 @@ def test_re_running_an_import_leaves_the_products_it_already_made_alone(
             .all()
         }
     assert statuses == {ImportProductStatus.skipped.value}
+
+
+def test_a_range_in_three_sizes_imports_as_twelve_products(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """The size belongs to the product, not to the range.
+
+    Ames' "Advantage" is four colours in 24"x24", 24"x48" and 36"x72". The
+    range's shape was settled from the first product and applied to the rest,
+    so all twelve composed the name of the first four — and since the handle
+    follows the name, the other eight found a product sitting on their handle
+    and were logged as "already in the store, left untouched". Twelve products
+    in, four products out, and the run reported success.
+    """
+    run_id = product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    )
+    _drive(run_id)
+
+    status = product_import.run_status(run_id)
+    assert status["counts"]["created"] == 12
+    assert status["counts"]["skipped"] == 0
+    assert len(fake_shopify.products) == 12
+
+    # Every size survives into the names, and every one of the twelve is
+    # distinct — which is the whole of what went wrong.
+    titles = {node["title"] for node in fake_shopify.products.values()}
+    assert len(titles) == 12
+    for size in ('24"x24"', '24"x48"', '36"x72"'):
+        assert sum(1 for t in titles if size in t) == 4
+
+
+def test_two_products_that_compose_one_name_are_not_reported_as_yours(
+    dashboard_db, fake_site, fake_shopify, no_llm, monkeypatch
+):
+    """The safety net under the naming, for when the naming is wrong anyway.
+
+    "Already in the store" and "we just gave two of the supplier's products
+    the same name" look identical from Shopify — both are a product sitting
+    on the handle. They are not identical from the run: a row of this same
+    run claimed that handle, from a different source page, so these are two
+    different products by construction. Nothing has to be guessed, so nothing
+    is skipped.
+    """
+    # Naming that cannot tell the sizes apart, which is what the old bug
+    # amounted to.
+    monkeypatch.setattr(
+        product_import.product_copy, "derive_size", lambda *a, **k: '24"x24"'
+    )
+
+    run_id = product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    )
+    _drive(run_id)
+
+    status = product_import.run_status(run_id)
+    # Still twelve products in the store, and not one of them written off as
+    # already being there.
+    assert status["counts"]["created"] == 12
+    assert status["counts"]["skipped"] == 0
+    assert len(fake_shopify.products) == 12
+    # The eight that collided went in beside the four that did not, and the
+    # log says so rather than claiming they were already yours.
+    assert sum(1 for h in fake_shopify.products if h.endswith(("-2", "-3"))) == 8
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        log = "\n".join(run.log)
+    assert "named the same as" in log
 
 
 # ── Overruling a skip ────────────────────────────────────────────────

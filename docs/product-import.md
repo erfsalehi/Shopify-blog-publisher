@@ -307,27 +307,49 @@ contained in the next one is not repeated: a manufacturer publishing its
 range as "EUROSTYLE Venice Grand PRO" under the brand "EUROSTYLE" still
 produces one "EUROSTYLE".
 
-**Type and size are settled once per range, not per product.** Every product
-in a tile series is the same size and the same kind of tile, so asking the
-model each time is asking a question whose answer must not vary — and it did:
-one range came back with the full type for four products of thirteen and
-nothing for the rest, and with the size written `5"x10"` once, `5" x 10"`
-once and omitted otherwise. The first non-empty answer is kept on the run and
-reused. The size is also read off the source and normalised, so a maker's
-spacing cannot produce two names for one shape.
+**The size is the product's own, read off the maker's title and normalised.**
+A range is routinely several sizes — Ames' "Advantage" is four colours in
+24"x24", 24"x48" and 36"x72" — and where it is, the size is the only thing
+separating one product in it from the next. Normalising is what makes that
+safe: `5" x 10"`, `5"X10"` and `5"x10"` are one size and only one of them can
+be the store's, so all three are written the same way, whether the answer
+came from the source or from the model.
 
-One residual: if the *first* product yields no type and a later one does, the
-first keeps the shorter name. One product off-pattern beats nine, and the
-alternative is holding every create until the whole range has been read.
+This was, briefly, the other way round — one size settled for the whole range
+and applied to every product in it — and the cost was severe. Importing
+Advantage, the first product settled 24"x24", all twelve composed the name of
+the first four, and since the handle follows the name, eight of them found a
+product on their handle and were logged as *"already in the store, left
+untouched"*. Twelve products in, four out, and the run reported success. What
+justified settling one size was two *spellings* of one size, which is
+normalising's job, not the range's.
+
+**Type and size still fall back to the range's** for a product whose page
+states neither: it takes what the rest of the range answered rather than
+going to the shelf with a gap. The first non-empty answer of the run is what
+is kept. One residual: if the *first* product yields no type and a later one
+does, the first keeps the shorter name — one product off-pattern beats nine,
+and the alternative is holding every create until the whole range has been
+read.
+
+**Two products that compose one name are never reported as already yours.**
+The last line of defence under all of the above, and it does not need to
+guess: if the product sitting on the handle was put there by *this run* from
+a different source page, then these are two different products by
+construction, whatever the store looks like. The second goes in beside the
+first under a free handle and the run log says exactly that — *"named the
+same as X, so it was created as Y instead"*. Being told the naming collapsed
+two products is recoverable; being told they were already yours is how a
+range imports short and nobody finds out.
 
 **When the source names no colour, the source's own title is used instead.**
 The colour is the only part that separates one item in a range from the
 next, so composing without it would give every product the same name — and
 since the handle comes from the name, everything after the first would be
 skipped as already in the store. A range silently importing as one product
-is much worse than a name off-standard. This is the failure the "create it
-alongside" override exists to rescue when it happens anyway: the products
-are genuinely different and only their composed names collided.
+is much worse than a name off-standard. When it happens anyway, the
+collision rule above catches it inside the run, and the "create it alongside"
+override catches it across runs.
 
 ## Collection names
 

@@ -390,19 +390,33 @@ def _products(run_id: int) -> PassResult:
 
 
 def _range_shape(run_id: int, *, size: str, kind: str) -> tuple[str, str]:
-    """Settle the range's size and product type once, then reuse them.
+    """Fill in the range's size and product type for a product that has none.
 
-    Both describe the range rather than the item — every product in a tile
-    series is the same size and the same kind of tile — and both were being
-    asked per product, which is how one range came to ship under three
-    different naming patterns in a single run.
+    The first non-empty answer of the run is remembered and handed to every
+    later product that yields nothing of its own. That is all it does. What
+    the product itself says always wins — a range is not one size.
 
-    First non-empty answer wins and is kept on the run. That leaves one
-    residual case honestly: if the first product yields nothing and a later
-    one does, the first keeps the shorter name. One product off-pattern is a
-    great deal better than nine, and the alternative — holding every create
-    until the whole range has been read — would cost a pass per product and
-    still guess for a range where no product ever answers.
+    It used to be the other way round, and the cost of that was severe. Ames'
+    "Advantage" range is twelve products: four colours in 24"x24", 24"x48"
+    and 36"x72". The first product settled the size at 24"x24", every one of
+    the other eleven had its own size overwritten with it, and since the
+    handle follows the name, eight products composed a name that already
+    existed and were reported as "already in the store, left untouched". Four
+    products imported out of twelve, and the run said it had done its job.
+
+    The inconsistency this was written for is real but narrower than it
+    looked: the size came back as `5"x10"` for one product and `5" x 10"` for
+    another. That is one size spelled two ways, and it is `derive_size`'s job
+    to spell it one way — which it now does, to both the source's answer and
+    the model's. What is left for this function is the case it can actually
+    help with: a product whose page names no size at all, which takes the
+    range's rather than going to market unnamed.
+
+    The residual case is honest and unchanged: if the first product yields
+    nothing and a later one does, the first keeps the shorter name. The
+    alternative — holding every create until the whole range has been read —
+    would cost a pass per product and still guess for a range where no
+    product ever answers.
     """
     with get_session() as session:
         run = session.get(ImportRun, run_id)
@@ -420,7 +434,7 @@ def _range_shape(run_id: int, *, size: str, kind: str) -> tuple[str, str]:
         if changed:
             run.options_json = json.dumps(options)
 
-    return settled_size or size, settled_kind or kind
+    return size or settled_size, kind or settled_kind
 
 
 def _one_product(
@@ -478,13 +492,25 @@ def _one_product(
         # one it answered it said "Onix" — dropping the finish, which is
         # half the discriminator in a range where "Onix Bevel Gloss" and
         # "Onix Diamond Gloss" are different products.
-        # Type and size describe the RANGE, not the item: every product in
-        # "3D Bars" is the same 5"x10" glazed ceramic wall tile. Asked per
-        # product they came back three ways — the full type for four of
-        # thirteen and nothing for the rest, the size as 5"x10" once, 5" x
-        # 10" once and absent otherwise — so one range shipped under three
-        # different naming patterns. They are settled once and reused.
-        size = product_copy.derive_size(source.title, source.specs) or copy.size
+        # Size is the item's, not the range's, and it is read off the
+        # maker's own title. A range is very often several sizes — Ames'
+        # "Advantage" is four colours in three of them — and the size is
+        # what separates those twelve products from each other. Taking it
+        # from the range instead gave all twelve the same name, and since
+        # the handle follows the name, eight of them were reported as
+        # already in the store and never imported.
+        #
+        # Normalised on the way through, both the source's answer and the
+        # model's, because `5"x10"` and `5" x 10"` are the same size and
+        # only one of them can be the store's. That, rather than settling
+        # one size for the range, is what keeps a range spelled one way.
+        #
+        # `_range_shape` is now only the fallback for a product whose page
+        # names no size or no type at all: it takes the range's rather than
+        # going to market unnamed.
+        size = product_copy.derive_size(
+            source.title, source.specs
+        ) or product_copy.normalize_size(copy.size)
         product_type = copy.product_type or source.product_type or ""
         size, product_type = _range_shape(run_id, size=size, kind=product_type)
         copy.size, copy.product_type = size, product_type or copy.product_type
@@ -625,6 +651,31 @@ def _free_handle(client, handle: str, *, attempts: int = 25) -> str:
     )
 
 
+def _claimed_in_run(run_id: int, handle: str, product_id: int) -> str | None:
+    """The title of another product in THIS run that already took this handle.
+
+    The difference between "already in the store" and "we just gave two of
+    the supplier's products the same name" cannot be seen from Shopify — both
+    look like a product sitting on the handle. It can be seen from the run:
+    if a row of this same run claimed that handle minutes ago, from a
+    different source page, then these are two different products by
+    construction and no amount of looking at the store will say so.
+    """
+    if not handle:
+        return None
+    with get_session() as session:
+        other = (
+            session.query(ImportProduct)
+            .filter(
+                ImportProduct.run_id == run_id,
+                ImportProduct.handle == handle,
+                ImportProduct.id != product_id,
+            )
+            .first()
+        )
+        return (other.title or other.source_url) if other else None
+
+
 def _media_count(product: dict) -> int:
     """How many pictures the store's copy of this product already has.
 
@@ -667,6 +718,22 @@ def _create_in_shopify(
 
     handle = product_copy.slugify(copy.title, fallback=source.handle or "product")
     existing = client.find_product(handle)
+
+    # A name this run has already used, on a different source page. Not a
+    # skip, whatever the store says: two supplier products that composed the
+    # same name are still two products, and leaving the second one out is how
+    # a twelve-product range imports as four. Nothing here has to guess — the
+    # run is the evidence — so it is resolved rather than reported, and the
+    # note says what happened.
+    twin = (
+        _claimed_in_run(run_id, handle, product_id)
+        if existing and not force_mode
+        else None
+    )
+    if twin:
+        handle = _free_handle(client, handle)
+        existing = None
+
     if existing and not force_mode:
         _finish_product(
             product_id, ImportProductStatus.skipped,
@@ -797,6 +864,11 @@ def _create_in_shopify(
                 else f"{images_saved} images"
             )
             + f", {docs_saved} documents"
+        )
+    elif twin:
+        detail = (
+            f"named the same as “{twin}”, so it was created as {handle} "
+            f"instead — {detail}"
         )
     elif force_mode == FORCE_NEW:
         detail = f"created alongside the existing one as {handle} — {detail}"
