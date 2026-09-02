@@ -443,6 +443,12 @@ ul.tight li { margin: 2px 0; }
   border: 1px solid var(--line); background: var(--bg);
 }
 .stage-value { text-transform: capitalize; }
+/* The override on a skipped row. Under the status pill rather than in its
+   own column: it appears on a minority of rows, and a column that is empty
+   for eleven products out of thirteen is a column that reads as broken. */
+.row-actions {
+  display: flex; gap: 4px; margin-top: 6px; flex-wrap: wrap;
+}
 
 /* ── Dry-run preview ──────────────────────────────────────────────── */
 /* The description as Shopify would receive it. Deliberately given plain,

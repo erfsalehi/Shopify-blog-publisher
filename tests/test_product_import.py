@@ -187,7 +187,13 @@ class FakeShopify:
         return f"gid://shopify/{kind}/{self._next}"
 
     def find_product(self, handle):
-        return self.products.get(handle)
+        node = self.products.get(handle)
+        if node is None:
+            return None
+        # Shopify reports this on the lookup, and the importer's overwrite
+        # reads it to decide whether to add its pictures or leave the ones
+        # the product already has.
+        return {**node, "mediaCount": {"count": len(self.media.get(node["id"], []))}}
 
     def create_product(self, **kwargs):
         handle = kwargs["handle"]
@@ -207,11 +213,38 @@ class FakeShopify:
         self.products[handle] = node
         return node
 
+    #: What `update_product` writes onto the stored node, and under what
+    #: name. Applied for real rather than only recorded, because the
+    #: importer's overwrite is only correct if the product afterwards is the
+    #: new product — a fake that records the call and keeps the old title
+    #: would pass a test that changed nothing.
+    _UPDATABLE = {
+        "title": "title",
+        "description_html": "descriptionHtml",
+        "handle": "handle",
+        "vendor": "vendor",
+        "product_type": "productType",
+        "tags": "tags",
+        "status": "status",
+    }
+
     def update_product(self, gid, **kwargs):
         self.updates.append({"id": gid, **kwargs})
-        for node in self.products.values():
-            if node["id"] == gid and kwargs.get("description_html"):
-                node["descriptionHtml"] = kwargs["description_html"]
+        for handle, node in list(self.products.items()):
+            if node["id"] != gid:
+                continue
+            for arg, field in self._UPDATABLE.items():
+                if kwargs.get(arg) is not None:
+                    node[field] = kwargs[arg]
+            if kwargs.get("seo_title") or kwargs.get("seo_description"):
+                node["seo"] = {
+                    "title": kwargs.get("seo_title"),
+                    "description": kwargs.get("seo_description"),
+                }
+            if node["handle"] != handle:
+                del self.products[handle]
+                self.products[node["handle"]] = node
+            return node
         return {"id": gid}
 
     def add_product_media(self, gid, media, dry_run=False):
@@ -706,6 +739,263 @@ def test_re_running_an_import_leaves_the_products_it_already_made_alone(
             .all()
         }
     assert statuses == {ImportProductStatus.skipped.value}
+
+
+# ── Overruling a skip ────────────────────────────────────────────────
+#
+# The skip is decided on the handle, so it answers "is there a product called
+# this" rather than "have we imported this product". When those two come
+# apart the owner is missing a product they asked for, and these are the two
+# ways out of it. Both go through the ordinary stages afterwards — that is
+# most of the point, and what these tests are really pinning down.
+
+
+def _second_run_of_the_same_collection() -> int:
+    """Import the range twice. The second run skips everything."""
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+    return run_id
+
+
+def test_a_skipped_product_can_be_rewritten_in_place_on_request(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    run_id = _second_run_of_the_same_collection()
+    before = {node["id"] for node in fake_shopify.products.values()}
+    assert product_import.run_status(run_id)["counts"]["skipped"] == 2
+
+    queued = product_import.reimport_skipped(run_id, mode=product_import.FORCE_UPDATE)
+    assert queued == 2
+    # Reopened rather than replaced: the range is one range, and a fresh run
+    # would cross-link these two to each other instead of to their siblings.
+    assert product_import.run_status(run_id)["active"]
+    _drive(run_id)
+
+    status = product_import.run_status(run_id)
+    assert status["stage"] == ImportStage.done.value
+    assert status["counts"]["updated"] == 2
+    assert status["counts"]["skipped"] == 0
+    # Nothing new in the store, and nothing removed from it.
+    assert {node["id"] for node in fake_shopify.products.values()} == before
+
+    # The whole product, not half of it: the overwrite writes every field the
+    # create would have written.
+    written = [u for u in fake_shopify.updates if u.get("title")]
+    assert len(written) == 2
+    assert all(u["tags"] and u["seo_title"] and u["description_html"] for u in written)
+    assert all(u["vendor"] == "Ames Tile" for u in written)
+
+    with get_session() as session:
+        rows = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .all()
+        )
+    assert {r.force_mode for r in rows} == {product_import.FORCE_UPDATE}
+    assert all(r.admin_url for r in rows)
+
+
+def test_an_overwrite_keeps_the_pictures_the_product_already_has(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """Shopify's media is additive — there is no "replace the images" — so a
+    rewrite that re-attached them would leave the product showing both sets."""
+    run_id = _second_run_of_the_same_collection()
+    before = {gid: list(media) for gid, media in fake_shopify.media.items()}
+    assert before  # the first run did attach pictures
+
+    product_import.reimport_skipped(run_id, mode=product_import.FORCE_UPDATE)
+    _drive(run_id)
+
+    assert {gid: list(m) for gid, m in fake_shopify.media.items()} == before
+    with get_session() as session:
+        rows = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .all()
+        )
+    assert all(r.images_saved == 0 for r in rows)
+
+
+def test_a_skipped_product_can_be_imported_beside_the_one_in_the_store(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """The other mistake: the handle collides but the products are different.
+
+    Nothing is overwritten — the product goes in under the next free handle,
+    which is the only thing Shopify will accept and the only thing the owner
+    asked for.
+    """
+    run_id = _second_run_of_the_same_collection()
+    before = {handle: node["id"] for handle, node in fake_shopify.products.items()}
+
+    product_import.reimport_skipped(run_id, mode=product_import.FORCE_NEW)
+    _drive(run_id)
+
+    status = product_import.run_status(run_id)
+    assert status["counts"]["created"] == 2
+    assert status["counts"]["updated"] == 0
+    # The originals are untouched and still on their own handles.
+    for handle, gid in before.items():
+        assert fake_shopify.products[handle]["id"] == gid
+    fresh = {h for h in fake_shopify.products if h not in before}
+    assert fresh == {h + "-2" for h in before}
+
+
+def test_one_row_can_be_overruled_without_the_others(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    run_id = _second_run_of_the_same_collection()
+    with get_session() as session:
+        target = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .order_by(ImportProduct.position)
+            .first()
+        )
+        target_id = target.id
+
+    assert product_import.reimport_skipped(
+        run_id, mode=product_import.FORCE_UPDATE, product_ids=[target_id]
+    ) == 1
+    _drive(run_id)
+
+    status = product_import.run_status(run_id)
+    assert status["counts"]["updated"] == 1
+    assert status["counts"]["skipped"] == 1
+
+
+def test_overruling_one_product_re_links_the_siblings_that_were_not(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """A product rewritten after the grids were written is invisible to them.
+
+    The linking stage only touches what is marked unlinked, so overruling a
+    skip has to unlink the siblings too. Otherwise the one product whose copy
+    just changed keeps the title, the picture and the URL its siblings
+    recorded before it changed — which is the version the owner overruled.
+    """
+    run_id = _second_run_of_the_same_collection()
+    with get_session() as session:
+        rows = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .order_by(ImportProduct.position)
+            .all()
+        )
+        first_id, second_gid = rows[0].id, rows[1].product_gid
+
+    fake_shopify.updates.clear()
+    product_import.reimport_skipped(
+        run_id, mode=product_import.FORCE_UPDATE, product_ids=[first_id]
+    )
+    _drive(run_id)
+
+    with get_session() as session:
+        rows = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .all()
+        )
+    assert all(r.linked for r in rows)
+    # The sibling nobody asked about was rewritten too, because what it says
+    # about the other product is now out of date.
+    assert any(u["id"] == second_gid for u in fake_shopify.updates)
+    # And every product in the range still carries the other one.
+    by_gid = {node["id"]: node for node in fake_shopify.products.values()}
+    for row in rows:
+        body = by_gid[row.product_gid]["descriptionHtml"]
+        others = [r for r in rows if r.id != row.id]
+        assert all(f"/products/{o.handle}" in body for o in others)
+
+
+def test_a_dry_run_has_no_skips_to_overrule(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """Nothing was sent to Shopify, so nothing was skipped for being there."""
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", dry_run=True
+    )
+    _drive(run_id)
+    with pytest.raises(product_import.ImportRunError):
+        product_import.reimport_skipped(run_id)
+
+
+def test_an_unknown_override_is_refused_rather_than_guessed(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    run_id = _second_run_of_the_same_collection()
+    with pytest.raises(product_import.ImportRunError):
+        product_import.reimport_skipped(run_id, mode="overwrite-everything")
+    # And the run is left exactly as it was.
+    assert not product_import.run_status(run_id)["active"]
+
+
+# ── The controls on the run page ─────────────────────────────────────
+
+
+@pytest.fixture
+def web(dashboard_db):
+    from fastapi.testclient import TestClient
+
+    from dashboard.web import create_app
+
+    with TestClient(create_app()) as c:
+        yield c
+
+
+def test_the_run_page_offers_a_way_out_of_every_skip(
+    web, fake_site, fake_shopify, no_llm
+):
+    run_id = _second_run_of_the_same_collection()
+    page = web.get(f"/import/{run_id}").text
+    assert f"/import/{run_id}/reimport" in page
+    # Both mistakes, both offered — the app cannot tell them apart.
+    assert 'value="update"' in page
+    assert 'value="new"' in page
+
+
+def test_posting_the_override_queues_the_products_and_reopens_the_run(
+    web, fake_site, fake_shopify, no_llm
+):
+    run_id = _second_run_of_the_same_collection()
+    assert not product_import.run_status(run_id)["active"]
+
+    response = web.post(
+        f"/import/{run_id}/reimport", data={"mode": "update"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert response.headers["location"] == f"/import/{run_id}"
+
+    status = product_import.run_status(run_id)
+    assert status["active"]
+    assert status["stage"] == ImportStage.products.value
+    assert status["counts"]["pending"] == 2
+
+    # And the page still renders once they have been, with the record of
+    # what was done to them on the row.
+    _drive(run_id)
+    page = web.get(f"/import/{run_id}").text
+    assert "rewritten on request" in page
+    assert "Rewritten" in page
+
+
+def test_an_override_with_nothing_to_do_says_so_instead_of_pretending(
+    web, fake_site, fake_shopify, no_llm
+):
+    """The first run skipped nothing, so there is nothing to overrule — and
+    a redirect that looked like success would leave the owner watching a run
+    page for work that was never queued."""
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+
+    response = web.post(
+        f"/import/{run_id}/reimport", data={"mode": "update"}, follow_redirects=False
+    )
+    assert response.status_code == 303
+    assert "error=" in response.headers["location"]
+    assert not product_import.run_status(run_id)["active"]
 
 
 def test_a_product_whose_page_dies_fails_alone(

@@ -139,6 +139,10 @@
           if (body.counts) {
             setText('.js-count-created', body.dry_run ? body.counts.prepared : body.counts.created);
             setText('.js-count-skipped', body.counts.skipped);
+            // Only present once something has been rewritten — the card is
+            // rendered on the server and setText ignores a missing node, so
+            // the first rewrite shows up on the reload at the end of the run.
+            setText('.js-count-updated', body.counts.updated);
             setText('.js-count-failed', body.counts.failed);
           }
           renderLog(body.log);

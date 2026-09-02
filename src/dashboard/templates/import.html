@@ -163,7 +163,8 @@
   <thead>
     <tr>
       <th>Collection</th><th>Source</th><th>Stage</th>
-      <th class="num">Created</th><th class="num">Skipped</th><th class="num">Failed</th>
+      <th class="num">Created</th><th class="num">Rewritten</th>
+      <th class="num">Skipped</th><th class="num">Failed</th>
       <th>Started</th>
     </tr>
   </thead>
@@ -185,6 +186,7 @@
         </span>
       </td>
       <td class="num">{{ run.counts.created | int_ }}</td>
+      <td class="num">{{ run.counts.updated | int_ }}</td>
       <td class="num">{{ run.counts.skipped | int_ }}</td>
       <td class="num">{{ run.counts.failed | int_ }}</td>
       <td class="muted small nowrap">{{ run.started_at | when }}</td>

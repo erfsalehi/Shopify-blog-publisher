@@ -59,10 +59,13 @@ the specs, the tags and the description) but not turned into Shopify variants.
 Without prices a variant carries almost nothing, and getting variant structure
 wrong is expensive to undo. If you want them, it's the obvious next feature.
 
-**Overwrite anything.** Before creating a product, the importer asks Shopify
-whether that handle already exists. If it does, the product is left completely
-alone and the run records it as `skipped`. Re-running the same import is
-therefore safe and is the normal way to pick up products a supplier added.
+**Overwrite anything, unless you tell it to.** Before creating a product, the
+importer asks Shopify whether that handle already exists. If it does, the
+product is left completely alone and the run records it as `skipped`.
+Re-running the same import is therefore safe and is the normal way to pick up
+products a supplier added. When that call is wrong — see [Importing a skipped
+product anyway](#importing-a-skipped-product-anyway) — you can overrule it
+per product or for the whole run, and it is only ever you who does.
 
 **Publish.** Products are created as **drafts** unless you pick Active on the
 form. Nothing reaches the storefront until you say so in Shopify admin.
@@ -193,6 +196,8 @@ Either way, nothing is removed:
 
 - A product already in the store is **left exactly as it is** and is still
   added to the collection — it may exist without ever having been in one.
+  (Unless you overrule that: see [Importing a skipped product
+  anyway](#importing-a-skipped-product-anyway).)
 - A product the supplier has since dropped **stays**. Their catalogue is a
   record of what they sell, not of what you do.
 - An existing collection page is **added to, never rewritten**. It may have
@@ -205,6 +210,48 @@ The run note says which is which — "3 new, 9 already in the store" — because
 range whose page you maintain yourself. Untick it and the products are still
 created and tagged, so a smart collection defined on the brand and
 collection tags picks them up anyway.
+
+## Importing a skipped product anyway
+
+The skip is decided on the handle, and the handle is composed from the title.
+So what it really answers is *"is there a product called this"*, not *"have we
+imported this product"* — and those come apart in two ways, both of which end
+with a product you asked for missing from the store:
+
+- **Two source products compose to one name.** The maker distinguishes them in
+  a way our naming drops, so the first is created and the second is reported
+  as already yours when it was never imported at all.
+- **The product on that handle is the right one but is wrong.** An early
+  import with no documents, a run that died halfway, a description someone
+  has since emptied. Leaving it untouched preserves the bad version.
+
+The run page shows what was skipped and offers both ways out, per product or
+for all of them at once. Which one it is cannot be worked out from here, so it
+is not guessed:
+
+| | What it does |
+|---|---|
+| **Rewrite the product already in the store** | Writes this run's title, description, tags, product type, vendor and SEO onto the product that is already there. Pictures are added **only if it has none of its own** — Shopify's media is additive, and re-attaching would leave it showing both sets. Documents are uploaded and linked as usual. |
+| **Create it alongside, under a free handle** | Leaves the product in the store completely alone and creates this one next to it as `handle-2`. |
+
+Either way the run reopens where it stands rather than starting again — the
+range is one range, and a fresh run would cross-link the products it re-made
+to each other instead of to their siblings. The rows go back to `pending`, the
+run goes back to its products stage, and the ordinary passes carry it through
+the collection and cross-linking stages from there: the run page advances it
+while it is open, and the nightly job finishes it if you close the tab.
+
+Cross-linking is redone for the **whole** range, not only the products you
+overruled. A product whose copy has just changed is still described by its
+siblings' grids as it was before, and those grids are only rewritten when the
+product carrying them is marked unlinked.
+
+Nothing is ever deleted, in either mode. A rewrite changes the fields listed
+above and leaves everything else on the product — its variant, its price, its
+inventory, its own images — as it was. A product that has been rewritten is
+recorded as `updated` rather than `created`, so the run afterwards still says
+which products it put in the store and which it changed that were already
+there.
 
 ## Live on creation
 
@@ -278,7 +325,9 @@ The colour is the only part that separates one item in a range from the
 next, so composing without it would give every product the same name — and
 since the handle comes from the name, everything after the first would be
 skipped as already in the store. A range silently importing as one product
-is much worse than a name off-standard.
+is much worse than a name off-standard. This is the failure the "create it
+alongside" override exists to rescue when it happens anyway: the products
+are genuinely different and only their composed names collided.
 
 ## Collection names
 
@@ -365,7 +414,9 @@ description is rewritten so it carries the grid of the full range. It has to
 be, or the range only links itself together for whichever products happened
 to be new that day — and on a re-import that is most of them missing.
 
-Titles, images and documents of an existing product are never touched. The
+Titles, images and documents of an existing product are never touched by a
+re-import on its own — only by an override you ask for, which rewrites the
+whole product. The
 run note says how many descriptions were rewritten, because "left untouched"
 appears against those same products a minute earlier in the log.
 
@@ -431,6 +482,11 @@ empty and `docs` is empty, there was nothing to work with.
 **One product failed, the rest are fine.** That's the design. The reason is on
 the row on the run page; the product can be re-imported by running the same
 collection again (everything else will be skipped as already existing).
+
+**A product was skipped that shouldn't have been.** The run page lists what it
+skipped and lets you import it anyway, either over the product in the store or
+beside it — see [Importing a skipped product
+anyway](#importing-a-skipped-product-anyway).
 
 **Images missing.** Shopify fetches image URLs itself; some manufacturer CDNs
 block that. The importer notices and falls back to downloading each image and
