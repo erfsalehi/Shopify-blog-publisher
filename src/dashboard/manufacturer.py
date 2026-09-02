@@ -754,7 +754,7 @@ def _grid_cards(soup: BeautifulSoup, base: str, page_url: str) -> list[dict]:
             seen.add(found)
             cards.append({
                 "url": found,
-                "title": _card_title(element),
+                "title": _card_title(element, found),
                 "image": _card_image(element, base),
             })
         if cards:
@@ -764,14 +764,61 @@ def _grid_cards(soup: BeautifulSoup, base: str, page_url: str) -> list[dict]:
     return cards
 
 
-def _card_title(element) -> str | None:
+#: Where a grid card names its product, best evidence first. These are the
+#: elements a storefront uses to render the name a shopper reads — Magento's
+#: `product-item-name`/`product-item-link` and the `itemprop` the same markup
+#: carries for search engines.
+_CARD_NAME_SELECTORS = (
+    "[itemprop='name']",
+    ".product-item-name",
+    ".product-item-link",
+    ".product-name",
+    ".card-title",
+    "h2", "h3", "h4",
+)
+
+
+def _card_title(element, product_url: str | None = None) -> str | None:
     """The product's name as the range page gives it.
 
-    Taken from the image's alt text before the link text, because a grid
-    that shows only a picture still has to name it for a screen reader, and
-    a grid that shows a name often wraps it in the same anchor as "Add to
-    Favorites".
+    Ordered by what each candidate actually is. The name element is the
+    site's own statement of what this product is called. The anchor pointing
+    at the product is the same claim, one level less explicit. The image's
+    `alt` is a description of a *photograph*, which is only the product's
+    name on a grid that shows nothing else — and on some it is the SKU, or
+    the filename.
+
+    The alt used to come first, to dodge a real problem: a card's anchors
+    include "Add to Favorites" and "Add to Compare", so the first link's
+    text is often neither the name nor anything like it. The fix for that is
+    to ask which anchor points at the product, not to stop reading anchors.
+
+    It matters more than it looks. The whole store title is composed from
+    this — the size and the variant are both read out of it — so a card that
+    yields the SKU instead of "Advantage | 24\"x 48\" Graphite Matte" costs
+    the size and the colour, and two products that lose their size compose
+    one name between them.
     """
+    for selector in _CARD_NAME_SELECTORS:
+        try:
+            node = element.select_one(selector)
+        except Exception:  # noqa: BLE001 - a bad selector must not kill a run
+            continue
+        if node:
+            text = node.get_text(" ", strip=True)
+            if text:
+                return text[:600]
+
+    if product_url:
+        for tag in element.find_all("a", href=True):
+            if tag["href"].split("?", 1)[0].split("#", 1)[0].rstrip("/") not in (
+                product_url, product_url.rstrip("/")
+            ) and not product_url.endswith(tag["href"].rstrip("/")):
+                continue
+            text = tag.get_text(" ", strip=True)
+            if text:
+                return text[:600]
+
     image = element.find("img", alt=True)
     if image and image["alt"].strip():
         return image["alt"].strip()[:600]
@@ -823,6 +870,9 @@ def _seed_from_grid(
         )
         if card["title"]:
             seed.title = card["title"]
+            # Recorded, because it is the weakest title in the pipeline and
+            # the product's own page may do better — see `_merge_page`.
+            seed.sources["title"] = "collection-grid"
         if card["image"]:
             seed.images = [SourceImage(url=card["image"], position=1)]
             seed.sources["images"] = "collection-grid"
@@ -1157,15 +1207,32 @@ def _merge_page(product: SourceProduct, soup: BeautifulSoup, base: str) -> None:
             ld_product = node
             break
 
-    if not product.title:
+    # A grid card's title is the one seed field the product's own page can
+    # beat. Everything else in a seed came from a structured feed, which is
+    # better evidence than markup; a card title is markup too, and thinner —
+    # often a photograph's alt text, sometimes the SKU. Where the product
+    # page states its own name in JSON-LD, that is the site saying what this
+    # product is called, and it wins.
+    #
+    # It has to win, because the store's whole title is composed out of this
+    # one string: the size and the variant are both read from it. A card that
+    # yields "ADGAM2448" costs both, and two products that lose their size
+    # compose one name between them — which is a product that never reaches
+    # the store.
+    from_grid = product.sources.get("title") == "collection-grid"
+    ld_name = str(ld_product.get("name") or "").strip()
+    if from_grid and ld_name and ld_name != product.title:
+        product.title = ld_name[:600]
+        product.sources["title"] = "json-ld"
+    elif not product.title:
         title = (
-            str(ld_product.get("name") or "").strip()
+            ld_name
             or _meta(soup, prop="og:title")
             or (_clean_cell(soup.find("h1")) if soup.find("h1") else "")
         )
         if title:
             product.title = title[:600]
-            product.sources["title"] = "json-ld" if ld_product.get("name") else "html"
+            product.sources["title"] = "json-ld" if ld_name else "html"
 
     if not product.description_html:
         described = str(ld_product.get("description") or "").strip()

@@ -651,12 +651,20 @@ class ShopifyClient:
         Checked before every create, which is what makes re-running an import
         safe: the second run finds what the first one made and leaves it
         alone instead of failing on a taken handle or creating a duplicate.
+
+        `mediaCount` comes back with it because the one caller that may
+        *overwrite* this product needs to know whether it already has
+        photographs — adding eight more to a product that has its own is a
+        mess someone then has to undo by hand in the admin.
         """
         data = self.graphql(
             """
             query($q: String!) {
               products(first: 1, query: $q) {
-                nodes { id handle title status onlineStoreUrl }
+                nodes {
+                  id handle title status onlineStoreUrl
+                  mediaCount { count }
+                }
               }
             }
             """,
@@ -782,24 +790,52 @@ class ShopifyClient:
         self,
         product_gid: str,
         *,
+        title: str | None = None,
         description_html: str | None = None,
+        handle: str | None = None,
+        vendor: str | None = None,
+        product_type: str | None = None,
         tags: list[str] | None = None,
+        seo_title: str | None = None,
+        seo_description: str | None = None,
         status: str | None = None,
     ) -> dict:
-        """Change an existing product. Used by the cross-linking pass, which
-        rewrites each description once its siblings exist."""
+        """Change an existing product. Every field optional; only what is
+        passed is sent, so a caller that means to touch one thing touches one
+        thing.
+
+        Two callers, wanting different amounts of it. The cross-linking pass
+        rewrites a description once the siblings exist and nothing else. The
+        importer's overwrite — a product already in the store that the owner
+        has told it to redo — writes the whole thing: title, body, vendor,
+        type, tags and SEO, because a half-rewritten product is neither the
+        old one nor the new one.
+        """
         product: dict[str, Any] = {"id": _as_gid(product_gid, "Product")}
+        if title is not None:
+            product["title"] = title
         if description_html is not None:
             product["descriptionHtml"] = description_html
+        if handle is not None:
+            product["handle"] = handle
+        if vendor is not None:
+            product["vendor"] = vendor
+        if product_type is not None:
+            product["productType"] = product_type
         if tags is not None:
             product["tags"] = tags
+        if seo_title is not None or seo_description is not None:
+            # Sent together, always. Shopify replaces this object rather than
+            # merging into it, so passing one alone blanks the other — the
+            # same trap product_seo.py documents.
+            product["seo"] = {"title": seo_title, "description": seo_description}
         if status is not None:
             product["status"] = status.upper()
         data = self.graphql(
             """
             mutation($input: ProductInput!) {
               productUpdate(input: $input) {
-                product { id handle }
+                product { id handle title status onlineStoreUrl }
                 userErrors { field message }
               }
             }

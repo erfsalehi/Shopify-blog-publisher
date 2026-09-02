@@ -36,6 +36,57 @@ def is_serverless() -> bool:
     return os.environ.get("VERCEL") == "1"
 
 
+#: Where each host publishes the commit it built, in the order they're asked.
+#: `GIT_COMMIT_SHA` is last and is ours: a plain override for a host that
+#: publishes nothing, or for running this from a checkout.
+_COMMIT_VARS = (
+    "VERCEL_GIT_COMMIT_SHA",
+    "RAILWAY_GIT_COMMIT_SHA",
+    "RENDER_GIT_COMMIT",
+    "HEROKU_SLUG_COMMIT",
+    "SOURCE_VERSION",
+    "GIT_COMMIT_SHA",
+)
+
+
+def build_commit() -> str:
+    """The short SHA this deployment was built from, or "" if nothing says.
+
+    Deliberately here rather than in a settings class: like `is_serverless`,
+    it is a fact the platform states about the running process, not something
+    anyone should be able to set in `.env` to a value that isn't true.
+
+    It exists because "is the fix live?" was, for three consecutive imports,
+    unanswerable from the app. A run reproduced a bug that had already been
+    fixed, and the only way to tell that the fix had not been deployed was to
+    read the log's wording closely enough to notice it came from the old
+    code. A footer that names the commit answers it in a glance, and an
+    answer nobody has to reason for is the point.
+    """
+    for name in _COMMIT_VARS:
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value[:7]
+    return ""
+
+
+def build_branch() -> str:
+    """The branch this deployment was built from, or "" if nothing says.
+
+    The other half of the same question. A deployment can be perfectly
+    up to date with `main` and still not have the change, because the change
+    is on a branch — which is exactly what happened.
+    """
+    for name in (
+        "VERCEL_GIT_COMMIT_REF", "RAILWAY_GIT_BRANCH", "RENDER_GIT_BRANCH",
+        "GIT_BRANCH",
+    ):
+        value = (os.environ.get(name) or "").strip()
+        if value:
+            return value[:60]
+    return ""
+
+
 class DashboardSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",

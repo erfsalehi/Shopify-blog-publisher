@@ -320,3 +320,48 @@ def test_a_shared_database_gets_the_pipelines_tables_too(monkeypatch, tmp_path):
         pipeline_config.get_settings.cache_clear()
         pipeline_session._engine = None
         pipeline_session._SessionLocal = None
+
+
+# ── What is actually running ───────────────────────────────────────
+#
+# Added after three consecutive imports reproduced a bug that had already
+# been fixed. Nothing in the app named the code it was running, so the only
+# way to tell the fix had never been deployed was to read a log line closely
+# enough to notice its wording came from the old version.
+
+
+def test_the_footer_names_the_commit_the_host_says_it_built(client, monkeypatch):
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "ff36534abcdef0123456789")
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_REF", "main")
+    page = client.get("/").text
+    assert "ff36534" in page
+    assert "on main" in page
+
+
+def test_each_host_is_asked_in_turn(monkeypatch):
+    """Deployed on Railway rather than Vercel is the same question."""
+    from dashboard import config
+
+    for name in (
+        "VERCEL_GIT_COMMIT_SHA", "RAILWAY_GIT_COMMIT_SHA", "RENDER_GIT_COMMIT",
+        "HEROKU_SLUG_COMMIT", "SOURCE_VERSION", "GIT_COMMIT_SHA",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert config.build_commit() == ""
+
+    monkeypatch.setenv("RAILWAY_GIT_COMMIT_SHA", "6fbdb77ffffffff")
+    assert config.build_commit() == "6fbdb77"
+    # Vercel's answer outranks it when both are set, being asked first.
+    monkeypatch.setenv("VERCEL_GIT_COMMIT_SHA", "b71d776aaaaaaaa")
+    assert config.build_commit() == "b71d776"
+
+
+def test_a_host_that_says_nothing_leaves_the_footer_alone(client, monkeypatch):
+    """Not "build unknown". A footer that says it cannot tell you which code
+    this is answers nothing and occupies the space of something that would."""
+    from dashboard import config
+
+    for name in config._COMMIT_VARS:
+        monkeypatch.delenv(name, raising=False)
+    page = client.get("/").text
+    assert "build <code>" not in page

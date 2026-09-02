@@ -1338,7 +1338,20 @@ class ImportProductStatus(str, enum.Enum):
     prepared = "prepared"
     created = "created"
     #: A product with this handle was already in the store. Left alone.
+    #:
+    #: Not always the right call, which is why `force_mode` exists: the check
+    #: is on the handle, and the handle comes from the composed title, so two
+    #: source products the maker distinguishes in a way our naming drops
+    #: compose to one handle and the second is reported as "already yours"
+    #: when it was never imported at all.
     skipped = "skipped"
+    #: A product that was already in the store and was rewritten anyway, on
+    #: the owner's instruction. Its own status rather than `created`, because
+    #: the two answer different questions afterwards — "what did this run put
+    #: in my store" and "what did this run change that was already there" —
+    #: and calling an overwrite a create loses the only record that anything
+    #: was overwritten.
+    updated = "updated"
     failed = "failed"
 
 
@@ -1463,6 +1476,20 @@ class ImportProduct(Base):
     #: Set once the cross-link pass has written this product's siblings onto
     #: it, so a resumed linking stage doesn't rewrite what it already did.
     linked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    #: The owner's override of a skip, and how they want it resolved. Unset
+    #: for every product the importer handles on its own.
+    #:
+    #: `"update"` — the product in the store is this one, and is wrong or
+    #: stale: rewrite it in place with what this run read.
+    #: `"new"` — the product in the store is a *different* product that
+    #: happens to compose to the same handle: create this one beside it under
+    #: a free handle and leave the other alone.
+    #:
+    #: Two modes rather than one because only the owner can tell those two
+    #: mistakes apart, and guessing wrong overwrites a product nobody asked
+    #: to touch.
+    force_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(

@@ -30,7 +30,9 @@ from dashboard import (
 )
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
-from dashboard.config import get_settings, is_serverless, pipeline
+from dashboard.config import (
+    build_branch, build_commit, get_settings, is_serverless, pipeline,
+)
 from dashboard.db import init_db, init_pipeline_db
 from dashboard.jobs import all_jobs
 from dashboard.jobs.gsc import SETTLING_DAYS
@@ -348,6 +350,11 @@ def create_app() -> FastAPI:
         # to remember to go and look at is one you stop looking at.
         context.setdefault("open_alerts", alerts.open_count())
         context.setdefault("auth_required", get_settings().auth_required)
+        # On every page, because the question it answers — "is what I just
+        # fixed actually running?" — is asked from wherever the owner
+        # happens to be standing when something behaves like the old code.
+        context.setdefault("build_commit", build_commit())
+        context.setdefault("build_branch", build_branch())
         return templates.TemplateResponse(request, name, context)
 
     # ── Overview ────────────────────────────────────────────────────
@@ -499,13 +506,14 @@ def create_app() -> FastAPI:
         return RedirectResponse(f"/import/{run_id}", status_code=303)
 
     @app.get("/import/{run_id}", response_class=HTMLResponse)
-    def import_run_page(request: Request, run_id: int):
+    def import_run_page(request: Request, run_id: int, error: str = ""):
         try:
             detail = product_import.run_detail(run_id)
         except product_import.ImportRunError:
             return RedirectResponse("/import?error=That+run+no+longer+exists.",
                                     status_code=303)
-        return render(request, "import_run.html", nav="import", **detail)
+        return render(request, "import_run.html", nav="import", error=error,
+                      **detail)
 
     @app.get("/import/{run_id}/product/{product_id}", response_class=HTMLResponse)
     def import_product_page(request: Request, run_id: int, product_id: int):
@@ -562,6 +570,55 @@ def create_app() -> FastAPI:
     @app.post("/import/{run_id}/stop")
     def stop_import(run_id: int):
         product_import.stop_run(run_id)
+        return RedirectResponse(f"/import/{run_id}", status_code=303)
+
+    @app.post("/import/{run_id}/reimport")
+    def reimport_skipped(
+        run_id: int,
+        mode: str = Form(product_import.FORCE_UPDATE),
+        product_id: int = Form(0),
+    ):
+        """Import products this run decided were already in the store.
+
+        The skip is a guess made on the handle, and it is wrong often enough
+        to need an override — see `product_import.reimport_skipped` for the
+        two ways it goes wrong and why the owner picks which one this is.
+
+        Queues only: the run is put back into its products stage and the page
+        it redirects to starts advancing it, exactly as it does for a run
+        that was never finished.
+        """
+        # Under the same lock a pass takes, and for the reason the lock
+        # exists in reverse: this puts the run back into its products stage,
+        # and a pass finishing its linking stage a moment later would write
+        # `done` over that and strand the rows this just queued.
+        lock = _import_lock(run_id)
+        if not lock.acquire(timeout=5):
+            return RedirectResponse(
+                f"/import/{run_id}?error=" + quote(
+                    "A pass is running right now — try that again in a moment."
+                ),
+                status_code=303,
+            )
+        try:
+            queued = product_import.reimport_skipped(
+                run_id,
+                mode=mode,
+                product_ids=[product_id] if product_id else None,
+            )
+        except product_import.ImportRunError as exc:
+            return RedirectResponse(
+                f"/import/{run_id}?error=" + quote(str(exc)), status_code=303
+            )
+        finally:
+            lock.release()
+        if not queued:
+            return RedirectResponse(
+                f"/import/{run_id}?error=" + quote(
+                    "Nothing to import — none of those products was skipped."
+                ),
+                status_code=303,
+            )
         return RedirectResponse(f"/import/{run_id}", status_code=303)
 
     # ── Blog ────────────────────────────────────────────────────────

@@ -282,3 +282,96 @@ def test_an_image_shopify_did_fetch_is_not_downloaded_again(
     )
     assert saved == 2
     assert fake.uploaded == []
+
+
+# ── The name on the card ─────────────────────────────────────────────
+#
+# Ames' Advantage range is four colours in three sizes, and the maker writes
+# the size into every product name. The importer composes the store's title
+# out of that one string — the size and the variant are both read from it —
+# so where the card's name comes from decides whether twelve products get
+# twelve names or four.
+
+
+NAMED_CARD = """
+<li class="item product product-item">
+  <div class="product-item-info">
+    <a href="{url}" class="product photo product-item-photo">
+      <img src="/media/{slug}.jpg" alt="{alt}">
+    </a>
+    <strong class="product name product-item-name">
+      <a class="product-item-link" href="{url}">{name}</a>
+    </strong>
+    <a href="/collections/advantage#" class="action towishlist">Add to Favorites</a>
+  </div>
+</li>
+"""
+
+
+def test_the_card_is_named_by_its_name_not_by_its_photograph():
+    """`alt` describes a photograph. The name element names the product.
+
+    On this grid the alt is the SKU, which is what the store's title would
+    have been composed from: no size, no colour, and — since two products
+    that lose their size compose one name between them — one product where
+    there should be two.
+    """
+    soup = manufacturer.soup_of(
+        '<html><body><ol class="product-items">'
+        + NAMED_CARD.format(
+            url="/adgam2448", slug="adgam2448", alt="ADGAM2448",
+            name='Advantage | 24"x 48" Graphite Matte',
+        )
+        + "</ol></body></html>"
+    )
+    cards = manufacturer._grid_cards(soup, BASE, f"{BASE}/collections/advantage")
+    assert [c["title"] for c in cards] == ['Advantage | 24"x 48" Graphite Matte']
+    # And the picture is still found, which is the other thing a card is for.
+    assert cards[0]["image"].endswith("/media/adgam2448.jpg")
+
+
+def test_a_card_that_only_has_a_photograph_still_uses_its_alt():
+    """The case the alt was preferred for, and it still works: a grid that
+    shows a picture and no words has to name it for a screen reader, and
+    that is the only name there is."""
+    soup = manufacturer.soup_of(GRID)
+    cards = manufacturer._grid_cards(soup, BASE, f"{BASE}{PATH}")
+    assert all("3D Bars" in c["title"] for c in cards)
+
+
+def test_the_products_own_page_can_correct_a_thin_card_title():
+    """A card title is markup, and the weakest in the pipeline. Where the
+    product's own page states its name as structured data, that is the site
+    saying what the product is called, and it replaces the card's guess."""
+    seed = manufacturer.SourceProduct(
+        source_url=f"{BASE}/adgam2448", handle="adgam2448", title="ADGAM2448",
+    )
+    seed.sources["title"] = "collection-grid"
+    soup = manufacturer.soup_of(
+        '<html><body><script type="application/ld+json">'
+        + json.dumps({
+            "@type": "Product",
+            "name": 'Advantage | 24"x 48" Graphite Matte',
+            "sku": "ADGAM2448",
+        })
+        + "</script><h1>Advantage</h1></body></html>"
+    )
+    manufacturer._merge_page(seed, soup, BASE)
+    assert seed.title == 'Advantage | 24"x 48" Graphite Matte'
+    assert seed.sources["title"] == "json-ld"
+
+
+def test_a_title_from_a_structured_feed_is_not_second_guessed():
+    """Only a *card* title is open to correction. A Shopify feed's title is
+    the product record itself, and a page's JSON-LD does not outrank it."""
+    seed = manufacturer.SourceProduct(
+        source_url=f"{BASE}/adgam2448", handle="adgam2448",
+        title="Advantage 24x48 Graphite Matte",
+    )
+    soup = manufacturer.soup_of(
+        '<html><body><script type="application/ld+json">'
+        + json.dumps({"@type": "Product", "name": "Something else entirely"})
+        + "</script></body></html>"
+    )
+    manufacturer._merge_page(seed, soup, BASE)
+    assert seed.title == "Advantage 24x48 Graphite Matte"

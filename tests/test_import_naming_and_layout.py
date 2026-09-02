@@ -383,22 +383,30 @@ def test_the_range_settles_its_shape_once(dashboard_db):
     assert first == second == ('5"x10"', "Glazed Ceramic Wall Tile")
 
 
-def test_a_settled_range_is_not_overwritten_by_a_later_answer(dashboard_db):
-    """One range, one shape. A model that changes its mind halfway through
-    would otherwise split the collection across two patterns again."""
+def test_a_product_that_states_its_own_size_keeps_it(dashboard_db):
+    """A range is not one size, and the size is what separates its products.
+
+    Ames' "Advantage" is four colours in 24"x24", 24"x48" and 36"x72". When
+    the range's first answer won, all twelve composed the same name — and
+    since the handle follows the name, eight of them were reported as already
+    in the store and never imported. Twelve products in, four products out,
+    and the run said it had done its job.
+    """
     from dashboard.db import get_session
     from dashboard.models import ImportRun, ImportStage
     from dashboard.product_import import _range_shape
 
     with get_session() as session:
         run = ImportRun(
-            source_url="https://maker.test/collections/bars",
-            collection_title="3D Bars", stage=ImportStage.products.value,
+            source_url="https://maker.test/collections/advantage",
+            collection_title="Advantage", stage=ImportStage.products.value,
         )
         session.add(run)
         session.flush()
         run_id = run.id
 
-    _range_shape(run_id, size='5"x10"', kind="Glazed Ceramic Wall Tile")
-    later = _range_shape(run_id, size='12"x24"', kind="Porcelain Floor Tile")
-    assert later == ('5"x10"', "Glazed Ceramic Wall Tile")
+    _range_shape(run_id, size='24"x24"', kind="Porcelain Tile")
+    later = _range_shape(run_id, size='24"x48"', kind="Porcelain Tile")
+    assert later == ('24"x48"', "Porcelain Tile")
+    # And the range's own answer is still there for whoever needs it.
+    assert _range_shape(run_id, size="", kind="") == ('24"x24"', "Porcelain Tile")

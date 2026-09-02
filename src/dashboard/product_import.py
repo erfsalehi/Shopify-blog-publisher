@@ -24,6 +24,14 @@ product with the same handle is left completely alone: the second run of an
 import finds what the first one made rather than duplicating or overwriting
 it.
 
+**Unless told otherwise.** That last rule is a guess — the check is on the
+handle, so it answers "is there a product called this" and not "have we
+imported this product", and the two come apart. `reimport_skipped` is the
+owner's override: they look at what was skipped, decide whether the product
+in the store is this one or a different one, and the run reopens to either
+rewrite it or create this one beside it. Nothing here decides that on its
+own, because being wrong means overwriting a product nobody asked to touch.
+
 **What it does do, loudly.** Products are created Active and published to
 every sales channel, which means an import is live to customers as it runs.
 That is the owner's setting and their decision — the previous default was
@@ -79,6 +87,25 @@ def _related_limit() -> int:
         return RELATED_LIMIT
 
 METAFIELD_NAMESPACE = "custom"
+
+#: The two ways an owner can overrule "already in the store". Kept as
+#: constants because they cross three layers — a form field, a column, and a
+#: branch in the create — and a typo in any one of them would read as "no
+#: override" and silently skip the product all over again.
+FORCE_UPDATE = "update"
+FORCE_NEW = "new"
+FORCE_MODES = (FORCE_UPDATE, FORCE_NEW)
+
+#: The statuses that mean "this product is in the store and belongs to this
+#: range" — which is the question both the collection stage and the linking
+#: stage are asking, and the reason they ask it the same way. A product left
+#: untouched because it was already there is still part of the range, and so
+#: is one this run rewrote.
+_IN_THE_STORE = (
+    ImportProductStatus.created.value,
+    ImportProductStatus.updated.value,
+    ImportProductStatus.skipped.value,
+)
 
 
 class ImportRunError(RuntimeError):
@@ -315,7 +342,9 @@ def _products(run_id: int) -> PassResult:
             )
             _set_stage(
                 session, run, next_stage,
-                f"{counts['created']} created, {counts['skipped']} already existed, "
+                f"{counts['created']} created, "
+                + (f"{counts['updated']} rewritten, " if counts["updated"] else "")
+                + f"{counts['skipped']} already existed, "
                 f"{counts['failed']} failed.",
             )
         return PassResult(run_id, next_stage.value, done=False)
@@ -361,19 +390,33 @@ def _products(run_id: int) -> PassResult:
 
 
 def _range_shape(run_id: int, *, size: str, kind: str) -> tuple[str, str]:
-    """Settle the range's size and product type once, then reuse them.
+    """Fill in the range's size and product type for a product that has none.
 
-    Both describe the range rather than the item — every product in a tile
-    series is the same size and the same kind of tile — and both were being
-    asked per product, which is how one range came to ship under three
-    different naming patterns in a single run.
+    The first non-empty answer of the run is remembered and handed to every
+    later product that yields nothing of its own. That is all it does. What
+    the product itself says always wins — a range is not one size.
 
-    First non-empty answer wins and is kept on the run. That leaves one
-    residual case honestly: if the first product yields nothing and a later
-    one does, the first keeps the shorter name. One product off-pattern is a
-    great deal better than nine, and the alternative — holding every create
-    until the whole range has been read — would cost a pass per product and
-    still guess for a range where no product ever answers.
+    It used to be the other way round, and the cost of that was severe. Ames'
+    "Advantage" range is twelve products: four colours in 24"x24", 24"x48"
+    and 36"x72". The first product settled the size at 24"x24", every one of
+    the other eleven had its own size overwritten with it, and since the
+    handle follows the name, eight products composed a name that already
+    existed and were reported as "already in the store, left untouched". Four
+    products imported out of twelve, and the run said it had done its job.
+
+    The inconsistency this was written for is real but narrower than it
+    looked: the size came back as `5"x10"` for one product and `5" x 10"` for
+    another. That is one size spelled two ways, and it is `derive_size`'s job
+    to spell it one way — which it now does, to both the source's answer and
+    the model's. What is left for this function is the case it can actually
+    help with: a product whose page names no size at all, which takes the
+    range's rather than going to market unnamed.
+
+    The residual case is honest and unchanged: if the first product yields
+    nothing and a later one does, the first keeps the shorter name. The
+    alternative — holding every create until the whole range has been read —
+    would cost a pass per product and still guess for a range where no
+    product ever answers.
     """
     with get_session() as session:
         run = session.get(ImportRun, run_id)
@@ -391,7 +434,7 @@ def _range_shape(run_id: int, *, size: str, kind: str) -> tuple[str, str]:
         if changed:
             run.options_json = json.dumps(options)
 
-    return settled_size or size, settled_kind or kind
+    return size or settled_size, kind or settled_kind
 
 
 def _one_product(
@@ -417,6 +460,7 @@ def _one_product(
         row = session.get(ImportProduct, product_id)
         source_url = row.source_url
         seed_data = row.extracted
+        force_mode = row.force_mode
 
     try:
         seed = _seed_from(seed_data, source_url)
@@ -448,13 +492,25 @@ def _one_product(
         # one it answered it said "Onix" — dropping the finish, which is
         # half the discriminator in a range where "Onix Bevel Gloss" and
         # "Onix Diamond Gloss" are different products.
-        # Type and size describe the RANGE, not the item: every product in
-        # "3D Bars" is the same 5"x10" glazed ceramic wall tile. Asked per
-        # product they came back three ways — the full type for four of
-        # thirteen and nothing for the rest, the size as 5"x10" once, 5" x
-        # 10" once and absent otherwise — so one range shipped under three
-        # different naming patterns. They are settled once and reused.
-        size = product_copy.derive_size(source.title, source.specs) or copy.size
+        # Size is the item's, not the range's, and it is read off the
+        # maker's own title. A range is very often several sizes — Ames'
+        # "Advantage" is four colours in three of them — and the size is
+        # what separates those twelve products from each other. Taking it
+        # from the range instead gave all twelve the same name, and since
+        # the handle follows the name, eight of them were reported as
+        # already in the store and never imported.
+        #
+        # Normalised on the way through, both the source's answer and the
+        # model's, because `5"x10"` and `5" x 10"` are the same size and
+        # only one of them can be the store's. That, rather than settling
+        # one size for the range, is what keeps a range spelled one way.
+        #
+        # `_range_shape` is now only the fallback for a product whose page
+        # names no size or no type at all: it takes the range's rather than
+        # going to market unnamed.
+        size = product_copy.derive_size(
+            source.title, source.specs
+        ) or product_copy.normalize_size(copy.size)
         product_type = copy.product_type or source.product_type or ""
         size, product_type = _range_shape(run_id, size=size, kind=product_type)
         copy.size, copy.product_type = size, product_type or copy.product_type
@@ -497,6 +553,7 @@ def _one_product(
             collection_title=collection_title or "",
             options=options,
             client=client,
+            force_mode=force_mode,
         )
     except Exception as e:  # noqa: BLE001 - one product's failure, recorded
         log.warning("import product %s failed: %s", product_id, e, exc_info=True)
@@ -576,6 +633,68 @@ def _shopify_client():
     return ShopifyClient()
 
 
+def _free_handle(client, handle: str, *, attempts: int = 25) -> str:
+    """The first handle near this one that nothing in the store is using.
+
+    Only reached on an explicit "import it anyway, as a separate product".
+    Shopify handles are unique, so the alternative to suffixing is failing
+    the create — and the owner has already said the thing sitting on this
+    handle is not this product.
+    """
+    for suffix in range(2, attempts + 2):
+        candidate = f"{handle}-{suffix}"
+        if not client.find_product(candidate):
+            return candidate
+    raise ImportRunError(
+        f"Could not find a free handle near “{handle}” — {attempts} variants "
+        "of it are already in the store."
+    )
+
+
+def _claimed_in_run(run_id: int, handle: str, product_id: int) -> str | None:
+    """The title of another product in THIS run that already took this handle.
+
+    The difference between "already in the store" and "we just gave two of
+    the supplier's products the same name" cannot be seen from Shopify — both
+    look like a product sitting on the handle. It can be seen from the run:
+    if a row of this same run claimed that handle minutes ago, from a
+    different source page, then these are two different products by
+    construction and no amount of looking at the store will say so.
+    """
+    if not handle:
+        return None
+    with get_session() as session:
+        other = (
+            session.query(ImportProduct)
+            .filter(
+                ImportProduct.run_id == run_id,
+                ImportProduct.handle == handle,
+                ImportProduct.id != product_id,
+            )
+            .first()
+        )
+        return (other.title or other.source_url) if other else None
+
+
+def _media_count(product: dict) -> int:
+    """How many pictures the store's copy of this product already has.
+
+    `find_product` asks for it; a client that doesn't report it reads as
+    zero, which is the safe direction — the caller then adds the images it
+    scraped rather than assuming pictures exist that may not.
+    """
+    node = product.get("mediaCount")
+    if isinstance(node, dict):
+        try:
+            return int(node.get("count") or 0)
+        except (TypeError, ValueError):
+            return 0
+    try:
+        return int(node or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _create_in_shopify(
     product_id: int,
     *,
@@ -586,12 +705,36 @@ def _create_in_shopify(
     collection_title: str,
     options: dict,
     client,
+    force_mode: str | None = None,
 ) -> None:
+    """Put this product in the store, unless one with its handle is there.
+
+    `force_mode` is the owner overruling that last clause, having looked at
+    the product the importer found and decided it got the question wrong.
+    `FORCE_UPDATE` rewrites what is there; `FORCE_NEW` creates this one
+    beside it. See `reimport_skipped`, which is what sets it.
+    """
     from blog_pipeline.tools.shopify import ShopifyError
 
     handle = product_copy.slugify(copy.title, fallback=source.handle or "product")
     existing = client.find_product(handle)
-    if existing:
+
+    # A name this run has already used, on a different source page. Not a
+    # skip, whatever the store says: two supplier products that composed the
+    # same name are still two products, and leaving the second one out is how
+    # a twelve-product range imports as four. Nothing here has to guess — the
+    # run is the evidence — so it is resolved rather than reported, and the
+    # note says what happened.
+    twin = (
+        _claimed_in_run(run_id, handle, product_id)
+        if existing and not force_mode
+        else None
+    )
+    if twin:
+        handle = _free_handle(client, handle)
+        existing = None
+
+    if existing and not force_mode:
         _finish_product(
             product_id, ImportProductStatus.skipped,
             note="already in the store, left untouched",
@@ -600,6 +743,12 @@ def _create_in_shopify(
             online_url=existing.get("onlineStoreUrl"),
         )
         return
+
+    if existing and force_mode == FORCE_NEW:
+        # Told that the product on this handle is a different product. Move
+        # aside rather than over it.
+        handle = _free_handle(client, handle)
+        existing = None
 
     tags = product_copy.clean_tags(
         _required_tags(
@@ -620,17 +769,38 @@ def _create_in_shopify(
         banner=banner,
     )
 
-    created = client.create_product(
-        title=copy.title,
-        description_html=body,
-        handle=handle,
-        vendor=vendor,
-        product_type=copy.product_type or source.product_type,
-        tags=tags,
-        seo_title=copy.seo_title,
-        seo_description=copy.seo_description,
-        status=options.get("publish_status", "DRAFT"),
-    )
+    status = options.get("publish_status", "DRAFT")
+    if existing:
+        # The overwrite. Every field the create would have written, written
+        # onto the product that is already there — a product left half in its
+        # old copy and half in the new one is worse than either.
+        written = client.update_product(
+            existing["id"],
+            title=copy.title,
+            description_html=body,
+            vendor=vendor,
+            product_type=copy.product_type or source.product_type,
+            tags=tags,
+            seo_title=copy.seo_title,
+            seo_description=copy.seo_description,
+            status=status,
+        )
+        # `productUpdate` returns the fields it was asked for and nothing
+        # about the product it didn't touch, so anything missing falls back
+        # to what the lookup already told us.
+        created = {**existing, **{k: v for k, v in written.items() if v}}
+    else:
+        created = client.create_product(
+            title=copy.title,
+            description_html=body,
+            handle=handle,
+            vendor=vendor,
+            product_type=copy.product_type or source.product_type,
+            tags=tags,
+            seo_title=copy.seo_title,
+            seo_description=copy.seo_description,
+            status=status,
+        )
     product_gid = created["id"]
 
     # Asked for rather than assumed. Every channel has its own "automatically
@@ -647,7 +817,15 @@ def _create_in_shopify(
             # over it would throw away the work that did succeed.
             log.warning("could not publish %s to all channels: %s", product_gid, exc)
 
-    images_saved = _attach_images(client, product_gid, source, copy)
+    # An overwrite adds pictures only to a product that has none. Shopify's
+    # media is additive — there is no "replace the images" — so re-importing
+    # onto a product that already has its own photography would leave it with
+    # both sets, in no particular order, for someone to sort out by hand.
+    # A product with no pictures at all is the case the override exists for.
+    had_media = bool(existing) and _media_count(existing) > 0
+    images_saved = (
+        0 if had_media else _attach_images(client, product_gid, source, copy)
+    )
     doc_urls, docs_saved = _attach_docs(client, product_gid, source)
 
     # The description is rewritten once the documents have store URLs — the
@@ -676,9 +854,29 @@ def _create_in_shopify(
         row = session.get(ImportProduct, product_id)
         row.generated_json = json.dumps({**row.generated, "doc_urls": doc_urls})
 
+    detail = f"{images_saved} images, {docs_saved} documents"
+    if existing:
+        detail = (
+            "rewritten in place, "
+            + (
+                "kept the pictures it already had"
+                if had_media
+                else f"{images_saved} images"
+            )
+            + f", {docs_saved} documents"
+        )
+    elif twin:
+        detail = (
+            f"named the same as “{twin}”, so it was created as {handle} "
+            f"instead — {detail}"
+        )
+    elif force_mode == FORCE_NEW:
+        detail = f"created alongside the existing one as {handle} — {detail}"
+
     _finish_product(
-        product_id, ImportProductStatus.created,
-        note=f"{images_saved} images, {docs_saved} documents",
+        product_id,
+        ImportProductStatus.updated if existing else ImportProductStatus.created,
+        note=detail,
         product_gid=product_gid,
         handle=created.get("handle") or handle,
         admin_url=client.admin_url(product_gid),
@@ -909,10 +1107,7 @@ def _collection(run_id: int) -> PassResult:
             session.query(ImportProduct)
             .filter(
                 ImportProduct.run_id == run_id,
-                ImportProduct.status.in_([
-                    ImportProductStatus.created.value,
-                    ImportProductStatus.skipped.value,
-                ]),
+                ImportProduct.status.in_(_IN_THE_STORE),
             )
             .order_by(ImportProduct.position)
             .all()
@@ -925,7 +1120,10 @@ def _collection(run_id: int) -> PassResult:
         already = sum(
             1 for r in rows if r.status == ImportProductStatus.skipped.value
         )
-        fresh = len(gids) - already
+        rewritten = sum(
+            1 for r in rows if r.status == ImportProductStatus.updated.value
+        )
+        fresh = len(gids) - already - rewritten
 
     body = product_copy.collection_body(title, description, names)
 
@@ -946,6 +1144,8 @@ def _collection(run_id: int) -> PassResult:
     mode = options.get("collection_mode", "new")
     build_page = options.get("build_page", True)
     tally = f"{fresh} new, {already} already in the store"
+    if rewritten:
+        tally += f", {rewritten} rewritten on request"
 
     client = _shopify_client()
     existing = client.find_collection(handle)
@@ -1029,10 +1229,7 @@ def _linking(run_id: int) -> PassResult:
                 # said "Cross-linked 2 products" as though that were the
                 # whole of it. `_collection` has always used both statuses;
                 # this is the same question and deserves the same answer.
-                ImportProduct.status.in_([
-                    ImportProductStatus.created.value,
-                    ImportProductStatus.skipped.value,
-                ]),
+                ImportProduct.status.in_(_IN_THE_STORE),
             )
             .order_by(ImportProduct.position)
             .all()
@@ -1370,6 +1567,124 @@ def product_preview(run_id: int, product_id: int) -> dict:
         "specs": extracted.get("specs") or {},
         "model": generated.get("model"),
     }
+
+
+# ── Overruling a skip ────────────────────────────────────────────────
+
+
+def reimport_skipped(
+    run_id: int,
+    *,
+    mode: str = FORCE_UPDATE,
+    product_ids: list[int] | None = None,
+) -> int:
+    """Queue products this run skipped to be imported after all.
+
+    The skip is decided on the handle, and the handle is composed from the
+    title, so it answers "is there a product called this" rather than "have
+    we imported this product". Those come apart in two ways, both of which
+    end with a product the owner wanted and did not get:
+
+      * two source products whose difference our naming drops compose to one
+        handle, and the second is reported as already yours when it was never
+        imported at all;
+      * the product on that handle is the right one but was created badly —
+        a run that failed halfway, an early import with no documents — and
+        leaving it untouched preserves the bad version.
+
+    Which of those it is cannot be worked out from here, so it isn't guessed:
+    `mode` is the owner's answer. `FORCE_UPDATE` rewrites the product in the
+    store from this run's reading of the source; `FORCE_NEW` creates this one
+    beside it under a free handle and leaves the other alone.
+
+    The rows go back to `pending` and the run goes back to the products
+    stage, so this needs no separate execution path — the same `advance()`
+    the run page and the cron job already call picks them up, and they go
+    through the collection and cross-linking stages afterwards exactly like
+    anything else. Reopening a finished run rather than starting a new one is
+    the point: the range is one range, and a second run would cross-link the
+    two products it re-made to each other instead of to their siblings.
+
+    Returns how many products were queued.
+    """
+    if mode not in FORCE_MODES:
+        raise ImportRunError(f"Unknown import override “{mode}”.")
+
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is None:
+            raise ImportRunError(f"No import run {run_id}.")
+        if run.dry_run:
+            raise ImportRunError(
+                "This was a dry run — nothing was sent to Shopify, so nothing "
+                "was skipped for being there already."
+            )
+
+        query = session.query(ImportProduct).filter(
+            ImportProduct.run_id == run_id,
+            ImportProduct.status == ImportProductStatus.skipped.value,
+        )
+        if product_ids:
+            query = query.filter(ImportProduct.id.in_(list(product_ids)))
+        rows = query.order_by(ImportProduct.position).all()
+        if not rows:
+            return 0
+
+        for row in rows:
+            row.status = ImportProductStatus.pending.value
+            row.force_mode = mode
+            row.error = None
+            # Cleared so the second attempt is a real attempt: the create
+            # re-asks Shopify what is on the handle, and the linking stage
+            # rewrites this product's description once it has one.
+            row.linked = False
+            row.product_gid = None
+            row.admin_url = None
+            row.online_url = None
+            if mode == FORCE_NEW:
+                # The handle is about to change. Keeping the old one would
+                # point the range's cross-links at the other product.
+                row.handle = None
+
+        # Every sibling is unlinked too, not only the products being redone.
+        # A product joining the range late is invisible to the grids already
+        # written on the others, and the linking stage only rewrites what is
+        # marked unlinked — so without this the range would be missing
+        # exactly the product the owner just asked for. Rewriting a
+        # description it has already written is what that stage does anyway.
+        siblings = (
+            session.query(ImportProduct)
+            .filter(
+                ImportProduct.run_id == run_id,
+                ImportProduct.status.in_(_IN_THE_STORE),
+            )
+            .all()
+        )
+        for sibling in siblings:
+            sibling.linked = False
+
+        titles = ", ".join(r.title or r.source_url for r in rows[:3])
+        if len(rows) > 3:
+            titles += f", and {len(rows) - 3} more"
+        run.note(
+            f"Importing {len(rows)} skipped "
+            f"{'product' if len(rows) == 1 else 'products'} anyway "
+            + (
+                "— rewriting what is in the store"
+                if mode == FORCE_UPDATE
+                else "— creating them alongside what is in the store"
+            )
+            + f": {titles}."
+        )
+        # A finished run is reopened rather than left alone. Nothing else
+        # advances a run that says `done`, so the rows would sit `pending`
+        # for ever — and the stages after `products` have to run again
+        # regardless, to put the new products in the collection and link
+        # them into the range.
+        run.stage = ImportStage.products.value
+        run.finished_at = None
+        run.error = None
+        return len(rows)
 
 
 def stop_run(run_id: int) -> None:

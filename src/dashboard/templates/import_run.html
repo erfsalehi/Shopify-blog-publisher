@@ -15,6 +15,10 @@
   {% if run.dry_run %} · <strong>dry run, nothing is being created</strong>{% endif %}
 </p>
 
+{% if error %}
+<div class="notice bad-box">{{ error }}</div>
+{% endif %}
+
 {% if run.error %}
 <div class="notice bad-box"><strong>Failed.</strong> {{ run.error }}</div>
 {% endif %}
@@ -40,6 +44,13 @@
     <div class="card-value js-count-skipped">{{ counts.skipped | int_ }}</div>
     <div class="card-delta muted">left untouched</div>
   </div>
+  {% if counts.updated %}
+  <div class="card">
+    <div class="card-label">Rewritten</div>
+    <div class="card-value js-count-updated">{{ counts.updated | int_ }}</div>
+    <div class="card-delta muted">on your instruction</div>
+  </div>
+  {% endif %}
   <div class="card">
     <div class="card-label">Failed</div>
     <div class="card-value js-count-failed {{ 'bad' if counts.failed }}">{{ counts.failed | int_ }}</div>
@@ -64,6 +75,36 @@
   </span>
   {% endif %}
 </div>
+
+{% if counts.skipped and not run.dry_run %}
+{# The skip is decided on the handle, which answers "is there a product
+   called this" rather than "have we imported this product" — so it is
+   sometimes wrong, and when it is, the product the owner wanted is the one
+   missing. Both ways of being wrong are offered because only they can tell
+   which one this is. #}
+<section class="panel">
+  <h2>{{ counts.skipped | int_ }} left untouched</h2>
+  <p class="muted small">
+    Skipped because a product with the same handle is already in the store.
+    If that was wrong — the range names two products the same way, or the one
+    in the store is an old, half-finished import — bring them in anyway.
+    Either choice re-links the whole range afterwards.
+  </p>
+  <form method="post" action="/import/{{ run.id }}/reimport" class="actions">
+    <label class="muted small" for="reimport-mode">What to do with them</label>
+    <select id="reimport-mode" name="mode">
+      <option value="update">Rewrite the products already in the store</option>
+      <option value="new">Create them alongside, under a free handle</option>
+    </select>
+    <button type="submit" class="primary">Import all {{ counts.skipped | int_ }} anyway</button>
+  </form>
+  <p class="muted small">
+    Rewriting replaces the title, description, tags and SEO of the product in
+    the store, and adds this import's pictures only if it has none of its own.
+    Nothing is ever deleted.
+  </p>
+</section>
+{% endif %}
 
 <section class="panel">
   <h2>What happened</h2>
@@ -114,9 +155,31 @@
         {% endif %}
       </td>
       <td>
-        <span class="pill {{ {'created': 'ok', 'prepared': 'ok', 'skipped': 'warn', 'failed': 'error'}.get(row.status, 'running') }}">
+        <span class="pill {{ {'created': 'ok', 'updated': 'ok', 'prepared': 'ok', 'skipped': 'warn', 'failed': 'error'}.get(row.status, 'running') }}">
           {{ row.status }}
         </span>
+        {% if row.status == 'skipped' and not run.dry_run %}
+        {# One product at a time, for the usual case: most of a re-import was
+           right and one row was not. #}
+        <form method="post" action="/import/{{ run.id }}/reimport"
+              class="row-actions">
+          <input type="hidden" name="product_id" value="{{ row.id }}">
+          <button type="submit" name="mode" value="update" class="small-btn"
+                  title="Rewrite the product already in the store with what this run read.">
+            Rewrite
+          </button>
+          <button type="submit" name="mode" value="new" class="small-btn"
+                  title="Create this one alongside the product already on that handle.">
+            Add as new
+          </button>
+        </form>
+        {% endif %}
+        {% if row.force_mode %}
+        <div class="muted small">
+          {{ 'rewritten on request' if row.force_mode == 'update'
+             else 'imported alongside on request' }}
+        </div>
+        {% endif %}
       </td>
       <td class="num">{{ (row.images_saved or (item.extracted.images | length)) | int_ }}</td>
       <td class="num">{{ (row.docs_saved or item.doc_count) | int_ }}</td>

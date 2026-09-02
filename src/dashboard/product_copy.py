@@ -416,12 +416,32 @@ def derive_size(source_title: str, specs: dict | None = None) -> str:
     So it is read off the source and normalised: inner spacing removed and
     the separator lowercased, because `5" x 10"` and `5"x10"` are the same
     size and only one of them can be the store's.
+
+    Normalising is what makes the size safe to take per product, and taking
+    it per product is not optional — a range is routinely several sizes, and
+    the size is then the only thing separating one product from the next.
     """
     for text in (source_title or "", *_spec_sizes(specs)):
         match = _SIZE_IN_TEXT.search(str(text))
         if match:
-            return re.sub(r"\s+", "", match.group(0)).replace("×", "x").replace("X", "x")
+            return normalize_size(match.group(0))
     return ""
+
+
+def normalize_size(size: str | None) -> str:
+    """One spelling of a dimension: `5" x 10"`, `5"X10"` and `5"×10"` all
+    become `5"x10"`.
+
+    Separate from `derive_size` so the model's own answer — the fallback when
+    a maker's page names no size — goes through the same spelling. Two
+    spellings of one size in a range's names is the failure this exists to
+    prevent, and it does not matter which of the two produced it.
+    """
+    if not size:
+        return ""
+    return (
+        re.sub(r"\s+", "", str(size)).replace("×", "x").replace("X", "x")
+    )
 
 
 def _spec_sizes(specs: dict | None):
