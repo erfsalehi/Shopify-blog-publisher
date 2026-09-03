@@ -405,7 +405,9 @@ _SIZE_IN_TEXT = re.compile(
 _SIZE_KEYS = ("size", "nominal size", "dimensions", "dimension", "format")
 
 
-def derive_size(source_title: str, specs: dict | None = None) -> str:
+def derive_size(
+    source_title: str, specs: dict | None = None, options: dict | None = None
+) -> str:
     """The dimension as the manufacturer writes it, spelled one way.
 
     Asked of the model this came back three ways across one range — `5"x10"`
@@ -421,7 +423,7 @@ def derive_size(source_title: str, specs: dict | None = None) -> str:
     it per product is not optional — a range is routinely several sizes, and
     the size is then the only thing separating one product from the next.
     """
-    for text in (source_title or "", *_spec_sizes(specs)):
+    for text in (source_title or "", *_spec_sizes(specs), *_option_sizes(options)):
         match = _SIZE_IN_TEXT.search(str(text))
         if match:
             return normalize_size(match.group(0))
@@ -448,6 +450,142 @@ def _spec_sizes(specs: dict | None):
     for key, value in (specs or {}).items():
         if any(word in str(key).lower() for word in _SIZE_KEYS):
             yield value
+
+
+def _option_sizes(options: dict | None):
+    """A size published as a product option rather than as a specification.
+
+    Last of the three, because an option is a list of what the *range*
+    offers where a spec is a statement about this item. But it is read, and
+    was not: a Shopify-shaped source routinely puts the size in `options`
+    and nowhere else, and a size never found is a width never filtered on.
+    """
+    for key, values in (options or {}).items():
+        if not any(word in str(key).lower() for word in _SIZE_KEYS):
+            continue
+        for value in (values if isinstance(values, (list, tuple)) else [values]):
+            yield value
+
+
+# ── The filterable facts ─────────────────────────────────────────────
+#
+# Width, thickness and colour go into metafields the storefront filters on,
+# which makes them a different kind of field from everything else here. A
+# filter is a list of the distinct values across the catalogue, so a facet is
+# only as good as the agreement between products: "24 in", '24"' and "24
+# inch" are one width to a shopper and three checkboxes in the sidebar.
+#
+# So each of these returns one spelling or nothing at all. Nothing is the
+# right answer far more often than a guess — an empty facet value is a
+# product that doesn't appear under that filter, while a wrong one puts it
+# under a heading where it does not belong, which is worse and much harder
+# to notice.
+
+
+def derive_width(size: str | None) -> str:
+    """The first dimension of a size, which is the width.
+
+    `24"x48"` is width by length, the way every tile catalogue writes it and
+    the way the maker's own title reads. Returned with its units as written,
+    because a filter listing `24"` beside `600mm` is telling the truth about
+    a catalogue that carries both, and stripping the units would list them
+    as `24` and `600`.
+    """
+    if not size:
+        return ""
+    first = normalize_size(size).split("x", 1)[0]
+    return first.strip() if any(c.isdigit() for c in first) else ""
+
+
+#: Spec-table keys that state a thickness. `wear layer` is deliberately not
+#: here: on vinyl plank it is a different measurement from the plank's own
+#: thickness, and a filter that mixes a 20 mil wear layer in among 8 mm
+#: planks is worse than one missing a value.
+_THICKNESS_KEYS = ("thickness", "nominal thickness", "gauge", "caliper")
+
+#: A thickness as a spec table writes one: 10mm, 3/8", 0.5 in, 12 mm.
+_THICKNESS_IN_TEXT = re.compile(
+    r'(\d+(?:[./]\d+)*)\s*(mm|cm|in\b|inch(?:es)?|["”])',
+    re.I,
+)
+
+
+def derive_thickness(specs: dict | None = None) -> str:
+    """The thickness as the spec table states it, spelled one way.
+
+    Read from the specs alone and never from the title: a title's only
+    number is usually the size, and `12x24` read as a thickness is a
+    catalogue of 12 mm tiles that aren't.
+    """
+    for key, value in (specs or {}).items():
+        if not any(word in str(key).lower() for word in _THICKNESS_KEYS):
+            continue
+        match = _THICKNESS_IN_TEXT.search(str(value))
+        if match:
+            number, unit = match.group(1), match.group(2).lower()
+            unit = {"inch": "in", "inches": "in", '"': "in", "”": "in"}.get(unit, unit)
+            return f"{number}{unit}"
+    return ""
+
+
+#: What a manufacturer's colour name means in the handful of colours a
+#: storefront filter actually offers. Keyed by the plain colour, because the
+#: filter's vocabulary is the store's and this only has to reach it.
+#:
+#: Every entry is a name that means one colour and not two. `greige` is
+#: absent on purpose — it is grey and beige at once, and a filter is a claim
+#: about which shelf a product sits on. So is `graphite`, which sellers use
+#: for both a dark grey and a near-black. A product whose colour cannot be
+#: placed is left with none, which is the owner's instruction and also the
+#: right default: absent from a filter beats filed under the wrong heading.
+_COLOUR_SYNONYMS = {
+    "black": ("black", "onyx", "ebony", "jet", "noir", "nero", "coal"),
+    "white": (
+        "white", "chalk", "ivory", "alabaster", "snow", "bianco", "pearl",
+        "cotton", "arctic", "frost",
+    ),
+    "grey": (
+        "grey", "gray", "silver", "ash", "smoke", "cement", "concrete",
+        "slate", "pewter", "steel", "grigio", "fog",
+    ),
+    "brown": (
+        "brown", "beige", "tan", "walnut", "oak", "mocha", "coffee",
+        "chocolate", "caramel", "hazel", "chestnut", "cognac", "espresso",
+    ),
+}
+
+_WORDS = re.compile(r"[a-z]+")
+
+
+def derive_colour(variant: str | None, allowed: list[str] | None = None) -> str:
+    """Which of the store's filter colours this product is, or nothing.
+
+    The variant a maker publishes is a marketing name — "Chalk Matte",
+    "Bassano", "Emerald Bevel Gloss" — and a storefront filter offers a short
+    list of plain colours. This maps the first to the second, and returns
+    nothing when it cannot: a colour filter is a claim about which shelf a
+    product belongs on, and being absent from one is a smaller mistake than
+    being wrong on it.
+
+    `allowed` is the store's own vocabulary, so a store that also filters on
+    beige gets beige rather than having it folded into brown. A name matches
+    when it *is* one of the allowed colours, or when it is a synonym listed
+    for one — never by substring, because "chalkboard" is not chalk and
+    "greyhound" is not grey.
+    """
+    vocabulary = [c.strip().lower() for c in (allowed or []) if c and c.strip()]
+    if not vocabulary or not variant:
+        return ""
+
+    words = set(_WORDS.findall(str(variant).lower()))
+    if not words:
+        return ""
+    for colour in vocabulary:
+        if colour in words:
+            return colour
+        if words & set(_COLOUR_SYNONYMS.get(colour, ())):
+            return colour
+    return ""
 
 
 def derive_variant(

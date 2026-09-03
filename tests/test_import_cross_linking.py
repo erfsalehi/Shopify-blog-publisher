@@ -48,6 +48,13 @@ class LinkingShopify:
     #: for these before it writes: a value written under a key the store has
     #: not defined is stored by Shopify and shown by nothing, which is what
     #: an empty Metafields panel on a fully imported product means.
+    def metafield_definitions(self, namespace, owner_type="PRODUCT"):
+        """{key: type} the store has defined. A key absent from here is a
+        key the importer will not write into: a filter definition is the
+        merchant's, and filling a lookalike beside it leaves the real filter
+        empty."""
+        return dict(self.definitions)
+
     def ensure_metafield_definitions(self, definitions, *, namespace,
                                      owner_type="PRODUCT"):
         created = []

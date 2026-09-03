@@ -65,6 +65,9 @@ IMPORT_BRAND_BLURB = "import.brand_blurb"
 IMPORT_TOP_BANNER = "import.top_banner"
 IMPORT_ALL_CHANNELS = "import.all_channels"
 IMPORT_RELATED_LIMIT = "import.related_limit"
+IMPORT_FILTER_NAMESPACE = "import.filter_namespace"
+IMPORT_FILTER_KEYS = "import.filter_keys"
+IMPORT_FILTER_COLOURS = "import.filter_colours"
 
 
 
@@ -644,6 +647,58 @@ IMPORT_SPECS: tuple[Spec, ...] = (
         group="Product import",
         kind="str",
         coerce=_as_str,
+    ),
+    Spec(
+        key=IMPORT_FILTER_NAMESPACE,
+        default="custom",
+        label="Namespace of the storefront filter metafields",
+        help=(
+            "Where this store keeps the metafields its collection filters "
+            "are built on. Almost always 'custom'. Shopify's own taxonomy "
+            "attributes live in 'shopify' and are not writable this way."
+        ),
+        group="Product import",
+        kind="str",
+        coerce=_as_str,
+        maximum=60,
+    ),
+    Spec(
+        key=IMPORT_FILTER_KEYS,
+        default="brand, type, width, colour, thickness",
+        label="Filter metafields to fill",
+        help=(
+            "Which of the store's filter metafields an import fills, by key, "
+            "comma separated. Recognised: brand, type, width, colour, "
+            "thickness — a key is matched to one of those by its name, so "
+            "'color' fills the colour and 'tile_width' fills the width. "
+            "These are never created: a filter definition is yours, made "
+            "with the storefront access and the type the filter needs, and "
+            "an import that invented a lookalike beside it would fill the "
+            "wrong one. Anything named here that the store hasn't defined is "
+            "reported on the run log, along with what it has."
+        ),
+        group="Product import",
+        kind="str",
+        coerce=_as_str,
+        maximum=400,
+    ),
+    Spec(
+        key=IMPORT_FILTER_COLOURS,
+        default="black, white, grey, brown",
+        label="Colours the storefront filters on",
+        help=(
+            "The colour filter's whole vocabulary, comma separated. A "
+            "manufacturer's colour name is matched to one of these — Chalk "
+            "is white, Silver is grey — and a product whose colour is none "
+            "of them is left with no colour at all rather than being filed "
+            "under the nearest. Absent from a filter is a smaller mistake "
+            "than wrong on one, and a name that means two colours at once "
+            "(Greige, Graphite) is deliberately left unplaced."
+        ),
+        group="Product import",
+        kind="str",
+        coerce=_as_str,
+        maximum=400,
     ),
 )
 
