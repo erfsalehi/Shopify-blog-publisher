@@ -505,6 +505,20 @@ def create_app() -> FastAPI:
         )
         return RedirectResponse(f"/import/{run_id}", status_code=303)
 
+    @app.get("/import/metafields")
+    def import_metafields():
+        """What this store calls its product metafields.
+
+        Its own endpoint rather than part of the Import page, because it
+        reaches Shopify and a page load in this app does not make an
+        outbound call. The page asks for this when someone clicks.
+        """
+        try:
+            return product_import.store_metafields()
+        except Exception as exc:  # noqa: BLE001 - a lookup must not 500
+            return JSONResponse({"error": f"{type(exc).__name__}: {exc}"},
+                                status_code=502)
+
     @app.get("/import/{run_id}", response_class=HTMLResponse)
     def import_run_page(request: Request, run_id: int, error: str = ""):
         try:

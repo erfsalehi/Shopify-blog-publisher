@@ -19,7 +19,7 @@ import json
 import httpx
 import pytest
 
-from dashboard import manufacturer, product_copy, product_docs, product_import
+from dashboard import manufacturer, product_copy, product_docs, product_import, store
 from dashboard.db import get_session
 from dashboard.models import ImportProduct, ImportProductStatus, ImportRun, ImportStage
 
@@ -334,6 +334,21 @@ class FakeShopify:
     #: for these before it writes: a value written under a key the store has
     #: not defined is stored by Shopify and shown by nothing, which is what
     #: an empty Metafields panel on a fully imported product means.
+    def all_metafield_definitions(self, owner_type="PRODUCT"):
+        """Every definition in every namespace — what answers "what does my
+        store call these", which a namespace guess cannot."""
+        return [
+            {"namespace": "custom", "key": key, "name": key, "type": type_}
+            for key, type_ in self.definitions.items()
+        ]
+
+    def metafield_definitions(self, namespace, owner_type="PRODUCT"):
+        """{key: type} the store has defined. A key absent from here is a
+        key the importer will not write into: a filter definition is the
+        merchant's, and filling a lookalike beside it leaves the real filter
+        empty."""
+        return dict(self.definitions)
+
     def ensure_metafield_definitions(self, definitions, *, namespace,
                                      owner_type="PRODUCT"):
         created = []
@@ -719,12 +734,17 @@ def test_a_collection_becomes_live_products_a_collection_and_cross_links(
 
     # Products: drafts, with the vendor and SEO fields from the source.
     # Handles follow the composed title, not the supplier's own: brand,
-    # range, type, then the variant read off their title ("White").
+    # range, type, size, then the variant read off their title ("White").
+    #
+    # The size is in there because this feed publishes it as a product
+    # *option* and nowhere else — no spec table row, nothing in the title.
+    # That used to be a size never found, which is a product named without
+    # one and a Width filter with nothing to offer.
     assert set(fake_shopify.products) == {
-        "ames-tile-3d-bars-wall-tile-white",
-        "ames-tile-3d-bars-wall-tile-black",
+        "ames-tile-3d-bars-wall-tile-12x24-white",
+        "ames-tile-3d-bars-wall-tile-12x24-black",
     }
-    white = fake_shopify.products["ames-tile-3d-bars-wall-tile-white"]
+    white = fake_shopify.products["ames-tile-3d-bars-wall-tile-12x24-white"]
     # Active and on every channel, because an import that finished Draft
     # needed a second manual pass in Shopify admin to be worth anything, and
     # that pass was easy to forget. Both are settings; these are the defaults.
@@ -765,7 +785,7 @@ def test_a_collection_becomes_live_products_a_collection_and_cross_links(
     assert "3D Bars" in white["descriptionHtml"]
     # The sibling is linked under its composed name, the one it carries in
     # the store — not the supplier's title it was imported from.
-    assert "Ames Tile 3D Bars Wall Tile - Black" in white["descriptionHtml"]
+    assert "Ames Tile 3D Bars Wall Tile 12x24 - Black" in white["descriptionHtml"]
 
     # The tags the storefront is built on are present, not merely likely: a
     # smart collection defined as brand + collection needs both on every
@@ -1007,6 +1027,257 @@ def test_a_metafield_that_shopify_refuses_is_said_out_loud(
         log = "\n".join(run.log)
     assert "were not written" in log
     assert "Value is invalid" in log
+
+
+# ── The storefront's filter fields ───────────────────────────────────
+#
+# A filter definition belongs to whoever built the filter: they chose its
+# type and gave it the storefront access a filter needs. So these are filled
+# and never created — an import that invented a lookalike beside the real one
+# would produce a full metafield and an empty sidebar.
+
+
+def _store_defines(fake, **keys) -> None:
+    """Give the fake store the filter definitions a merchant would have."""
+    fake.definitions.update(
+        {key: type_ for key, type_ in keys.items()}
+    )
+
+
+def test_the_filter_fields_are_filled_from_what_the_import_read(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    _store_defines(
+        fake_shopify,
+        brand="single_line_text_field", type="single_line_text_field",
+        width="single_line_text_field", colour="single_line_text_field",
+        thickness="single_line_text_field",
+    )
+    run_id = product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    )
+    _drive(run_id)
+
+    written = {
+        (m["key"], m["value"])
+        for m in fake_shopify.metafields
+        if m["key"] in {"brand", "type", "width", "colour", "thickness"}
+    }
+    brands = {v for k, v in written if k == "brand"}
+    widths = {v for k, v in written if k == "width"}
+    assert brands == {"Ames Tile & Stone"}
+    # Each product's own width, which is the first half of its size.
+    assert widths == {'24"', '36"'}
+
+
+def test_a_colour_outside_the_stores_vocabulary_is_left_unset(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """"Chalk" is white and "Silver" is grey. "Greige" is grey and beige at
+    once, and a filter is a claim about which shelf a product sits on — so it
+    gets no colour rather than the nearest one."""
+    _store_defines(fake_shopify, colour="single_line_text_field")
+    store.set(store.IMPORT_FILTER_COLOURS, "black, white, grey, brown")
+
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    colours = [m["value"] for m in fake_shopify.metafields if m["key"] == "colour"]
+    assert set(colours) == {"white", "grey"}
+    # Four colours in the range, three of the twelve products unplaced —
+    # Greige and Graphite, which mean two colours each.
+    assert len(colours) == 6
+
+
+def test_a_key_the_store_has_not_defined_is_reported_not_created(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """The whole point. Creating it would fill a metafield no filter reads
+    while the real one stayed empty — so instead the run says what is
+    missing, and what this store actually calls its metafields."""
+    _store_defines(fake_shopify, tile_width="single_line_text_field")
+    store.set(store.IMPORT_FILTER_KEYS, "brand, width")
+
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+
+    assert "brand" not in fake_shopify.definitions
+    written = {m["key"] for m in fake_shopify.metafields}
+    assert "brand" not in written
+    with get_session() as session:
+        log = "\n".join(session.get(ImportRun, run_id).log)
+    assert "this store has no such metafield defined" in log
+    # And it names what the store does have, which is the answer to "what
+    # are mine called" at the moment someone needs it.
+    assert "tile_width" in log
+
+
+def test_a_key_named_differently_still_fills_the_right_field(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """A store names its own metafields. `tile_width` is the width and
+    `color` is the colour, and neither has to be spelled our way."""
+    _store_defines(
+        fake_shopify,
+        tile_width="single_line_text_field", color="single_line_text_field",
+    )
+    store.set(store.IMPORT_FILTER_KEYS, "tile_width, color")
+
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    widths = {m["value"] for m in fake_shopify.metafields if m["key"] == "tile_width"}
+    colours = {m["value"] for m in fake_shopify.metafields if m["key"] == "color"}
+    assert widths == {'24"', '36"'}
+    assert colours == {"white", "grey"}
+
+
+def test_a_definition_a_filter_cannot_use_is_refused_with_the_reason(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """Shopify builds filters on text, booleans and numbers. Writing a width
+    into a `dimension` gives a full metafield and an empty sidebar, which is
+    the failure this whole area keeps having."""
+    _store_defines(fake_shopify, width="dimension")
+    store.set(store.IMPORT_FILTER_KEYS, "width")
+
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+
+    assert not [m for m in fake_shopify.metafields if m["key"] == "width"]
+    with get_session() as session:
+        log = "\n".join(session.get(ImportRun, run_id).log)
+    assert "width (dimension)" in log
+    assert "empty sidebar" in log
+
+
+def test_a_field_with_nothing_to_say_is_left_unset_not_blanked(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """An empty string is a value, and a filter would offer it as one."""
+    _store_defines(fake_shopify, thickness="single_line_text_field")
+    store.set(store.IMPORT_FILTER_KEYS, "thickness")
+
+    # Nothing on this fake site states a thickness.
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+
+    assert not [m for m in fake_shopify.metafields if m["key"] == "thickness"]
+
+
+def test_a_list_valued_filter_gets_a_list(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """`list.single_line_text_field` is the other type a filter can use, and
+    it takes a JSON array rather than a bare string."""
+    _store_defines(fake_shopify, colour="list.single_line_text_field")
+    store.set(store.IMPORT_FILTER_KEYS, "colour")
+
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    values = {m["value"] for m in fake_shopify.metafields if m["key"] == "colour"}
+    assert values == {'["white"]', '["grey"]'}
+
+
+def test_rewriting_a_product_on_request_refills_its_filter_fields(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """A product rewritten on request is one whose width and colour have just
+    been re-read. They go with the rest of it."""
+    _store_defines(fake_shopify, width="single_line_text_field")
+    store.set(store.IMPORT_FILTER_KEYS, "width")
+
+    run_id = _second_run_of_the_same_collection()
+    fake_shopify.metafields.clear()
+
+    product_import.reimport_skipped(run_id, mode=product_import.FORCE_UPDATE)
+    _drive(run_id)
+
+    assert [m for m in fake_shopify.metafields if m["key"] == "width"]
+
+
+def test_a_key_can_name_its_own_namespace(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """Stores spread these across namespaces. A setting that could only say
+    "key" would leave the ones outside the default unreachable, with no way
+    to say so."""
+    _store_defines(fake_shopify, width="single_line_text_field")
+    store.set(store.IMPORT_FILTER_NAMESPACE, "somewhere_else")
+    store.set(store.IMPORT_FILTER_KEYS, "custom.width")
+
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    written = [m for m in fake_shopify.metafields if m["key"] == "width"]
+    assert written
+    assert {m["namespace"] for m in written} == {"custom"}
+
+
+def test_the_store_can_be_asked_what_it_calls_its_metafields(
+    dashboard_db, fake_shopify
+):
+    """"Where do I get the namespace" is not a question anyone should have to
+    take to Shopify's admin and back."""
+    _store_defines(
+        fake_shopify,
+        tile_width="single_line_text_field",
+        colour="single_line_text_field",
+        care_guide="multi_line_text_field",
+    )
+    store.set(store.IMPORT_FILTER_KEYS, "colour")
+
+    found = product_import.store_metafields()
+    by_key = {row["key"]: row for row in found["definitions"]}
+
+    # The one Settings already points at.
+    assert by_key["colour"]["configured"] is True
+    assert by_key["colour"]["field"] == "colour"
+    # One an import could fill, that nothing is pointing at yet — which is
+    # the row someone is looking for.
+    assert by_key["tile_width"]["configured"] is False
+    assert by_key["tile_width"]["field"] == "width"
+    assert by_key["tile_width"]["filterable"] is True
+    # And one that is none of our business.
+    assert by_key["care_guide"]["field"] is None
+    assert by_key["care_guide"]["filterable"] is False
+    assert found["configured"] == {"colour": "custom.colour"}
+
+
+def test_the_lookup_reaches_shopify_only_when_asked(dashboard_db, monkeypatch):
+    """A page load in this app does not make an outbound call, so the lookup
+    is its own endpoint behind a click rather than part of the page."""
+    from fastapi.testclient import TestClient
+
+    from dashboard.web import create_app
+
+    def explode():
+        raise AssertionError("a page render must not reach Shopify")
+
+    monkeypatch.setattr(product_import, "_shopify_client", explode)
+    with TestClient(create_app()) as client:
+        assert client.get("/import").status_code == 200
+
+
+def test_a_store_that_cannot_be_reached_says_so_rather_than_500ing(
+    dashboard_db, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from dashboard.web import create_app
+
+    def unreachable():
+        raise RuntimeError("Shopify not configured")
+
+    monkeypatch.setattr(product_import, "_shopify_client", unreachable)
+    with TestClient(create_app()) as client:
+        response = client.get("/import/metafields")
+    assert response.status_code == 502
+    assert "Shopify not configured" in response.json()["error"]
 
 
 # ── Overruling a skip ────────────────────────────────────────────────

@@ -967,6 +967,35 @@ class ShopifyClient:
             }
         return self._definitions[cache_key]
 
+    def all_metafield_definitions(self, owner_type: str = "PRODUCT") -> list[dict]:
+        """Every metafield definition on this resource, in every namespace.
+
+        `metafield_definitions` above answers "does this namespace define
+        this key". This answers the question someone actually has first,
+        which is "what does my store call these things" — and it cannot be
+        answered by guessing a namespace, because the namespace is the part
+        they don't know.
+        """
+        data = self.graphql(
+            """
+            query($ownerType: MetafieldOwnerType!) {
+              metafieldDefinitions(first: 250, ownerType: $ownerType) {
+                nodes { namespace key name type { name } }
+              }
+            }
+            """,
+            {"ownerType": owner_type},
+        )
+        return [
+            {
+                "namespace": node.get("namespace") or "",
+                "key": node.get("key") or "",
+                "name": node.get("name") or "",
+                "type": (node.get("type") or {}).get("name", ""),
+            }
+            for node in (data.get("metafieldDefinitions") or {}).get("nodes", [])
+        ]
+
     def ensure_metafield_definitions(
         self,
         definitions: list[dict],

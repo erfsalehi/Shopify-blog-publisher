@@ -169,6 +169,111 @@
     if (active) setTimeout(advance, 400);
   }
 
+  // "What is my namespace?" — asked once, answered from the store itself.
+  // A filter metafield belongs to the merchant, so the import fills one
+  // rather than creating it, which means somebody has to type its key into
+  // Settings. Nobody knows it by heart, and the alternative was a trip
+  // through Shopify admin to read it off a definition page.
+  var metafieldsButton = document.querySelector('.js-load-metafields');
+  if (metafieldsButton) {
+    var out = document.querySelector('.js-metafields-out');
+    metafieldsButton.addEventListener('click', function () {
+      metafieldsButton.disabled = true;
+      metafieldsButton.textContent = 'Asking Shopify…';
+      fetch('/import/metafields')
+        .then(function (r) { return r.json(); })
+        .then(function (body) {
+          metafieldsButton.disabled = false;
+          metafieldsButton.textContent = 'Look them up in Shopify';
+          if (body.error) {
+            out.innerHTML = '';
+            var bad = document.createElement('div');
+            bad.className = 'notice bad-box';
+            bad.textContent = body.error;
+            out.appendChild(bad);
+            return;
+          }
+          var rows = body.definitions || [];
+          out.innerHTML = '';
+          if (!rows.length) {
+            var none = document.createElement('p');
+            none.className = 'muted';
+            none.textContent =
+              'This store has no product metafield definitions at all. Build '
+              + 'the filters in Shopify first: Settings → Custom data → '
+              + 'Products.';
+            out.appendChild(none);
+            return;
+          }
+          var table = document.createElement('table');
+          var head = document.createElement('thead');
+          head.innerHTML =
+            '<tr><th>Namespace and key</th><th>Name</th><th>Type</th>'
+            + '<th>An import can fill it</th></tr>';
+          table.appendChild(head);
+          var body_ = document.createElement('tbody');
+          rows.forEach(function (row) {
+            var tr = document.createElement('tr');
+
+            var key = document.createElement('td');
+            var code = document.createElement('code');
+            code.textContent = row.qualified;
+            key.appendChild(code);
+            tr.appendChild(key);
+
+            var name = document.createElement('td');
+            name.className = 'muted small';
+            name.textContent = row.name || '';
+            tr.appendChild(name);
+
+            var type = document.createElement('td');
+            type.className = 'small';
+            type.textContent = row.type || '';
+            tr.appendChild(type);
+
+            // Three separate facts, and they are not the same question:
+            // whether Shopify can filter on this type at all, whether the
+            // import has anything to put in it, and whether Settings is
+            // currently pointing at it.
+            var fill = document.createElement('td');
+            fill.className = 'small';
+            if (!row.filterable) {
+              fill.innerHTML =
+                '<span class="pill warn">no filter on this type</span>';
+            } else if (!row.field) {
+              fill.className = 'small muted';
+              fill.textContent = 'nothing in an import matches this';
+            } else if (row.configured) {
+              fill.innerHTML =
+                '<span class="pill ok">' + row.field + ' — in use</span>';
+            } else {
+              fill.innerHTML =
+                '<span class="pill">' + row.field
+                + ' — add it to Settings</span>';
+            }
+            tr.appendChild(fill);
+            body_.appendChild(tr);
+          });
+          table.appendChild(body_);
+          out.appendChild(table);
+
+          var hint = document.createElement('p');
+          hint.className = 'muted small';
+          hint.textContent =
+            'Copy the namespace and key of each filter into "Filter '
+            + 'metafields to fill" in Settings, comma separated. A key on its '
+            + 'own uses the namespace setting; write it as namespace.key to '
+            + 'name its own.';
+          out.appendChild(hint);
+        })
+        .catch(function () {
+          metafieldsButton.disabled = false;
+          metafieldsButton.textContent = 'Look them up in Shopify';
+          out.textContent = 'Could not reach the server.';
+        });
+    });
+  }
+
   function startPolling() {
     if (polling) return;
     polling = true;

@@ -297,6 +297,61 @@ reader either way — but it is no longer swallowed, which it was: a `log.info`
 into a serverless function's stderr, while the run reported the product
 created and counted its images and documents.
 
+## Storefront filter fields
+
+Separate from the five above, and a different kind of field. A collection
+filter is a list of the distinct values across the catalogue, so a facet is
+only as good as the agreement between products: `24 in`, `24"` and `24 inch`
+are one width to a shopper and three checkboxes in the sidebar.
+
+Five are filled, from what the import already read:
+
+| Field | Where it comes from |
+|---|---|
+| Brand | The vendor on the import form. |
+| Type | The product type — "Porcelain Tile". |
+| Width | The first dimension of the size. `24"x48"` is width by length, the way every tile catalogue writes it. |
+| Colour | The maker's colour name mapped to the store's own filter vocabulary — Chalk is white, Silver is grey. |
+| Thickness | The spec table's thickness. Never the title: a title's only number is usually the size, and `12x24` read as a thickness is a catalogue of 12 mm tiles that aren't. |
+
+**These are filled and never created.** A filter definition belongs to
+whoever built the filter — they chose its type and gave it the storefront
+access a filter needs — and an import that invented a lookalike beside it
+would fill a metafield no filter reads while the real one stayed empty. A
+key that isn't there is reported on the run log along with the keys the store
+*does* define, which is the answer to "what are mine called" at the moment
+anyone needs it.
+
+Settings name the namespace and the keys. A key is matched to a field by what
+it says rather than by being spelled our way, so `tile_width` fills the width
+and `color` fills the colour. A key on its own uses the namespace setting;
+write it `namespace.key` to name its own, because stores do spread these
+across namespaces.
+
+**You don't have to know them.** The Product Import page has *This store's
+product metafields* — one click, and it lists every product metafield
+definition the store has with its namespace, key and type, marking which ones
+an import could fill and which Settings is already pointing at. It sits behind
+a button rather than on the page because a page load in this app does not make
+an outbound call.
+
+**Only text-valued definitions are written into.** Shopify builds filters on
+`single_line_text_field`, `list.single_line_text_field`, booleans and
+numbers. A width written into a `dimension` gives a full metafield and an
+empty sidebar, so a definition of an unusable type is reported and left
+alone.
+
+**A colour that cannot be placed is left unset**, not guessed at. The store's
+vocabulary is a setting — black, white, grey, brown by default — and a
+manufacturer's name matches when it *is* one of them or a listed synonym of
+one, never by substring ("chalkboard" is not chalk). Names that mean two
+colours at once are deliberately unplaced: **Greige** is grey and beige,
+**Graphite** is sold as both a dark grey and a near-black. A filter is a
+claim about which shelf a product sits on, and absent from one is a smaller
+mistake than wrong on one. The same goes for every field here — an empty
+value is never written, because an empty string is a value and a filter would
+offer it as one.
+
 ## Live on creation
 
 Two switches, and a product needs both to be seen:
@@ -396,6 +451,12 @@ first under a free handle and the run log says exactly that — *"named the
 same as X, so it was created as Y instead"*. Being told the naming collapsed
 two products is recoverable; being told they were already yours is how a
 range imports short and nobody finds out.
+
+**A size published as a product option is read too.** A Shopify-shaped source
+routinely puts the size in `options` and nowhere else — no spec row, nothing
+in the title — and a size never found is a product named without one and a
+Width filter with nothing to offer. Options are read last: an option is a
+list of what the *range* offers, where a spec is a statement about this item.
 
 **When the source names no colour, the source's own title is used instead.**
 The colour is the only part that separates one item in a range from the
