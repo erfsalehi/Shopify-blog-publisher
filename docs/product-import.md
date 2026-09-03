@@ -324,7 +324,16 @@ anyone needs it.
 
 Settings name the namespace and the keys. A key is matched to a field by what
 it says rather than by being spelled our way, so `tile_width` fills the width
-and `color` fills the colour.
+and `color` fills the colour. A key on its own uses the namespace setting;
+write it `namespace.key` to name its own, because stores do spread these
+across namespaces.
+
+**You don't have to know them.** The Product Import page has *This store's
+product metafields* — one click, and it lists every product metafield
+definition the store has with its namespace, key and type, marking which ones
+an import could fill and which Settings is already pointing at. It sits behind
+a button rather than on the page because a page load in this app does not make
+an outbound call.
 
 **Only text-valued definitions are written into.** Shopify builds filters on
 `single_line_text_field`, `list.single_line_text_field`, booleans and

@@ -334,6 +334,14 @@ class FakeShopify:
     #: for these before it writes: a value written under a key the store has
     #: not defined is stored by Shopify and shown by nothing, which is what
     #: an empty Metafields panel on a fully imported product means.
+    def all_metafield_definitions(self, owner_type="PRODUCT"):
+        """Every definition in every namespace — what answers "what does my
+        store call these", which a namespace guess cannot."""
+        return [
+            {"namespace": "custom", "key": key, "name": key, "type": type_}
+            for key, type_ in self.definitions.items()
+        ]
+
     def metafield_definitions(self, namespace, owner_type="PRODUCT"):
         """{key: type} the store has defined. A key absent from here is a
         key the importer will not write into: a filter definition is the
@@ -1189,6 +1197,87 @@ def test_rewriting_a_product_on_request_refills_its_filter_fields(
     _drive(run_id)
 
     assert [m for m in fake_shopify.metafields if m["key"] == "width"]
+
+
+def test_a_key_can_name_its_own_namespace(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """Stores spread these across namespaces. A setting that could only say
+    "key" would leave the ones outside the default unreachable, with no way
+    to say so."""
+    _store_defines(fake_shopify, width="single_line_text_field")
+    store.set(store.IMPORT_FILTER_NAMESPACE, "somewhere_else")
+    store.set(store.IMPORT_FILTER_KEYS, "custom.width")
+
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    written = [m for m in fake_shopify.metafields if m["key"] == "width"]
+    assert written
+    assert {m["namespace"] for m in written} == {"custom"}
+
+
+def test_the_store_can_be_asked_what_it_calls_its_metafields(
+    dashboard_db, fake_shopify
+):
+    """"Where do I get the namespace" is not a question anyone should have to
+    take to Shopify's admin and back."""
+    _store_defines(
+        fake_shopify,
+        tile_width="single_line_text_field",
+        colour="single_line_text_field",
+        care_guide="multi_line_text_field",
+    )
+    store.set(store.IMPORT_FILTER_KEYS, "colour")
+
+    found = product_import.store_metafields()
+    by_key = {row["key"]: row for row in found["definitions"]}
+
+    # The one Settings already points at.
+    assert by_key["colour"]["configured"] is True
+    assert by_key["colour"]["field"] == "colour"
+    # One an import could fill, that nothing is pointing at yet — which is
+    # the row someone is looking for.
+    assert by_key["tile_width"]["configured"] is False
+    assert by_key["tile_width"]["field"] == "width"
+    assert by_key["tile_width"]["filterable"] is True
+    # And one that is none of our business.
+    assert by_key["care_guide"]["field"] is None
+    assert by_key["care_guide"]["filterable"] is False
+    assert found["configured"] == {"colour": "custom.colour"}
+
+
+def test_the_lookup_reaches_shopify_only_when_asked(dashboard_db, monkeypatch):
+    """A page load in this app does not make an outbound call, so the lookup
+    is its own endpoint behind a click rather than part of the page."""
+    from fastapi.testclient import TestClient
+
+    from dashboard.web import create_app
+
+    def explode():
+        raise AssertionError("a page render must not reach Shopify")
+
+    monkeypatch.setattr(product_import, "_shopify_client", explode)
+    with TestClient(create_app()) as client:
+        assert client.get("/import").status_code == 200
+
+
+def test_a_store_that_cannot_be_reached_says_so_rather_than_500ing(
+    dashboard_db, monkeypatch
+):
+    from fastapi.testclient import TestClient
+
+    from dashboard.web import create_app
+
+    def unreachable():
+        raise RuntimeError("Shopify not configured")
+
+    monkeypatch.setattr(product_import, "_shopify_client", unreachable)
+    with TestClient(create_app()) as client:
+        response = client.get("/import/metafields")
+    assert response.status_code == 502
+    assert "Shopify not configured" in response.json()["error"]
 
 
 # ── Overruling a skip ────────────────────────────────────────────────

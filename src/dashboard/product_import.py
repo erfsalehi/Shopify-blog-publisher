@@ -742,18 +742,37 @@ def _field_for(key: str) -> str | None:
     return None
 
 
-def _filter_targets(client, namespace: str, keys: list[str]) -> dict[str, tuple[str, str]]:
-    """{field: (key, type)} for the configured keys this store can filter on.
+def _split_key(configured: str, default_namespace: str) -> tuple[str, str]:
+    """A configured key as (namespace, key).
+
+    `width` takes the default namespace; `specs.width` names its own. Stores
+    do spread these across namespaces, and a setting that could only say
+    "key" would leave the ones outside the default unreachable with no way
+    to say so.
+    """
+    if "." in configured:
+        namespace, _, key = configured.partition(".")
+        return namespace.strip() or default_namespace, key.strip()
+    return default_namespace, configured
+
+
+def _filter_targets(
+    client, namespace: str, keys: list[str]
+) -> dict[str, tuple[str, str, str]]:
+    """{field: (namespace, key, type)} for keys this store can filter on.
 
     Silent about the keys it drops — `_report_filter_metafields` says all of
     that once per run rather than once per product.
     """
-    defined = client.metafield_definitions(namespace)
-    targets: dict[str, tuple[str, str]] = {}
-    for key in keys:
-        field = _field_for(key)
-        if field and field not in targets and defined.get(key) in FILTERABLE_TYPES:
-            targets[field] = (key, defined[key])
+    targets: dict[str, tuple[str, str, str]] = {}
+    for configured in keys:
+        field = _field_for(configured)
+        if not field or field in targets:
+            continue
+        space, key = _split_key(configured, namespace)
+        defined = client.metafield_definitions(space)
+        if defined.get(key) in FILTERABLE_TYPES:
+            targets[field] = (space, key, defined[key])
     return targets
 
 
@@ -780,31 +799,41 @@ def _report_filter_metafields(run_id: int, client) -> None:
         return
 
     fillable, missing, unfilterable, unrecognised = [], [], [], []
-    for key in keys:
-        if _field_for(key) is None:
-            unrecognised.append(key)
-        elif key not in defined:
-            missing.append(key)
-        elif defined[key] not in FILTERABLE_TYPES:
-            unfilterable.append(f"{key} ({defined[key]})")
+    for configured in keys:
+        if _field_for(configured) is None:
+            unrecognised.append(configured)
+            continue
+        space, key = _split_key(configured, namespace)
+        here = defined if space == namespace else client.metafield_definitions(space)
+        if key not in here:
+            missing.append(f"{space}.{key}")
+        elif here[key] not in FILTERABLE_TYPES:
+            unfilterable.append(f"{space}.{key} ({here[key]})")
         else:
-            fillable.append(key)
+            fillable.append(f"{space}.{key}")
 
     if fillable:
         _note(
             run_id,
-            f"Filling the storefront filter metafields {namespace}."
-            + f", {namespace}.".join(fillable)
+            "Filling the storefront filter metafields "
+            + ", ".join(fillable)
             + (f". Colours matched against: {', '.join(colours)}."
-               if "colour" in {_field_for(k) for k in fillable} else "."),
+               if any(_field_for(k) == "colour" for k in fillable) else "."),
         )
     if missing:
+        try:
+            everything = client.all_metafield_definitions()
+        except ShopifyError:
+            everything = []
+        catalogue = ", ".join(
+            sorted(f"{d['namespace']}.{d['key']}" for d in everything)
+        )
         _note(
             run_id,
             f"Not filling {', '.join(missing)} — this store has no such "
-            f"metafield defined in “{namespace}”. Define the filter in "
-            "Shopify first, or point Settings at the right key. This store "
-            f"defines: {', '.join(sorted(defined)) or 'nothing here'}.",
+            "metafield defined. Define the filter in Shopify first, or point "
+            "Settings at the right key. This store defines: "
+            + (catalogue or "no product metafields at all"),
         )
     if unfilterable:
         _note(
@@ -820,6 +849,51 @@ def _report_filter_metafields(run_id: int, client) -> None:
             "corresponds to that. Recognised: "
             f"{', '.join(f for f, _ in FILTER_FIELDS)}.",
         )
+
+
+def store_metafields() -> dict:
+    """What this store calls its product metafields, and which we'd fill.
+
+    The answer to "where do I get the namespace", which is not a question
+    anyone should have to take to Shopify's admin and back. It reaches
+    Shopify, so it is never called from a page render — a page load in this
+    app does not make an outbound call, and that rule is worth more than the
+    convenience of not clicking a button.
+    """
+    namespace, keys, _ = _filter_settings()
+    configured = {}
+    for entry in keys:
+        field = _field_for(entry)
+        if field and field not in configured:
+            configured[field] = _split_key(entry, namespace)
+
+    client = _shopify_client()
+    try:
+        definitions = client.all_metafield_definitions()
+    finally:
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
+
+    rows = []
+    for definition in sorted(
+        definitions, key=lambda d: (d["namespace"], d["key"])
+    ):
+        pair = (definition["namespace"], definition["key"])
+        field = next((f for f, c in configured.items() if c == pair), None)
+        rows.append({
+            **definition,
+            "qualified": f"{definition['namespace']}.{definition['key']}",
+            # What this definition could hold from an import, if anything.
+            "field": field or _field_for(definition["key"]),
+            "configured": field is not None,
+            "filterable": definition["type"] in FILTERABLE_TYPES,
+        })
+    return {
+        "definitions": rows,
+        "configured": {f: f"{n}.{k}" for f, (n, k) in configured.items()},
+        "fields": [f for f, _ in FILTER_FIELDS],
+    }
 
 
 def _filter_values(source: SourceProduct, copy, vendor: str | None) -> dict[str, str]:
@@ -867,7 +941,7 @@ def _write_filter_metafields(
 
     values = _filter_values(source, copy, vendor)
     fields = []
-    for field, (key, type_) in targets.items():
+    for field, (space, key, type_) in targets.items():
         value = values.get(field) or ""
         if not value:
             # Left unset rather than written empty. An empty string is a
@@ -875,7 +949,7 @@ def _write_filter_metafields(
             continue
         fields.append({
             "ownerId": product_gid,
-            "namespace": namespace,
+            "namespace": space,
             "key": key,
             "type": type_,
             "value": json.dumps([value]) if type_.startswith("list.") else value,

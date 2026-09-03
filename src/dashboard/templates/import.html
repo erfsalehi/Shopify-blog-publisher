@@ -155,6 +155,29 @@
   </p>
 </section>
 
+{% if shopify_ready %}
+{# The answer to "what is my namespace". A filter metafield belongs to the
+   store, so an import fills it rather than creating one — which means the
+   keys have to be named in Settings, and nobody knows them by heart. Behind
+   a click rather than on the page: a page load here does not make an
+   outbound call. #}
+<section class="panel js-metafields">
+  <h2>This store's product metafields</h2>
+  <p class="muted small">
+    The storefront filter fields an import fills — brand, type, width, colour,
+    thickness — are yours: you chose their type and gave them the storefront
+    access a filter needs. So an import fills them and never creates them, and
+    it needs to be told their keys in
+    <a href="/settings">Product import settings</a>. This is where to read
+    them off.
+  </p>
+  <div class="actions">
+    <button type="button" class="js-load-metafields">Look them up in Shopify</button>
+  </div>
+  <div class="js-metafields-out"></div>
+</section>
+{% endif %}
+
 <h2>Runs</h2>
 {% if not runs %}
 <p class="muted">Nothing imported yet.</p>
