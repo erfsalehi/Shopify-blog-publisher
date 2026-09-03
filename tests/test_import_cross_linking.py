@@ -37,11 +37,30 @@ class LinkingShopify:
     def __init__(self):
         self.bodies: dict[str, str] = {}
         self.metafields: list[dict] = []
+        self.definitions: dict[str, str] = {}
 
     def update_product(self, gid, **kwargs):
         if "description_html" in kwargs:
             self.bodies[gid] = kwargs["description_html"]
         return {"id": gid}
+
+    #: Definitions the store has, keyed by metafield key. The importer asks
+    #: for these before it writes: a value written under a key the store has
+    #: not defined is stored by Shopify and shown by nothing, which is what
+    #: an empty Metafields panel on a fully imported product means.
+    def ensure_metafield_definitions(self, definitions, *, namespace,
+                                     owner_type="PRODUCT"):
+        created = []
+        conflicting = []
+        for definition in definitions:
+            key, wanted = definition["key"], definition["type"]
+            existing = self.definitions.get(key)
+            if existing is None:
+                self.definitions[key] = wanted
+                created.append(key)
+            elif existing != wanted:
+                conflicting.append(f"{key} (defined as {existing})")
+        return created, conflicting
 
     def set_metafields(self, metafields):
         self.metafields.extend(metafields)

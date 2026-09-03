@@ -88,6 +88,60 @@ def _related_limit() -> int:
 
 METAFIELD_NAMESPACE = "custom"
 
+#: Every metafield the importer writes, and how Shopify should describe it.
+#:
+#: Declared here rather than left implicit in the two functions that write
+#: them, because writing a metafield does not make it *visible*: the admin's
+#: Metafields section lists only keys the store has a definition for, and the
+#: theme editor offers only those as dynamic sources. Without these, an
+#: import writes a full specifications table into a product whose Metafields
+#: panel is empty — which is what "the metafields aren't filled" looks like
+#: from the only side anyone can see.
+#:
+#: The types must match what `_metafields` and `_link_one` actually send. A
+#: definition of a different type doesn't correct the value, it rejects it.
+METAFIELD_DEFINITIONS = (
+    {
+        "key": "source_url",
+        "name": "Source URL",
+        "type": "url",
+        "description": "The manufacturer page this product was imported from.",
+    },
+    {
+        "key": "specifications",
+        "name": "Specifications",
+        "type": "json",
+        "description": (
+            "Name/value specifications as stated by the manufacturer's page "
+            "and documents. The same table the description renders."
+        ),
+    },
+    {
+        "key": "documents",
+        "name": "Documents",
+        "type": "json",
+        "description": (
+            "Spec sheets, warranties and installation guides, re-hosted on "
+            "this store: title, kind and URL."
+        ),
+    },
+    {
+        "key": "faq",
+        "name": "FAQ",
+        "type": "json",
+        "description": (
+            "Buyer questions and self-contained answers. Also rendered into "
+            "the description as FAQPage JSON-LD."
+        ),
+    },
+    {
+        "key": "related_products",
+        "name": "Related products",
+        "type": "list.product_reference",
+        "description": "The other products in this product's range.",
+    },
+)
+
 #: The two ways an owner can overrule "already in the store". Kept as
 #: constants because they cross three layers — a form field, a column, and a
 #: branch in the create — and a typo in any one of them would read as "no
@@ -350,6 +404,8 @@ def _products(run_id: int) -> PassResult:
         return PassResult(run_id, next_stage.value, done=False)
 
     client = _shopify_client() if not dry_run else None
+    if client is not None:
+        _ensure_metafield_definitions(run_id, client)
     http = source_client()
     handled = 0
     try:
@@ -633,6 +689,58 @@ def _shopify_client():
     return ShopifyClient()
 
 
+def _note(run_id: int, message: str) -> None:
+    """One line on the run log, for something the owner has to be told."""
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is not None:
+            run.note(message[:300])
+
+
+def _ensure_metafield_definitions(run_id: int, client) -> None:
+    """Define the metafields this import writes, if the store hasn't.
+
+    Once per pass — the client caches the answer, so the products after the
+    first in a pass cost nothing. It has to be per pass rather than per run
+    because a run spans many passes and each one builds its own client.
+
+    Never fatal. A store whose API token lacks `write_metafield_definitions`
+    still gets every value written; it gets them invisible, and is told so
+    once rather than left to notice an empty panel.
+    """
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    try:
+        created, conflicting = client.ensure_metafield_definitions(
+            list(METAFIELD_DEFINITIONS), namespace=METAFIELD_NAMESPACE,
+        )
+    except ShopifyError as exc:
+        _note(
+            run_id,
+            f"Could not define this store's metafields ({exc}). The values "
+            "are still written, but Shopify's admin only shows metafields it "
+            "has a definition for, so they won't appear on the product page.",
+        )
+        return
+
+    if created:
+        _note(
+            run_id,
+            f"Defined {len(created)} metafields on this store so they show "
+            f"in Shopify admin: {', '.join(created)}.",
+        )
+    if conflicting:
+        # Not corrected from here. Changing the type of a definition that
+        # already has values under it is destructive, and belongs to whoever
+        # made it.
+        _note(
+            run_id,
+            "These metafields are already defined with a different type, so "
+            f"this import's values for them will be refused: "
+            f"{', '.join(conflicting)}.",
+        )
+
+
 def _free_handle(client, handle: str, *, attempts: int = 25) -> str:
     """The first handle near this one that nothing in the store is using.
 
@@ -843,9 +951,15 @@ def _create_in_shopify(
     try:
         client.set_metafields(_metafields(product_gid, source, copy, doc_urls))
     except ShopifyError as e:
-        # Metafields are the machine-readable copy of what's already in the
-        # description. Losing them costs a theme feature, not the product.
+        # Still not fatal — metafields are the machine-readable copy of what
+        # is already in the description, so losing them costs a theme feature
+        # and not the product. But it is said out loud on the run log now.
+        # This was a `log.info` into a serverless function's stderr, which is
+        # the same as silence: the run reported the product created, with a
+        # count of its images and documents, and nothing whatsoever about the
+        # structured data it had just failed to write.
         log.info("metafields for %s failed: %s", product_gid, e)
+        _note(run_id, f"Metafields for {copy.title} were not written: {e}")
 
     # Where each document ended up, kept on the row: the cross-linking pass
     # rebuilds this description from scratch and would otherwise drop the
@@ -1276,6 +1390,10 @@ def _linking(run_id: int) -> PassResult:
         return PassResult(run_id, ImportStage.done.value, done=True)
 
     client = _shopify_client()
+    # This stage writes `related_products`, which no earlier stage does — a
+    # run whose products all already existed reaches here having never
+    # created one, and would otherwise write that field undefined.
+    _ensure_metafield_definitions(run_id, client)
     handled = 0
     for item in todo:
         try:
@@ -1362,6 +1480,11 @@ def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
             }])
         except ShopifyError as e:
             log.info("related_products metafield failed for %s: %s", item["gid"], e)
+            _note(
+                run_id,
+                f"Related-products metafield for {item['title']} was not "
+                f"written: {e}",
+            )
 
     with get_session() as session:
         row = session.get(ImportProduct, item["id"])
