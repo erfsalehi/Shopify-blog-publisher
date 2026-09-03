@@ -226,6 +226,10 @@ class FakeShopify:
         self.collections: list[dict] = []
         self.updates: list[dict] = []
         self.published: list[str] = []
+        #: {key: type} the store has defined, and every value written under
+        #: a key that had no definition at the time.
+        self.definitions: dict[str, str] = {}
+        self.undefined_writes: list[dict] = []
         self._next = 100
 
     def _gid(self, kind: str) -> str:
@@ -326,7 +330,32 @@ class FakeShopify:
     def upload_image(self, data, filename, mime_type="image/png"):
         return {"id": self._gid("MediaImage"), "url": f"https://cdn.shopify.test/{filename}"}
 
+    #: Definitions the store has, keyed by metafield key. The importer asks
+    #: for these before it writes: a value written under a key the store has
+    #: not defined is stored by Shopify and shown by nothing, which is what
+    #: an empty Metafields panel on a fully imported product means.
+    def ensure_metafield_definitions(self, definitions, *, namespace,
+                                     owner_type="PRODUCT"):
+        created = []
+        conflicting = []
+        for definition in definitions:
+            key, wanted = definition["key"], definition["type"]
+            existing = self.definitions.get(key)
+            if existing is None:
+                self.definitions[key] = wanted
+                created.append(key)
+            elif existing != wanted:
+                conflicting.append(f"{key} (defined as {existing})")
+        return created, conflicting
+
     def set_metafields(self, metafields):
+        # Shopify stores a value whether or not the key is defined. What a
+        # definition changes is whether anyone can see it — so the fake
+        # records both, and a test can ask either question.
+        for field in metafields:
+            self.undefined_writes.extend(
+                [field] if field["key"] not in self.definitions else []
+            )
         self.metafields.extend(metafields)
         return metafields
 
@@ -853,6 +882,131 @@ def test_two_products_that_compose_one_name_are_not_reported_as_yours(
         run = session.get(ImportRun, run_id)
         log = "\n".join(run.log)
     assert "named the same as" in log
+
+
+# ── Metafields, and being able to see them ───────────────────────────
+#
+# Writing a metafield does not make it visible. Shopify stores the value
+# either way, but the admin's Metafields section lists only keys the store
+# has a *definition* for, and the theme editor offers only those as dynamic
+# sources. An import that writes a full specifications table into a product
+# whose Metafields panel is empty has, from the only side anyone can see,
+# written nothing.
+
+
+def test_an_import_defines_the_metafields_it_writes(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+
+    # Every key this import can write is defined, with the type it writes.
+    for definition in product_import.METAFIELD_DEFINITIONS:
+        assert fake_shopify.definitions[definition["key"]] == definition["type"]
+
+    # And nothing was written under a key that had no definition yet.
+    assert fake_shopify.undefined_writes == []
+
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        log = "\n".join(run.log)
+    assert "Defined 5 metafields" in log
+
+
+def test_the_range_metafield_is_defined_even_when_nothing_is_created(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """`related_products` is written by the linking stage and by no other.
+
+    A re-import whose products all already exist never reaches a create, so
+    the definitions have to be settled by the stage that needs them rather
+    than as a side effect of making something.
+    """
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+    fake_shopify.definitions.clear()
+    fake_shopify.undefined_writes.clear()
+
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+
+    assert "related_products" in fake_shopify.definitions
+    assert fake_shopify.undefined_writes == []
+
+
+def test_a_store_that_already_defined_a_key_differently_is_told_not_corrected(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """Changing the type of a definition that already has values under it is
+    destructive, and belongs to whoever made it. Saying so is not."""
+    fake_shopify.definitions["specifications"] = "multi_line_text_field"
+
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+
+    # Left exactly as the store had it.
+    assert fake_shopify.definitions["specifications"] == "multi_line_text_field"
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        log = "\n".join(run.log)
+    assert "already defined with a different type" in log
+    assert "specifications (defined as multi_line_text_field)" in log
+
+
+def test_metafields_that_could_not_be_defined_do_not_fail_the_import(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """A token without `write_metafield_definitions` still imports products.
+
+    It gets them with invisible metafields, and is told once — rather than
+    left to notice an empty panel and wonder which of the two happened.
+    """
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    def refused(definitions, *, namespace, owner_type="PRODUCT"):
+        raise ShopifyError("Access denied for metafieldDefinitionCreate")
+
+    fake_shopify.ensure_metafield_definitions = refused
+
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+
+    status = product_import.run_status(run_id)
+    assert status["counts"]["created"] == 2
+    assert status["stage"] == ImportStage.done.value
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        log = "\n".join(run.log)
+    assert "Could not define this store's metafields" in log
+    # The values still went, which is the half that survives.
+    assert any(m["key"] == "specifications" or m["key"] == "source_url"
+               for m in fake_shopify.metafields)
+
+
+def test_a_metafield_that_shopify_refuses_is_said_out_loud(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """It used to be a `log.info` into a serverless function's stderr, which
+    is the same as silence: the run reported the product created, counted its
+    images and documents, and said nothing about the structured data it had
+    just failed to write."""
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    def refuse(metafields):
+        raise ShopifyError("metafieldsSet userErrors: [{'message': 'Value is invalid'}]")
+
+    fake_shopify.set_metafields = refuse
+
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+
+    # Not fatal — the product is the product, with or without its metafields.
+    status = product_import.run_status(run_id)
+    assert status["counts"]["created"] == 2
+    assert status["counts"]["failed"] == 0
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        log = "\n".join(run.log)
+    assert "were not written" in log
+    assert "Value is invalid" in log
 
 
 # ── Overruling a skip ────────────────────────────────────────────────

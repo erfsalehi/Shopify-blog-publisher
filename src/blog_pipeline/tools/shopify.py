@@ -104,6 +104,10 @@ class ShopifyClient:
         #: The store's sales channels, fetched once per client. See
         #: `list_publications` — one run asks this per product.
         self._publications: list[dict] | None = None
+        #: {"<ownerType>:<namespace>": {key: type}}, fetched once per client
+        #: for the same reason: every product in a run asks the same question
+        #: and the answer cannot change under it mid-pass.
+        self._definitions: dict[str, dict[str, str]] = {}
 
     # ── core request with basic throttle backoff ─────────────────
     def graphql(self, query: str, variables: dict | None = None) -> dict:
@@ -934,6 +938,110 @@ class ShopifyClient:
                 time.sleep(pause)
         return seen
 
+    def metafield_definitions(
+        self, namespace: str, owner_type: str = "PRODUCT"
+    ) -> dict[str, str]:
+        """{key: type} for the definitions this store already has. Cached.
+
+        Asked rather than inferred from a failed create, because the error
+        codes for "already there" are a moving target and "did it work" is a
+        question with a direct answer.
+        """
+        cache_key = f"{owner_type}:{namespace}"
+        if cache_key not in self._definitions:
+            data = self.graphql(
+                """
+                query($namespace: String!, $ownerType: MetafieldOwnerType!) {
+                  metafieldDefinitions(
+                    first: 250, namespace: $namespace, ownerType: $ownerType
+                  ) {
+                    nodes { key type { name } }
+                  }
+                }
+                """,
+                {"namespace": namespace, "ownerType": owner_type},
+            )
+            self._definitions[cache_key] = {
+                node["key"]: (node.get("type") or {}).get("name", "")
+                for node in (data.get("metafieldDefinitions") or {}).get("nodes", [])
+            }
+        return self._definitions[cache_key]
+
+    def ensure_metafield_definitions(
+        self,
+        definitions: list[dict],
+        *,
+        namespace: str,
+        owner_type: str = "PRODUCT",
+    ) -> tuple[list[str], list[str]]:
+        """Define any of these metafields the store hasn't defined yet.
+
+        **Writing a metafield is not enough to make it exist as far as anyone
+        can see.** `metafieldsSet` stores the value against the product and
+        Shopify keeps it, but the admin's Metafields section lists only
+        metafields that have a *definition*, and the theme editor offers only
+        those as dynamic sources. Without one, an import writes its
+        specifications, documents and FAQ into a product that then shows an
+        empty Metafields panel — the data is there, and nothing the owner or
+        their theme can reach says so.
+
+        Each entry is `{key, name, type, description}`. Returns
+        (created, skipped): skipped is the keys already defined with a
+        *different* type, which this will not touch — changing the type of a
+        definition that has values under it is a destructive act and belongs
+        to whoever created it.
+
+        Idempotent by asking first rather than by catching the error for
+        creating a duplicate.
+        """
+        existing = self.metafield_definitions(namespace, owner_type)
+        created: list[str] = []
+        conflicting: list[str] = []
+        for definition in definitions:
+            key, wanted = definition["key"], definition["type"]
+            if key in existing:
+                if existing[key] and existing[key] != wanted:
+                    conflicting.append(f"{key} (defined as {existing[key]})")
+                continue
+            data = self.graphql(
+                """
+                mutation($definition: MetafieldDefinitionInput!) {
+                  metafieldDefinitionCreate(definition: $definition) {
+                    createdDefinition { key }
+                    userErrors { field message code }
+                  }
+                }
+                """,
+                {"definition": {
+                    "namespace": namespace,
+                    "key": key,
+                    "name": definition.get("name") or key.replace("_", " ").title(),
+                    "type": wanted,
+                    "description": definition.get("description") or "",
+                    "ownerType": owner_type,
+                    # Pinned, so it is on the product page itself rather than
+                    # behind "show all". These are the fields someone opens a
+                    # product to check.
+                    "pin": True,
+                }},
+            )["metafieldDefinitionCreate"]
+            errors = data.get("userErrors") or []
+            if errors:
+                # A race with another pass creating the same definition is the
+                # expected one, and is not a failure — the definition exists
+                # either way, which is all this was for.
+                codes = {str(e.get("code") or "").upper() for e in errors}
+                if codes & {"TAKEN", "DUPLICATE_OPTION", "RESERVED_NAMESPACE_KEY"}:
+                    continue
+                raise ShopifyError(
+                    f"metafieldDefinitionCreate({key}) userErrors: {errors}"
+                )
+            created.append(key)
+        # Anything created invalidates what was cached a moment ago.
+        if created:
+            self._definitions.pop(f"{owner_type}:{namespace}", None)
+        return created, conflicting
+
     def set_metafields(self, metafields: list[dict]) -> list[dict]:
         """Write metafields on any resource. Each entry needs ownerId,
         namespace, key, type and value.
@@ -941,6 +1049,9 @@ class ShopifyClient:
         Specs and document links go here as well as into the description
         HTML: the description is what a customer reads, and the metafield is
         what a theme, an export, or a feed can read as data.
+
+        For any of this to be *visible*, the store needs a definition for the
+        key — see `ensure_metafield_definitions`.
         """
         if not metafields:
             return []

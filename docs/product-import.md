@@ -11,13 +11,21 @@ The page is **Import** in the top nav (`/import`).
 
 The Shopify token needs two scopes the blog pipeline never asked for:
 **`write_products`** (products, media, collections, metafields) and
-**`write_files`** (re-hosting the manufacturer's PDFs). Publishing to sales
-channels additionally needs **`write_publications`**; without it the products
-are still created and the run still finishes, with a warning in the log and
-whichever channels their own auto-publish setting happened to cover. Shopify admin →
-Settings → Apps and sales channels → Develop apps → your app → Configure
-Admin API scopes → tick both → **Save**, then **Install app** again. The
-token string doesn't change.
+**`write_files`** (re-hosting the manufacturer's PDFs).
+
+Two more earn their place without being required. **`write_publications`** is
+for publishing to sales channels; without it the products are still created
+and the run still finishes, with a warning in the log and whichever channels
+their own auto-publish setting happened to cover.
+**`write_metafield_definitions`** is what lets the import *define* the
+metafields it writes — see [Metafields](#metafields), and grant it, because
+without it every specification, document and FAQ is written into a product
+whose Metafields panel shows nothing. The run says so in its log rather than
+failing, but a silently invisible import is the thing worth avoiding here.
+
+Shopify admin → Settings → Apps and sales channels → Develop apps → your app
+→ Configure Admin API scopes → tick them → **Save**, then **Install app**
+again. The token string doesn't change.
 
 Without them the first product fails with a Shopify `userErrors` message
 naming the missing scope, and the run stops there having created nothing —
@@ -252,6 +260,42 @@ inventory, its own images — as it was. A product that has been rewritten is
 recorded as `updated` rather than `created`, so the run afterwards still says
 which products it put in the store and which it changed that were already
 there.
+
+## Metafields
+
+Every import writes five, in the `custom` namespace:
+
+| Key | Type | What it carries |
+|---|---|---|
+| `source_url` | `url` | The manufacturer page this came from. Six months on, this is what answers "why does the description say the wear layer is 20 mil". |
+| `specifications` | `json` | The name/value table, as data rather than as the HTML the description renders. |
+| `documents` | `json` | Each re-hosted PDF: title, kind, and its URL **on your store**. |
+| `faq` | `json` | The questions and answers, also emitted as `FAQPage` JSON-LD in the body. |
+| `related_products` | `list.product_reference` | The rest of the range, written by the cross-linking stage. |
+
+**Writing a metafield is not the same as being able to see one.** Shopify
+stores a value under any key you like, but the admin's Metafields section
+lists only keys the store has a *definition* for, and the theme editor offers
+only those as dynamic sources. Without definitions, an import writes a full
+specifications table into a product that then shows an empty Metafields panel
+— the data is there, and nothing the owner or their theme can reach says so.
+
+So the import defines them itself, once per pass, by asking the store what it
+already has and creating only what is missing. Definitions are created pinned,
+so they appear on the product page rather than behind "show all". It needs
+`write_metafield_definitions` on the token; without it the values are still
+written and the run says once that they will not be visible.
+
+A key the store has already defined **with a different type** is reported and
+left alone: this import's values for it will be refused by Shopify, and that
+is worth being told, but redefining a field that already has values under it
+is destructive and belongs to whoever created it.
+
+A metafield Shopify refuses is named on the run log with its reason. It does
+not fail the product — the description carries the same information for a
+reader either way — but it is no longer swallowed, which it was: a `log.info`
+into a serverless function's stderr, while the run reported the product
+created and counted its images and documents.
 
 ## Live on creation
 
