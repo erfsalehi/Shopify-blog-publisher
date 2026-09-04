@@ -1,23 +1,68 @@
-# Blog Publisher — Topic Research → Linear + Shopify Pipeline
+# Online Business Control Center
 
-An agentic pipeline that researches blog topics, maintains a rolling content
-calendar in Linear, and drafts SEO-optimized articles — then **auto-publishes
-confident ones to Shopify** while routing anything uncertain to Linear for a
-human to review. It also **measures what actually happened** (Google Search
-Console + GA4) and **rewrites its own decaying posts** on that evidence. Built
-on LangGraph, routing all LLM calls through Google AI Studio's free-tier
-Gemini API and tracing to LangSmith.
+Everything needed to run the SEO and merchandising of a Shopify store, in one
+place: a web app you work from, and the automation behind it that fills the
+store's catalogue, writes and refreshes its content, and measures what any of
+it did.
 
-Implements the full PRD (`PRD Topic Research to Publish Pipeline.md`).
+Built for and around [drflooring.ca](https://drflooring.ca) — a flooring and
+tile retailer with a few thousand products — but nothing here is specific to
+flooring beyond the settings, which are settings.
 
-**Docs index:** [Linear setup](#linear-setup) · [Shopify setup](#shopify-setup-optional--enables-auto-publish)
-· [Performance data](docs/search-console.md) · [Refreshing old posts](#refreshing-old-posts)
-· [AI SEO / GEO](#ai-seo-geo) · [WhatsApp trigger](docs/whatsapp-setup.md)
-· [Railway deploy](docs/railway-deploy.md) · [robots.txt for AI crawlers](docs/robots.txt.liquid)
-· [llms.txt](docs/llms.txt) · [Control Center dashboard](docs/dashboard.md)
-· [Product import](docs/product-import.md)
+Two halves, and they are different kinds of thing:
 
-## Architecture
+**The Control Center** is a FastAPI web app — thirteen pages over one database,
+with a job framework behind them. It is where the catalogue, the keywords, the
+competitors, the experiments and the alerts are read, and it is where a
+product import is started. Deployed at
+<https://dr-flooring-control-center.vercel.app> behind a password, and runs
+identically on loopback.
+
+**The pipeline** is a `blog_pipeline` package with a CLI that cron drives:
+topic research, a rolling content calendar in Linear, drafting, QA, publishing
+to Shopify, and rewriting decaying posts on the evidence of what happened to
+them. It is a library the web app builds on rather than a separate service.
+
+## What it does
+
+| | |
+|---|---|
+| **Product import** | Paste a manufacturer's collection URL; get the whole range in your store. Scrapes each product, downloads and reads their spec-sheet PDFs, writes the page, creates the product with its photographs and the documents re-hosted on your own store, builds the collection, cross-links the range, and fills the metafields your storefront filters on. [→](docs/product-import.md) |
+| **Catalogue and product SEO** | Every product joined to its own Search Console metrics, with cohort experiments to tell a change from a season. |
+| **Content** | Topic research → calendar → draft → QA → publish, with anything uncertain routed to Linear for a human instead of going live. |
+| **Refreshing** | Finds the live posts actually losing impressions and rewrites them in place. The only path that edits a public page without a human, and the most heavily guarded. |
+| **Keywords, competitors, local SEO, ads** | Market data from DataForSEO, competitor catalogues and blogs watched for what they add, local rank tracking by city, and Google Ads spend joined to the rest. |
+| **Alerts and the advisor** | Rules that fire on the data rather than on a schedule, and a weekly note that reads the whole dashboard and says what to do about it. |
+
+Seventeen scheduled jobs keep it current. Everything they fetch lands in the
+database; **pages read only the database and never call an external API**,
+which is the one architectural rule here and is enforced by a test
+(`test_no_page_makes_an_outbound_request`).
+
+**Docs:** [Control Center](docs/dashboard.md) · [Product import](docs/product-import.md)
+· [Search Console + GA4](docs/search-console.md) · [Linear setup](#linear-setup)
+· [Shopify setup](#shopify-setup-optional--enables-auto-publish)
+· [Refreshing old posts](#refreshing-old-posts) · [AI SEO / GEO](#ai-seo-geo)
+· [WhatsApp trigger](docs/whatsapp-setup.md) · [Railway deploy](docs/railway-deploy.md)
+· [robots.txt for AI crawlers](docs/robots.txt.liquid) · [llms.txt](docs/llms.txt)
+
+## Running the Control Center
+
+```bash
+python -m venv .venv && . .venv/bin/activate   # Windows: .\.venv\Scripts\Activate.ps1
+pip install -e ".[dashboard]"
+python -m dashboard                            # http://127.0.0.1:8600
+```
+
+`No module named dashboard` means the package wasn't installed — it lives in
+`src/`, so `pip install -e` (or `PYTHONPATH=src`) has to come first, into the
+same interpreter that runs it.
+
+Nothing is on the Overview until a job has run: go to **Jobs → Run now** on
+the Search Console sync. The full tour, including what each page is for and
+what it deliberately doesn't do, is in [docs/dashboard.md](docs/dashboard.md).
+
+## Architecture of the pipeline
 
 Two graphs, a refresh pass, and a CLI that cron drives:
 
@@ -48,10 +93,15 @@ Two graphs, a refresh pass, and a CLI that cron drives:
 - **Product import** (on demand, from the Control Center's Import page): paste
   a manufacturer's collection URL → scrape the range → download and read their
   spec-sheet PDFs → write each product page (description, SEO, tags, FAQ +
-  `FAQPage` JSON-LD, local availability) → create the products in Shopify as
-  **drafts**, with their photographs, the documents re-hosted on the store, the
-  collection, and every product linked to the rest of the range. Prices are
-  never set and an existing handle is never touched. See
+  `FAQPage` JSON-LD, local availability) → create the products in Shopify with
+  their photographs, the documents re-hosted on the store, the collection, the
+  metafields the storefront filters on, and every product linked to the rest of
+  the range. Prices are
+  never set — manufacturers don't publish yours, and inventing one is not an
+  option. Products are created **Active and published to every sales channel**
+  by default, so an import is live as it runs; the dry run is what stands
+  between a bad extraction and the storefront, and it earns its minutes. An
+  existing handle is left alone unless you say otherwise on the run page. See
   [docs/product-import.md](docs/product-import.md).
 
 The store's **existing** posts matter to all three: `import-existing` pulls
@@ -95,7 +145,7 @@ with no code changes —
 just raise `GOOGLE_API_KEY`'s quota and, optionally, fill in `MODEL_RATES` in
 `llm.py` for real cost tracking.
 
-## Setup
+## Setting up the pipeline
 
 ```bash
 python -m venv .venv

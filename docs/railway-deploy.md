@@ -14,7 +14,7 @@ image with no extra config beyond environment variables.
 ## 1. Create the project
 
 1. [railway.app](https://railway.app) → **New Project → Deploy from GitHub repo**
-   → select `Shopify-blog-publisher`.
+   → select `online-business-control-center`.
 2. Railway detects `railway.json` and builds via the Dockerfile automatically
    (`builder: DOCKERFILE`) — nothing to configure here.
 
