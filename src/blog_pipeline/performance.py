@@ -1,7 +1,7 @@
 """Search Console sync, plus the two questions the data exists to answer.
 
-sync_performance() pulls a window of page- and query-level rows and stores
-them as an immutable snapshot. The two readers:
+sync_performance() pulls a window of page-, query- and page+query-level rows
+and stores them as an immutable snapshot. The readers:
 
   * striking_distance_queries() — terms already earning impressions from
     positions 11-30. The site is being shown and not clicked; one better
@@ -10,6 +10,9 @@ them as an immutable snapshot. The two readers:
   * decaying_articles() — live posts whose impressions fell between two
     windows. Ranks refresh candidates by measured decay rather than by age,
     which is a proxy for it at best.
+  * queries_for_page() — the terms driving one page, worst CTR first. Says
+    whether a page that ranks but isn't clicked needs a new title or a new
+    article; the aggregated shapes can only say that it isn't clicked.
 """
 
 from __future__ import annotations
@@ -23,11 +26,17 @@ from blog_pipeline.tools.search_console import SearchConsoleClient, default_wind
 
 
 def _normalize(url: str | None) -> str:
-    """Compare URLs ignoring scheme, www and trailing slash.
+    """Compare URLs by path alone, ignoring scheme, host and trailing slash.
 
     Search Console reports the canonical URL, which won't necessarily match
     the string we stored character-for-character — and a join that silently
     matches nothing looks exactly like a site with no traffic.
+
+    The host has to go too, not just www. Shopify hands back the myshopify.com
+    URL when it publishes an article, while Search Console only ever reports
+    the custom domain, so those articles matched nothing and were invisible to
+    decay ranking — the newest posts, exactly the ones worth watching. One
+    site, one path namespace, so dropping the host cannot collide here.
     """
     if not url:
         return ""
@@ -35,17 +44,28 @@ def _normalize(url: str | None) -> str:
     for prefix in ("https://", "http://"):
         if u.startswith(prefix):
             u = u[len(prefix):]
-    if u.startswith("www."):
-        u = u[4:]
-    return u.rstrip("/")
+    slash = u.find("/")
+    u = u[slash:] if slash != -1 else "/"
+    return u.rstrip("/") or "/"
 
 
 def _build_rows(
-    pages: list[dict], queries: list[dict], by_url: dict[str, int],
-    start: date, end: date,
+    pages: list[dict], queries: list[dict], pairs: list[dict],
+    by_url: dict[str, int], start: date, end: date,
 ) -> tuple[list[SearchPerformance], int]:
     rows: list[SearchPerformance] = []
     matched = 0
+
+    def _metrics(row: dict) -> dict:
+        return {
+            "clicks": int(row.get("clicks", 0)),
+            "impressions": int(row.get("impressions", 0)),
+            "ctr": float(row.get("ctr", 0.0)),
+            "position": float(row.get("position", 0.0)),
+            "period_start": start,
+            "period_end": end,
+        }
+
     for row in pages:
         url = (row.get("keys") or [None])[0]
         article_id = by_url.get(_normalize(url))
@@ -53,12 +73,7 @@ def _build_rows(
             matched += 1
         rows.append(
             SearchPerformance(
-                article_id=article_id, page=url, query=None,
-                clicks=int(row.get("clicks", 0)),
-                impressions=int(row.get("impressions", 0)),
-                ctr=float(row.get("ctr", 0.0)),
-                position=float(row.get("position", 0.0)),
-                period_start=start, period_end=end,
+                article_id=article_id, page=url, query=None, **_metrics(row)
             )
         )
     for row in queries:
@@ -66,11 +81,18 @@ def _build_rows(
             SearchPerformance(
                 article_id=None, page=None,
                 query=(row.get("keys") or [None])[0],
-                clicks=int(row.get("clicks", 0)),
-                impressions=int(row.get("impressions", 0)),
-                ctr=float(row.get("ctr", 0.0)),
-                position=float(row.get("position", 0.0)),
-                period_start=start, period_end=end,
+                **_metrics(row),
+            )
+        )
+    for row in pairs:
+        keys = row.get("keys") or [None, None]
+        url = keys[0]
+        rows.append(
+            SearchPerformance(
+                article_id=by_url.get(_normalize(url)),
+                page=url,
+                query=keys[1] if len(keys) > 1 else None,
+                **_metrics(row),
             )
         )
     return rows, matched
@@ -108,6 +130,8 @@ def sync_performance(
     compare: bool = True,
     retain_windows: int = 4,
     dry_run: bool = False,
+    blog_path: str = "/blogs/",
+    pair_row_limit: int = 5000,
 ) -> dict:
     """Pull the current window, and by default the preceding one too.
 
@@ -126,7 +150,7 @@ def sync_performance(
     if compare:
         windows.append((start - timedelta(days=days), start))
 
-    total_pages = total_queries = matched = 0
+    total_pages = total_queries = total_pairs = matched = 0
     with get_session() as session:
         by_url = {
             _normalize(a.shopify_url): a.id
@@ -139,9 +163,26 @@ def sync_performance(
             queries = client.query(
                 dimensions=["query"], start_date=w_start, end_date=w_end
             )
-            rows, hit = _build_rows(pages, queries, by_url, w_start, w_end)
+            # Which query drives which blog page. Filtered to the blog and
+            # capped: the page+query pair is the product of both dimensions,
+            # and the whole site's would dwarf the other two shapes combined.
+            pairs = client.query(
+                dimensions=["page", "query"],
+                start_date=w_start,
+                end_date=w_end,
+                row_limit=pair_row_limit,
+                dimension_filters=[
+                    {
+                        "dimension": "page",
+                        "operator": "contains",
+                        "expression": blog_path,
+                    }
+                ],
+            )
+            rows, hit = _build_rows(pages, queries, pairs, by_url, w_start, w_end)
             total_pages += len(pages)
             total_queries += len(queries)
+            total_pairs += len(pairs)
             if i == 0:  # only the current window's match rate is interesting
                 matched = hit
             if not dry_run:
@@ -167,6 +208,7 @@ def sync_performance(
         ),
         "pages": total_pages,
         "queries": total_queries,
+        "page_query_pairs": total_pairs,
         "matched": matched,
         "pruned_rows": pruned,
         "dry_run": dry_run,
@@ -328,6 +370,7 @@ def site_summary() -> dict:
                 .filter(
                     SearchPerformance.period_end == period,
                     SearchPerformance.page.isnot(None),
+                    SearchPerformance.query.is_(None),
                 )
                 .all()
             )
@@ -368,6 +411,7 @@ def top_pages(*, limit: int = 10) -> list[dict]:
             .filter(
                 SearchPerformance.period_end == current,
                 SearchPerformance.page.isnot(None),
+                SearchPerformance.query.is_(None),
             )
             .order_by(SearchPerformance.impressions.desc())
             .limit(limit)
@@ -402,7 +446,10 @@ def striking_distance_queries(
     with get_session() as session:
         latest = (
             session.query(SearchPerformance.period_end)
-            .filter(SearchPerformance.query.isnot(None))
+            .filter(
+                SearchPerformance.query.isnot(None),
+                SearchPerformance.page.is_(None),
+            )
             .order_by(SearchPerformance.period_end.desc())
             .first()
         )
@@ -413,6 +460,7 @@ def striking_distance_queries(
             .filter(
                 SearchPerformance.period_end == latest[0],
                 SearchPerformance.query.isnot(None),
+                SearchPerformance.page.is_(None),
                 SearchPerformance.impressions >= min_impressions,
                 SearchPerformance.position >= low,
                 SearchPerformance.position <= high,
@@ -430,6 +478,56 @@ def striking_distance_queries(
                 "ctr": round(r.ctr, 4),
             }
             for r in rows
+        ]
+
+
+def queries_for_page(
+    page: str, *, limit: int = 25, min_impressions: int = 10
+) -> list[dict]:
+    """The search terms actually driving one blog page, worst CTR first.
+
+    The question the page- and query-only shapes cannot answer between them.
+    A page sitting at position 8 with a 0.3% CTR is either ranking for terms
+    it doesn't deserve or wearing a title that doesn't match them — and which
+    of those it is decides whether you rewrite the title or the article.
+    Ordering by CTR ascending puts the mismatches on top.
+
+    `page` matches on path, so a myshopify.com or www URL finds the same rows.
+    """
+    target = _normalize(page)
+    with get_session() as session:
+        latest = (
+            session.query(SearchPerformance.period_end)
+            .filter(
+                SearchPerformance.page.isnot(None),
+                SearchPerformance.query.isnot(None),
+            )
+            .order_by(SearchPerformance.period_end.desc())
+            .first()
+        )
+        if not latest:
+            return []
+        rows = (
+            session.query(SearchPerformance)
+            .filter(
+                SearchPerformance.period_end == latest[0],
+                SearchPerformance.page.isnot(None),
+                SearchPerformance.query.isnot(None),
+                SearchPerformance.impressions >= min_impressions,
+            )
+            .all()
+        )
+        hits = [r for r in rows if _normalize(r.page) == target]
+        hits.sort(key=lambda r: (r.clicks / r.impressions if r.impressions else 0))
+        return [
+            {
+                "query": r.query,
+                "impressions": r.impressions,
+                "clicks": r.clicks,
+                "ctr": round(r.ctr, 4),
+                "position": round(r.position, 1),
+            }
+            for r in hits[:limit]
         ]
 
 
@@ -463,6 +561,7 @@ def decaying_articles(*, limit: int = 10, min_impressions: int = 20) -> list[dic
                 .filter(
                     SearchPerformance.period_end == period,
                     SearchPerformance.article_id.isnot(None),
+                    SearchPerformance.query.is_(None),
                 )
                 .all()
             }

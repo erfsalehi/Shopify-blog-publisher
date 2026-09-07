@@ -14,6 +14,7 @@ from blog_pipeline.db.models import ArticleStatus, TopicSource
 from blog_pipeline.performance import (
     _normalize,
     decaying_articles,
+    queries_for_page,
     site_summary,
     striking_distance_queries,
     sync_performance,
@@ -32,11 +33,24 @@ def _row(keys, clicks=1, impressions=100, ctr=0.01, position=12.0):
 
 
 class _FakeGSC:
-    def __init__(self, pages=None, queries=None, enabled=True):
+    def __init__(self, pages=None, queries=None, pairs=None, enabled=True):
         self._pages, self._queries, self.enabled = pages or [], queries or [], enabled
+        self._pairs = pairs or []
 
-    def query(self, *, dimensions, start_date, end_date, row_limit=25000):
-        return self._pages if dimensions == ["page"] else self._queries
+    def query(
+        self,
+        *,
+        dimensions,
+        start_date,
+        end_date,
+        row_limit=25000,
+        dimension_filters=None,
+    ):
+        if dimensions == ["page"]:
+            return self._pages
+        if dimensions == ["query"]:
+            return self._queries
+        return self._pairs
 
 
 @pytest.fixture
@@ -440,3 +454,81 @@ def test_adjacent_windows_are_comparable(gsc):
     rows = decaying_articles()
     assert len(rows) == 1
     assert rows[0]["impressions_lost"] == 750
+
+
+# ── page+query pairs, and the host mismatch ─────────────────────
+
+
+def test_an_article_published_under_the_myshopify_host_still_matches():
+    """Shopify returns the myshopify.com URL on publish; Search Console only
+    ever reports the custom domain. Matching on the full host meant the newest
+    posts joined to nothing and were invisible to decay ranking."""
+    init_db()
+    stored = "https://b98e90.myshopify.com/blogs/news/post-1"
+    reported = "https://drflooring.ca/blogs/news/post-1"
+    assert _normalize(stored) == _normalize(reported)
+
+
+def test_pair_rows_are_stored_without_double_counting_the_totals(gsc):
+    """The page+query shape shares the table with the aggregated shapes. If a
+    reader counts it too, every site total silently doubles."""
+    _article()
+    page = "https://drflooring.ca/blogs/news/post-1"
+    gsc["client"] = _FakeGSC(
+        pages=[_row([page], clicks=3, impressions=500)],
+        queries=[_row(["flooring langley"], clicks=3, impressions=500)],
+        pairs=[
+            _row([page, "stair nosing"], clicks=0, impressions=400),
+            _row([page, "flooring langley"], clicks=3, impressions=100),
+        ],
+    )
+    result = sync_performance(compare=False)
+
+    assert result["page_query_pairs"] == 2
+    # The aggregated page row says 500 impressions. Totals must agree, not 1000.
+    summary = site_summary()
+    assert summary["impressions"] == 500
+    assert summary["pages"] == 1
+    assert len(top_pages()) == 1
+    # Striking distance reads query-shaped rows only, not the pair rows.
+    assert [q["query"] for q in striking_distance_queries(min_impressions=50)] == [
+        "flooring langley"
+    ]
+
+
+def test_queries_for_page_ranks_the_worst_ctr_first(gsc):
+    """The question neither aggregated shape can answer: a page ranking at
+    position 8 with no clicks is either mismatched to its terms or badly
+    titled, and only the pair rows distinguish them."""
+    _article()
+    page = "https://drflooring.ca/blogs/news/post-1"
+    gsc["client"] = _FakeGSC(
+        pages=[_row([page], impressions=500)],
+        pairs=[
+            _row([page, "flooring langley"], clicks=9, impressions=100),
+            _row([page, "stair nosing"], clicks=0, impressions=400),
+        ],
+    )
+    sync_performance(compare=False)
+
+    found = queries_for_page(page)
+    assert [q["query"] for q in found] == ["stair nosing", "flooring langley"]
+    assert found[0]["impressions"] == 400
+
+    # Path matching: the myshopify host finds the same rows.
+    assert queries_for_page("https://b98e90.myshopify.com/blogs/news/post-1") == found
+
+
+def test_decay_ignores_pair_rows(gsc):
+    """decaying_articles keys off article_id, which pair rows also carry."""
+    _article()
+    page = "https://drflooring.ca/blogs/news/post-1"
+    gsc["client"] = _FakeGSC(
+        pages=[_row([page], impressions=1000)],
+        pairs=[_row([page, "stair nosing"], impressions=900)],
+    )
+    sync_performance(days=90)
+
+    rows = [r for r in decaying_articles() if r["impressions_now"] is not None]
+    # One article, counted once — not once per shape.
+    assert len(rows) <= 1

@@ -121,10 +121,18 @@ class SearchConsoleClient:
         start_date: date,
         end_date: date,
         row_limit: int = _MAX_ROWS,
+        dimension_filters: list[dict] | None = None,
     ) -> list[dict]:
         """searchAnalytics rows as {keys: [...], clicks, impressions, ctr,
         position}. Pages through startRow so a big site isn't silently cut off
-        at the first 25k."""
+        at the first 25k.
+
+        `dimension_filters` are API filter dicts, e.g.
+        {"dimension": "page", "operator": "contains", "expression": "/blogs/"};
+        they are sent as a single AND group. Filtering server-side matters for
+        the page+query dimension pair, whose unfiltered row count is the
+        product of both dimensions.
+        """
         if not self.enabled:
             return []
         path = f"/sites/{_quote(self.site_url)}/searchAnalytics/query"
@@ -132,16 +140,18 @@ class SearchConsoleClient:
         start_row = 0
         while len(rows) < row_limit:
             page_size = min(_MAX_ROWS, row_limit - len(rows))
-            data = self._post(
-                path,
-                {
-                    "startDate": start_date.isoformat(),
-                    "endDate": end_date.isoformat(),
-                    "dimensions": dimensions,
-                    "rowLimit": page_size,
-                    "startRow": start_row,
-                },
-            )
+            body = {
+                "startDate": start_date.isoformat(),
+                "endDate": end_date.isoformat(),
+                "dimensions": dimensions,
+                "rowLimit": page_size,
+                "startRow": start_row,
+            }
+            if dimension_filters:
+                body["dimensionFilterGroups"] = [
+                    {"groupType": "and", "filters": dimension_filters}
+                ]
+            data = self._post(path, body)
             page = data.get("rows", [])
             rows.extend(page)
             if len(page) < page_size:

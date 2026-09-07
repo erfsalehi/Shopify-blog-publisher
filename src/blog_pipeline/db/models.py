@@ -182,11 +182,20 @@ class Article(Base):
 class SearchPerformance(Base):
     """One Search Console row for one measurement window.
 
-    Two shapes share the table, discriminated by which dimension is null:
+    Three shapes share the table, discriminated by which dimension is null:
       * page set, query null  — how a URL performs overall. Ranks refresh
         candidates by decay, which beats ranking them by age.
       * query set, page null  — how a search term performs site-wide. Finds
         striking-distance terms: real impressions, position 11-30, few clicks.
+      * both set             — which query drives which page, for blog pages
+        only. The other two shapes each aggregate the dimension away, so
+        neither can say why a page at position 8 earns no clicks; this one
+        can. Restricted to blog URLs because the unfiltered pair is the
+        product of both dimensions, and this table already has a storage
+        ceiling (see _prune_old_windows).
+
+    Readers MUST discriminate explicitly. `page IS NOT NULL` alone now spans
+    two shapes and double-counts every site total it touches.
 
     Rows are immutable snapshots keyed by window, not a running total, so
     comparing two windows shows the trend — which is the entire point when a
