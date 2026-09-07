@@ -813,10 +813,13 @@ def _filter_targets(
     """
     targets: dict[str, tuple[str, str, str]] = {}
     for configured in keys:
-        field = _field_for(configured)
+        space, key = _split_key(configured, namespace)
+        # The key decides which field this is, never the namespace. A store
+        # that kept these in a namespace called `product_type` would
+        # otherwise have every one of its keys read as the type.
+        field = _field_for(key)
         if not field or field in targets:
             continue
-        space, key = _split_key(configured, namespace)
         defined = client.metafield_definitions(space)
         if defined.get(key) in FILTERABLE_TYPES:
             targets[field] = (space, key, defined[key])
@@ -875,10 +878,10 @@ def _report_filter_metafields(run_id: int, client) -> None:
 
     fillable, missing, unfilterable, unrecognised = [], [], [], []
     for configured in keys:
-        if _field_for(configured) is None:
+        space, key = _split_key(configured, namespace)
+        if _field_for(key) is None:
             unrecognised.append(configured)
             continue
-        space, key = _split_key(configured, namespace)
         here = defined if space == namespace else client.metafield_definitions(space)
         if key not in here:
             missing.append(f"{space}.{key}")
@@ -938,9 +941,10 @@ def store_metafields() -> dict:
     namespace, keys, _ = _filter_settings()
     configured = {}
     for entry in keys:
-        field = _field_for(entry)
+        space, key = _split_key(entry, namespace)
+        field = _field_for(key)
         if field and field not in configured:
-            configured[field] = _split_key(entry, namespace)
+            configured[field] = (space, key)
 
     client = _shopify_client()
     try:

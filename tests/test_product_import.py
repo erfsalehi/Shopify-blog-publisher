@@ -227,7 +227,10 @@ class FakeShopify:
         self.updates: list[dict] = []
         self.published: list[str] = []
         #: {key: type} the store has defined, and every value written under
-        #: a key that had no definition at the time.
+        #: a key that had no definition at the time. This store keeps its
+        #: filter definitions in `filter`, apart from the `custom` namespace
+        #: the import writes its specifications and documents into.
+        self.namespace = "filter"
         self.definitions: dict[str, str] = {}
         self.undefined_writes: list[dict] = []
         self._next = 100
@@ -338,7 +341,7 @@ class FakeShopify:
         """Every definition in every namespace — what answers "what does my
         store call these", which a namespace guess cannot."""
         return [
-            {"namespace": "custom", "key": key, "name": key, "type": type_}
+            {"namespace": self.namespace, "key": key, "name": key, "type": type_}
             for key, type_ in self.definitions.items()
         ]
 
@@ -1199,6 +1202,75 @@ def test_rewriting_a_product_on_request_refills_its_filter_fields(
     assert [m for m in fake_shopify.metafields if m["key"] == "width"]
 
 
+def test_the_filter_metafields_default_to_the_namespace_this_store_uses(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """`filter`, not `custom`. The import writes its specifications and
+    documents into `custom`; the storefront's filters are a separate set
+    the merchant built, and keeping them apart is the store's decision —
+    which is why the namespace is a setting and why its default has to
+    match the store rather than the module's habits."""
+    _store_defines(
+        fake_shopify,
+        brand="single_line_text_field", type="single_line_text_field",
+        width="single_line_text_field", colour="single_line_text_field",
+        thickness="single_line_text_field",
+    )
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    filters = [
+        m for m in fake_shopify.metafields
+        if m["key"] in {"brand", "type", "width", "colour", "thickness"}
+    ]
+    assert filters
+    assert {m["namespace"] for m in filters} == {"filter"}
+    # And the import's own data stays where it was.
+    ours = [m for m in fake_shopify.metafields if m["key"] == "specifications"]
+    assert {m["namespace"] for m in ours} == {"custom"}
+
+
+def test_a_namespace_is_never_what_decides_which_field_a_key_is(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """A store that kept these in a namespace called `product_type` would
+    otherwise have every one of its keys read as the type."""
+    _store_defines(fake_shopify, width="single_line_text_field")
+    store.set(store.IMPORT_FILTER_KEYS, "product_type.width")
+
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    written = [m for m in fake_shopify.metafields if m["namespace"] == "product_type"]
+    assert written
+    assert {m["key"] for m in written} == {"width"}
+    assert {m["value"] for m in written} == {'24"', '36"'}
+
+
+def test_width_colour_and_thickness_are_never_written_as_tags(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """They belong to the filter metafields and to nothing else. Brand and
+    type stay tags as well, because a smart collection defined on brand +
+    collection needs them there."""
+    _store_defines(
+        fake_shopify,
+        width="single_line_text_field", colour="single_line_text_field",
+    )
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    for node in fake_shopify.products.values():
+        tags = {t.lower() for t in node["tags"]}
+        assert not {t for t in tags if t in {'24"', '36"', '24"x48"'}}
+        assert "grey" not in tags and "white" not in tags
+        # The brand is still a tag; the smart collection is built on it.
+        assert "ames tile & stone" in tags
+
+
 def test_a_key_can_name_its_own_namespace(
     dashboard_db, fake_site, fake_shopify, no_llm
 ):
@@ -1245,7 +1317,7 @@ def test_the_store_can_be_asked_what_it_calls_its_metafields(
     # And one that is none of our business.
     assert by_key["care_guide"]["field"] is None
     assert by_key["care_guide"]["filterable"] is False
-    assert found["configured"] == {"colour": "custom.colour"}
+    assert found["configured"] == {"colour": "filter.colour"}
 
 
 def test_the_lookup_reaches_shopify_only_when_asked(dashboard_db, monkeypatch):

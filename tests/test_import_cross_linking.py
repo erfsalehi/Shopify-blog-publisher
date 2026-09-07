@@ -37,6 +37,7 @@ class LinkingShopify:
     def __init__(self):
         self.bodies: dict[str, str] = {}
         self.metafields: list[dict] = []
+        self.namespace = "filter"
         self.definitions: dict[str, str] = {}
 
     def update_product(self, gid, **kwargs):
@@ -52,7 +53,7 @@ class LinkingShopify:
         """Every definition in every namespace — what answers "what does my
         store call these", which a namespace guess cannot."""
         return [
-            {"namespace": "custom", "key": key, "name": key, "type": type_}
+            {"namespace": self.namespace, "key": key, "name": key, "type": type_}
             for key, type_ in self.definitions.items()
         ]
 

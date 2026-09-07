@@ -673,12 +673,16 @@ IMPORT_SPECS: tuple[Spec, ...] = (
     ),
     Spec(
         key=IMPORT_FILTER_NAMESPACE,
-        default="custom",
+        default="filter",
         label="Namespace of the storefront filter metafields",
         help=(
             "Where this store keeps the metafields its collection filters "
-            "are built on. Almost always 'custom'. Shopify's own taxonomy "
-            "attributes live in 'shopify' and are not writable this way."
+            "are built on. This one keeps them in 'filter', separate from "
+            "the 'custom' namespace the import writes its specifications and "
+            "documents into — which is a good separation and the reason the "
+            "namespace is a setting rather than an assumption. Shopify's own "
+            "taxonomy attributes live in 'shopify' and are not writable "
+            "this way."
         ),
         group="Product import",
         kind="str",

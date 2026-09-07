@@ -322,11 +322,24 @@ key that isn't there is reported on the run log along with the keys the store
 *does* define, which is the answer to "what are mine called" at the moment
 anyone needs it.
 
+This store keeps them in the **`filter`** namespace — `filter.brand`,
+`filter.type`, `filter.width`, `filter.colour`, `filter.thickness` — which is
+deliberately not the `custom` namespace the import writes its own
+specifications and documents into. Those are two different kinds of data with
+two different owners, and keeping them apart is the store's call. It is also
+why the namespace is a setting and not an assumption.
+
+**Width, colour and thickness are never written as tags.** They belong to
+these metafields and to nothing else. Brand and type are tags *as well*,
+because a smart collection defined as brand + collection needs them there.
+
 Settings name the namespace and the keys. A key is matched to a field by what
 it says rather than by being spelled our way, so `tile_width` fills the width
 and `color` fills the colour. A key on its own uses the namespace setting;
 write it `namespace.key` to name its own, because stores do spread these
-across namespaces.
+across namespaces. The **key** decides which field it is, never the
+namespace — a store keeping these under `product_type` would otherwise have
+every one of its keys read as the type.
 
 **You don't have to know them.** The Product Import page has *This store's
 product metafields* — one click, and it lists every product metafield
