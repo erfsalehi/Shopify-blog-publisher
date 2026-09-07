@@ -25,8 +25,8 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
 
 from dashboard import (
-    advisor, alerts, auth, charts, cron, diffing, experiments, product_import,
-    refresh, reporting, scheduler, store, strategy,
+    advisor, alerts, auth, charts, cron, diffing, experiments, import_queue,
+    product_import, refresh, reporting, scheduler, store, strategy,
 )
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
@@ -444,11 +444,12 @@ def create_app() -> FastAPI:
 
     # ── Product import ──────────────────────────────────────────────
     @app.get("/import", response_class=HTMLResponse)
-    def import_page(request: Request, error: str = ""):
+    def import_page(request: Request, error: str = "", notice: str = ""):
         return render(
             request, "import.html",
             nav="import",
             runs=product_import.list_runs(limit=25),
+            queue=import_queue.entries(),
             defaults={
                 "max_products": store.get(store.IMPORT_MAX_PRODUCTS),
                 "publish_status": store.get(store.IMPORT_PUBLISH_STATUS),
@@ -458,6 +459,7 @@ def create_app() -> FastAPI:
             },
             shopify_ready=pipeline().has_shopify,
             error=error,
+            notice=notice,
         )
 
     @app.post("/import")
@@ -504,6 +506,48 @@ def create_app() -> FastAPI:
             build_page=bool(build_page),
         )
         return RedirectResponse(f"/import/{run_id}", status_code=303)
+
+    @app.post("/import/queue")
+    def queue_imports(collections: str = Form(""), dry_run: str = Form("")):
+        """Add pasted collections to the import queue.
+
+        One per line, `url, brand` — the brand because it is the first word
+        of every product name and most suppliers publish it nowhere a
+        scraper can read. A line that can't be read is reported and the rest
+        are added: losing twenty-nine good lines to a typo in the thirtieth
+        is what stops people pasting lists.
+        """
+        added, problems = import_queue.add(collections, dry_run=bool(dry_run))
+        params = []
+        if added:
+            params.append(
+                "notice=" + quote(
+                    f"Queued {added} collection{'s' if added != 1 else ''}. "
+                    "They start one at a time, and a new one only once the "
+                    "one before it has finished."
+                )
+            )
+        trouble = list(problems)
+        if not added and not problems:
+            trouble = ["nothing to queue — paste one collection per line"]
+        if trouble:
+            shown = "; ".join(trouble[:5])
+            if len(trouble) > 5:
+                shown += f"; and {len(trouble) - 5} more"
+            params.append("error=" + quote("Could not read: " + shown))
+        return RedirectResponse("/import?" + "&".join(params), status_code=303)
+
+    @app.post("/import/queue/{entry_id}/remove")
+    def unqueue_import(entry_id: int):
+        if not import_queue.remove(entry_id):
+            return RedirectResponse(
+                "/import?error=" + quote(
+                    "That one has already started — stop it on its run page "
+                    "instead."
+                ),
+                status_code=303,
+            )
+        return RedirectResponse("/import", status_code=303)
 
     @app.get("/import/metafields")
     def import_metafields():

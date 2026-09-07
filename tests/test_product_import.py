@@ -227,7 +227,10 @@ class FakeShopify:
         self.updates: list[dict] = []
         self.published: list[str] = []
         #: {key: type} the store has defined, and every value written under
-        #: a key that had no definition at the time.
+        #: a key that had no definition at the time. This store keeps its
+        #: filter definitions in `filter`, apart from the `custom` namespace
+        #: the import writes its specifications and documents into.
+        self.namespace = "filter"
         self.definitions: dict[str, str] = {}
         self.undefined_writes: list[dict] = []
         self._next = 100
@@ -338,7 +341,7 @@ class FakeShopify:
         """Every definition in every namespace — what answers "what does my
         store call these", which a namespace guess cannot."""
         return [
-            {"namespace": "custom", "key": key, "name": key, "type": type_}
+            {"namespace": self.namespace, "key": key, "name": key, "type": type_}
             for key, type_ in self.definitions.items()
         ]
 
@@ -1199,6 +1202,75 @@ def test_rewriting_a_product_on_request_refills_its_filter_fields(
     assert [m for m in fake_shopify.metafields if m["key"] == "width"]
 
 
+def test_the_filter_metafields_default_to_the_namespace_this_store_uses(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """`filter`, not `custom`. The import writes its specifications and
+    documents into `custom`; the storefront's filters are a separate set
+    the merchant built, and keeping them apart is the store's decision —
+    which is why the namespace is a setting and why its default has to
+    match the store rather than the module's habits."""
+    _store_defines(
+        fake_shopify,
+        brand="single_line_text_field", type="single_line_text_field",
+        width="single_line_text_field", colour="single_line_text_field",
+        thickness="single_line_text_field",
+    )
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    filters = [
+        m for m in fake_shopify.metafields
+        if m["key"] in {"brand", "type", "width", "colour", "thickness"}
+    ]
+    assert filters
+    assert {m["namespace"] for m in filters} == {"filter"}
+    # And the import's own data stays where it was.
+    ours = [m for m in fake_shopify.metafields if m["key"] == "specifications"]
+    assert {m["namespace"] for m in ours} == {"custom"}
+
+
+def test_a_namespace_is_never_what_decides_which_field_a_key_is(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """A store that kept these in a namespace called `product_type` would
+    otherwise have every one of its keys read as the type."""
+    _store_defines(fake_shopify, width="single_line_text_field")
+    store.set(store.IMPORT_FILTER_KEYS, "product_type.width")
+
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    written = [m for m in fake_shopify.metafields if m["namespace"] == "product_type"]
+    assert written
+    assert {m["key"] for m in written} == {"width"}
+    assert {m["value"] for m in written} == {'24"', '36"'}
+
+
+def test_width_colour_and_thickness_are_never_written_as_tags(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """They belong to the filter metafields and to nothing else. Brand and
+    type stay tags as well, because a smart collection defined on brand +
+    collection needs them there."""
+    _store_defines(
+        fake_shopify,
+        width="single_line_text_field", colour="single_line_text_field",
+    )
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone"
+    ))
+
+    for node in fake_shopify.products.values():
+        tags = {t.lower() for t in node["tags"]}
+        assert not {t for t in tags if t in {'24"', '36"', '24"x48"'}}
+        assert "grey" not in tags and "white" not in tags
+        # The brand is still a tag; the smart collection is built on it.
+        assert "ames tile & stone" in tags
+
+
 def test_a_key_can_name_its_own_namespace(
     dashboard_db, fake_site, fake_shopify, no_llm
 ):
@@ -1245,7 +1317,7 @@ def test_the_store_can_be_asked_what_it_calls_its_metafields(
     # And one that is none of our business.
     assert by_key["care_guide"]["field"] is None
     assert by_key["care_guide"]["filterable"] is False
-    assert found["configured"] == {"colour": "custom.colour"}
+    assert found["configured"] == {"colour": "filter.colour"}
 
 
 def test_the_lookup_reaches_shopify_only_when_asked(dashboard_db, monkeypatch):
@@ -1278,6 +1350,182 @@ def test_a_store_that_cannot_be_reached_says_so_rather_than_500ing(
         response = client.get("/import/metafields")
     assert response.status_code == 502
     assert "Shopify not configured" in response.json()["error"]
+
+
+# ── The main category tags ───────────────────────────────────────────
+#
+# On this store the tags *are* the filters, so a product missing its
+# category tag is a product missing from the category.
+
+
+def test_a_product_is_tagged_with_the_categories_it_belongs_to(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    store.set(store.IMPORT_CATEGORY_TAGS, "Tile, Vinyl flooring, Underlay")
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+
+    for node in fake_shopify.products.values():
+        assert "Tile" in node["tags"]          # a ceramic wall tile
+        assert "Vinyl flooring" not in node["tags"]
+        assert "Underlay" not in node["tags"]
+
+
+def test_the_categories_go_in_ahead_of_the_models_own_tags(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """`clean_tags` caps a product, and the model routinely proposes fifteen.
+    A category that lands after them is a category that gets dropped."""
+    store.set(store.IMPORT_CATEGORY_TAGS, "Tile")
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+
+    tags = next(iter(fake_shopify.products.values()))["tags"]
+    assert tags.index("Tile") < len(tags)
+    # Ahead of "imported", which is for us rather than for a customer.
+    assert tags.index("Tile") < tags.index("imported")
+
+
+def test_a_category_is_read_off_what_the_maker_asserts_not_off_the_prose():
+    """A description compares a product to other categories constantly.
+    "Warmer underfoot than tile" is not a tile."""
+    categories = ["Tile", "Laminate flooring"]
+    assert product_copy.derive_categories(
+        categories, title="Aspen Laminate Plank", product_type="Laminate Flooring",
+    ) == ["Laminate flooring"]
+    # The same product with the word only in its description stays one thing.
+    assert product_copy.derive_categories(
+        categories, title="Aspen Laminate Plank", product_type="Laminate Flooring",
+        specs={"Feel": "Warmer underfoot than tile"},
+    ) == ["Tile", "Laminate flooring"]
+
+
+def test_a_category_matches_whole_words_only():
+    assert product_copy.derive_categories(["Tile"], title="Textile Wall Panel") == []
+    assert product_copy.derive_categories(["Tile"], title="Porcelain Tiles") == ["Tile"]
+
+
+def test_a_category_nobody_wrote_aliases_for_still_works():
+    """The list is a setting, so it cannot only contain what this module
+    happens to know about."""
+    assert product_copy.derive_categories(
+        ["Bullnose trim"], title="Oak Bullnose Trim 8ft",
+    ) == ["Bullnose trim"]
+
+
+# ── Not walking on the spot ──────────────────────────────────────────
+
+
+def test_a_product_that_never_finishes_is_given_up_on_with_a_reason(
+    dashboard_db, fake_site, fake_shopify, no_llm, monkeypatch
+):
+    """A pass always does at least one product, however long it takes, and a
+    serverless function is killed at 60 seconds — so a product too big to
+    finish leaves no trace and the next pass picks the same one. One import
+    spent fourteen hours this way."""
+    killed = []
+
+    def die(*args, **kwargs):
+        killed.append(1)
+        raise SystemExit("function timed out")
+
+    monkeypatch.setattr(product_import, "fetch_product", die)
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    product_import.advance(run_id)  # discover
+
+    for _ in range(product_import.MAX_PRODUCT_ATTEMPTS + 2):
+        try:
+            product_import.advance(run_id)
+        except SystemExit:
+            pass
+
+    with get_session() as session:
+        rows = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .all()
+        )
+    given_up = [r for r in rows if r.status == ImportProductStatus.failed.value]
+    assert given_up, "a product retried forever is the bug"
+    assert "Gave up after" in given_up[0].error
+    assert "images or documents" in given_up[0].error
+
+
+def test_a_product_that_keeps_running_out_of_time_is_retried_with_less(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """What a pass runs out of time on is nearly always the photographs and
+    the PDFs. A product in the store with three of its six images beats one
+    that never lands."""
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    product_import.advance(run_id)
+    with get_session() as session:
+        row = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .order_by(ImportProduct.position)
+            .first()
+        )
+        row.attempts = product_import.LEAN_AFTER_ATTEMPTS
+        product_id = row.id
+
+    _drive(run_id)
+
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        log = "\n".join(run.log)
+        row = session.get(ImportProduct, product_id)
+    assert "trying it again with fewer images and documents" in log
+    assert row.status == ImportProductStatus.created.value
+
+
+def test_re_queuing_a_product_gives_it_a_fresh_budget_of_passes(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    run_id = _second_run_of_the_same_collection()
+    with get_session() as session:
+        for row in session.query(ImportProduct).filter(
+            ImportProduct.run_id == run_id
+        ):
+            row.attempts = product_import.MAX_PRODUCT_ATTEMPTS
+
+    product_import.reimport_skipped(run_id, mode=product_import.FORCE_UPDATE)
+
+    with get_session() as session:
+        attempts = {
+            r.attempts
+            for r in session.query(ImportProduct).filter(
+                ImportProduct.run_id == run_id
+            )
+        }
+    assert attempts == {0}
+
+
+def test_the_same_answer_is_not_written_to_the_log_fifty_times(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """One import wrote the same "not filling" line fifty times, at which
+    point the log is no longer a record of what happened — it is a record of
+    what kept not happening, with the products buried in it."""
+    store.set(store.IMPORT_FILTER_KEYS, "brand, width")   # neither is defined
+
+    # Two runs of the same collection, so the second has products to skip
+    # and therefore several passes to repeat itself over.
+    run_id = _second_run_of_the_same_collection()
+
+    with get_session() as session:
+        log = session.get(ImportRun, run_id).log
+    said = [line for line in log if "Not filling" in line]
+    assert len(said) == 1, said
+
+    # But a changed answer is still said: fix the setting and the next pass
+    # tells you it worked, rather than staying quiet because it spoke once.
+    _store_defines(fake_shopify, brand="single_line_text_field")
+    store.set(store.IMPORT_FILTER_KEYS, "brand")
+    product_import.reimport_skipped(run_id, mode=product_import.FORCE_UPDATE)
+    _drive(run_id)
+
+    with get_session() as session:
+        log = session.get(ImportRun, run_id).log
+    assert any("Filling the storefront filter metafields" in line for line in log)
 
 
 # ── Overruling a skip ────────────────────────────────────────────────

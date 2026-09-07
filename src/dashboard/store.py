@@ -68,6 +68,7 @@ IMPORT_RELATED_LIMIT = "import.related_limit"
 IMPORT_FILTER_NAMESPACE = "import.filter_namespace"
 IMPORT_FILTER_KEYS = "import.filter_keys"
 IMPORT_FILTER_COLOURS = "import.filter_colours"
+IMPORT_CATEGORY_TAGS = "import.category_tags"
 
 
 
@@ -649,13 +650,39 @@ IMPORT_SPECS: tuple[Spec, ...] = (
         coerce=_as_str,
     ),
     Spec(
+        key=IMPORT_CATEGORY_TAGS,
+        default=(
+            "Laminate flooring, Vinyl flooring, Engineered hardwood flooring, "
+            "Tile, SPC, WPC, Herringbone, Stairnose, Underlay"
+        ),
+        label="Main category tags",
+        help=(
+            "The store's top-level categories, comma separated. Every "
+            "imported product is tagged with the ones it belongs to, matched "
+            "on whole words against its title, product type, spec values and "
+            "its own tags — never against the description, which compares a "
+            "product to other categories constantly (\"warmer than tile\", "
+            "\"the look of oak\") and would shelve half a catalogue twice. "
+            "These go near the front of the tag list, because tags are what "
+            "this storefront filters on and the list is capped."
+        ),
+        group="Product import",
+        kind="str",
+        coerce=_as_str,
+        maximum=600,
+    ),
+    Spec(
         key=IMPORT_FILTER_NAMESPACE,
-        default="custom",
+        default="filter",
         label="Namespace of the storefront filter metafields",
         help=(
             "Where this store keeps the metafields its collection filters "
-            "are built on. Almost always 'custom'. Shopify's own taxonomy "
-            "attributes live in 'shopify' and are not writable this way."
+            "are built on. This one keeps them in 'filter', separate from "
+            "the 'custom' namespace the import writes its specifications and "
+            "documents into — which is a good separation and the reason the "
+            "namespace is a setting rather than an assumption. Shopify's own "
+            "taxonomy attributes live in 'shopify' and are not writable "
+            "this way."
         ),
         group="Product import",
         kind="str",
@@ -728,6 +755,9 @@ def _schedule_specs() -> tuple[Spec, ...]:
         ("competitor_bestsellers", "Competitor best sellers", 2),
         ("competitor_matches", "Competitor match proposals", 4),
         ("publish_reconcile", "Reconcile published state", 5),
+        # Before the advancer, so a collection this starts gets its first
+        # passes the same night rather than waiting a day for them.
+        ("import_queue", "Start the next queued import", 0),
         ("product_import", "Continue product imports", 1),
         ("advisor_weekly", "Advisor notes", 9),
         ("strategy_weekly", "Strategy checkpoints", 10),
