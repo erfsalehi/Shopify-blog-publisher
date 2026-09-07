@@ -1355,6 +1355,62 @@ class ImportProductStatus(str, enum.Enum):
     failed = "failed"
 
 
+class ImportQueueStatus(str, enum.Enum):
+    queued = "queued"
+    #: A run has been started for it and hasn't finished yet.
+    running = "running"
+    done = "done"
+    #: The run it started failed or was stopped. Kept rather than retried,
+    #: because a supplier's page that broke once usually breaks again and a
+    #: queue that quietly re-runs it forever is a queue that never advances.
+    failed = "failed"
+    #: Taken off the queue by the owner before it started.
+    cancelled = "cancelled"
+
+
+class ImportQueueEntry(Base):
+    """A collection waiting its turn, so a catalogue can be imported unattended.
+
+    The queue exists because importing is slow and attended: a range is
+    minutes of fetching, and the owner was starting them one at a time and
+    watching each finish. A list they can fill in one sitting and leave is a
+    different shape of work entirely.
+
+    **One at a time, and never a new one while the last is unfinished.** Not a
+    rate limit — a correctness rule. Two imports running together compete for
+    the same bounded passes, so both crawl, and the second range's collection
+    and cross-linking would interleave with the first's. The queue starts a
+    collection when nothing else is running, which on a good day is daily and
+    on a bad one is however long the range in front of it takes.
+    """
+
+    __tablename__ = "import_queue"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    #: Hand-orderable, so the owner decides what gets imported first.
+    position: Mapped[int] = mapped_column(Integer, default=0, index=True)
+
+    source_url: Mapped[str] = mapped_column(String(900), nullable=False)
+    #: Required, exactly as on the import form: the brand is the first word
+    #: of every product name, and most suppliers publish it nowhere a
+    #: scraper can read. A queue entry without one would import a whole
+    #: range unnamed, hours after anyone could have noticed.
+    vendor: Mapped[str] = mapped_column(String(200), nullable=False)
+    collection_title: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    status: Mapped[str] = mapped_column(
+        String(20), default=ImportQueueStatus.queued.value, index=True
+    )
+    #: The run this entry started, so the queue links to what it did.
+    run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ImportRun(Base):
     """One "import this collection" request, from URL to finished products.
 

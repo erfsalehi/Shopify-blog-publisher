@@ -755,6 +755,9 @@ def _schedule_specs() -> tuple[Spec, ...]:
         ("competitor_bestsellers", "Competitor best sellers", 2),
         ("competitor_matches", "Competitor match proposals", 4),
         ("publish_reconcile", "Reconcile published state", 5),
+        # Before the advancer, so a collection this starts gets its first
+        # passes the same night rather than waiting a day for them.
+        ("import_queue", "Start the next queued import", 0),
         ("product_import", "Continue product imports", 1),
         ("advisor_weekly", "Advisor notes", 9),
         ("strategy_weekly", "Strategy checkpoints", 10),

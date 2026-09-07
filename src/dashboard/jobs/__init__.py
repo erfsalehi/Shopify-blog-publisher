@@ -27,6 +27,7 @@ from dashboard.jobs import blog_articles as _blog  # noqa: F401,E402
 from dashboard.jobs import dataforseo_keywords as _dfs  # noqa: F401,E402
 from dashboard.jobs import competitor_watch as _competitors  # noqa: F401,E402
 from dashboard.jobs import publish_reconcile as _reconcile  # noqa: F401,E402
+from dashboard.jobs import import_queue_job as _import_queue  # noqa: F401,E402
 from dashboard.jobs import product_import as _product_import  # noqa: F401,E402
 # Last: these read what the others just wrote.
 from dashboard.jobs import alerts_job as _alerts  # noqa: F401,E402

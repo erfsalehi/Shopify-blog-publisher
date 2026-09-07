@@ -7,6 +7,7 @@
   <span class="muted small">manufacturer collection → draft products</span>
 </div>
 
+{% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
 {% if error %}<div class="notice bad-box">{{ error }}</div>{% endif %}
 
 {% if not shopify_ready %}
@@ -153,6 +154,78 @@
     {{ defaults.max_images }} images and {{ defaults.max_docs }} documents per
     product, copy written by <code>{{ defaults.model }}</code>.
   </p>
+</section>
+
+{# Filling a list once and leaving it is a different shape of work from
+   pasting a URL and watching it finish, which is what this was. #}
+<section class="panel">
+  <h2>Import queue</h2>
+  <p class="muted small">
+    One collection per line, as <code>url, brand</code> — or
+    <code>url, brand, collection name</code> if the supplier's name for the
+    range isn't what a customer would search for. The brand is required for
+    the same reason it is on the form above: it is the first word of every
+    product name, and most suppliers publish it nowhere a scraper can read.
+  </p>
+  <form method="post" action="/import/queue">
+    <textarea name="collections" rows="4" style="width:100%"
+              placeholder="https://www.amestile.com/collections/advantage, Ames Tile &amp; Stone
+https://www.amestile.com/collections/anthology, Ames Tile &amp; Stone, Anthology"></textarea>
+    <div class="actions">
+      <label class="muted small">
+        <input type="checkbox" name="dry_run" value="1">
+        Dry run — read everything, create nothing
+      </label>
+      <button type="submit" class="primary">Add to queue</button>
+    </div>
+  </form>
+  <p class="muted small">
+    One is started a day, by the <a href="/jobs">Start the next queued
+    import</a> job — and only when nothing else is importing. Two runs at
+    once would each get half the passes and take twice as long, so a range
+    that needs more than a day holds the queue until it is done. Nothing is
+    retried: a supplier page that broke once usually breaks the same way
+    twice, so a failed entry keeps its reason and waits for you.
+  </p>
+
+  {% if queue %}
+  <table>
+    <thead>
+      <tr><th>Collection</th><th>Brand</th><th>State</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for item in queue %}
+      <tr>
+        <td class="truncate small">
+          <a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">
+            {{ item.collection_title or item.source_url }}
+          </a>
+          {% if item.dry_run %}<span class="pill">dry run</span>{% endif %}
+          {% if item.note %}<div class="small bad">{{ item.note }}</div>{% endif %}
+        </td>
+        <td class="small">{{ item.vendor }}</td>
+        <td class="small">
+          <span class="pill {{ {'done': 'ok', 'running': 'running', 'failed': 'error', 'cancelled': 'warn'}.get(item.status, '') }}">
+            {{ item.status }}
+          </span>
+          {% if item.run_id %}
+          · <a href="/import/{{ item.run_id }}">run</a>
+          {% endif %}
+        </td>
+        <td>
+          {% if item.status == 'queued' %}
+          <form method="post" action="/import/queue/{{ item.id }}/remove">
+            <button type="submit" class="small-btn">Remove</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted small">Nothing queued.</p>
+  {% endif %}
 </section>
 
 {% if shopify_ready %}

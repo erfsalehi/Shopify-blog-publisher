@@ -365,6 +365,59 @@ mistake than wrong on one. The same goes for every field here — an empty
 value is never written, because an empty string is a value and a filter would
 offer it as one.
 
+## The import queue
+
+Importing a range is minutes of fetching, and it was attended: paste a URL,
+watch it finish, paste the next. A supplier with thirty ranges is thirty of
+those. The queue is the list you fill in one sitting and leave.
+
+On the Import page, one collection per line:
+
+```
+https://www.amestile.com/collections/advantage, Ames Tile & Stone
+https://www.amestile.com/collections/anthology, Ames Tile & Stone, Anthology
+```
+
+`url, brand` — or `url, brand, collection name` when the supplier's name for
+a range isn't what a customer would search for. Tabs and `|` work too, so a
+paste from a spreadsheet lands, and a brand can contain a comma. The **brand
+is required**, for the same reason it is on the form: it is the first word of
+every product name and most suppliers publish it nowhere a scraper can read.
+A queue entry without one would import a whole range unnamed, hours after
+anyone could have noticed.
+
+A line that can't be read is reported and **the rest are still added**.
+Losing twenty-nine good lines to a typo in the thirtieth is what stops people
+pasting lists.
+
+### One at a time, and what that really means
+
+The **Start the next queued import** job runs nightly and takes one
+collection — *and only when nothing else is importing*. That second clause is
+not politeness, it is correctness: two runs going at once compete for the
+same bounded passes, so both crawl, and the second range's collection and
+cross-linking stages interleave with the first's.
+
+So the cadence is **one a day for a range that fits in a day, and "when the
+one in front finishes" for one that doesn't**. Be clear-eyed about which you
+have. On this Vercel deployment a nightly tick advances an import by roughly
+one product (see [How a run makes progress](#how-a-run-makes-progress)), so a
+twelve-product range left entirely to the crons takes about a fortnight. Open
+its run page for a few minutes and it finishes there and then; the queue is
+for arriving at that page with the work already started, not for making a
+60-second function faster.
+
+The job is scheduled ahead of *Continue product imports*, so whatever it
+starts gets its first passes the same night rather than waiting a day.
+
+### Nothing is retried
+
+A failed entry keeps its reason and its run, and waits for you. A queue that
+re-runs a failed entry is a queue that never advances past it — a supplier
+page that broke once usually breaks the same way twice. Removing an entry is
+possible until it starts; after that, stop it on its run page, and what it
+already created stays created.
+
 ## When a product is too big for one pass
 
 A pass is bounded, but one product is not: `_products` always does at least
