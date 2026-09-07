@@ -5,7 +5,7 @@ rather than beside it. Phase 0 of [PLAN.md](../PLAN.md) is done: the
 foundation, the job framework, and the Search Console daily sync.
 
 ```bash
-cd Shopify-blog-publisher        # both commands run from the project root
+cd online-business-control-center   # both commands run from the project root
 python -m venv .venv && . .venv/bin/activate    # Windows: .\.venv\Scripts\Activate.ps1
 pip install -e ".[dashboard]"
 python -m dashboard
