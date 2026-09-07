@@ -68,6 +68,7 @@ IMPORT_RELATED_LIMIT = "import.related_limit"
 IMPORT_FILTER_NAMESPACE = "import.filter_namespace"
 IMPORT_FILTER_KEYS = "import.filter_keys"
 IMPORT_FILTER_COLOURS = "import.filter_colours"
+IMPORT_CATEGORY_TAGS = "import.category_tags"
 
 
 
@@ -647,6 +648,28 @@ IMPORT_SPECS: tuple[Spec, ...] = (
         group="Product import",
         kind="str",
         coerce=_as_str,
+    ),
+    Spec(
+        key=IMPORT_CATEGORY_TAGS,
+        default=(
+            "Laminate flooring, Vinyl flooring, Engineered hardwood flooring, "
+            "Tile, SPC, WPC, Herringbone, Stairnose, Underlay"
+        ),
+        label="Main category tags",
+        help=(
+            "The store's top-level categories, comma separated. Every "
+            "imported product is tagged with the ones it belongs to, matched "
+            "on whole words against its title, product type, spec values and "
+            "its own tags — never against the description, which compares a "
+            "product to other categories constantly (\"warmer than tile\", "
+            "\"the look of oak\") and would shelve half a catalogue twice. "
+            "These go near the front of the tag list, because tags are what "
+            "this storefront filters on and the list is capped."
+        ),
+        group="Product import",
+        kind="str",
+        coerce=_as_str,
+        maximum=600,
     ),
     Spec(
         key=IMPORT_FILTER_NAMESPACE,

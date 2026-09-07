@@ -65,6 +65,19 @@ from dashboard.models import ImportProduct, ImportProductStatus, ImportRun, Impo
 
 log = logging.getLogger(__name__)
 
+#: Passes that may begin work on one product before it is given up on, and
+#: the attempt after which it is retried with less to carry.
+#:
+#: A pass is bounded, but one product is not: `_products` always does at
+#: least one, however long it takes, because a pass that could do nothing
+#: would never finish anything. On a serverless function killed at 60
+#: seconds that has a failure mode — a product whose scrape and uploads
+#: take longer than the ceiling is never written, and the next pass picks
+#: the same one and dies at the same point. One import spent fourteen hours
+#: this way, walking on the spot and writing a log line each time round.
+MAX_PRODUCT_ATTEMPTS = 6
+LEAN_AFTER_ATTEMPTS = 2
+
 #: Wall clock one `advance()` may spend before returning, whatever stage it's
 #: in. Under Vercel's 60s ceiling with room to finish the product in hand and
 #: write it; generous locally, where the only cost of a long pass is a slower
@@ -534,11 +547,45 @@ def _one_product(
     on. One supplier page returning a 500 should not decide the fate of the
     other thirty-nine.
     """
+    # Counted before any work, in its own transaction, so it survives the
+    # pass being killed mid-product — which is the whole point of counting.
     with get_session() as session:
         row = session.get(ImportProduct, product_id)
+        row.attempts = (row.attempts or 0) + 1
+        attempt = row.attempts
         source_url = row.source_url
         seed_data = row.extracted
         force_mode = row.force_mode
+        label = row.title or row.source_url
+
+    if attempt > MAX_PRODUCT_ATTEMPTS:
+        _finish_product(
+            product_id, ImportProductStatus.failed,
+            error=(
+                f"Gave up after {MAX_PRODUCT_ATTEMPTS} attempts. Every one "
+                "of them ran out of time before the product was written — "
+                "usually too many images or documents for a single pass to "
+                "finish. Lower 'images per product' or 'documents per "
+                "product' in Settings and import it again."
+            ),
+        )
+        return
+
+    if attempt > LEAN_AFTER_ATTEMPTS:
+        # The same product, with less to carry. Nearly always what a pass
+        # runs out of time on is the photographs and the PDFs, and a product
+        # in the store with three of its six images beats a product that
+        # never lands at all.
+        options = {
+            **options,
+            "max_images": min(int(options.get("max_images", 8)), 3),
+            "max_docs": min(int(options.get("max_docs", 4)), 1),
+        }
+        _note_once(
+            run_id, f"lean:{product_id}",
+            f"{label} has run out of time {attempt - 1} times — trying it "
+            "again with fewer images and documents.",
+        )
 
     try:
         seed = _seed_from(seed_data, source_url)
@@ -776,8 +823,36 @@ def _filter_targets(
     return targets
 
 
+def _note_once(run_id: int, slot: str, message: str) -> None:
+    """Note this only if it isn't what was noted last time under `slot`.
+
+    A run is many passes and some checks belong to the pass, not the run —
+    they cost a cached lookup and their answer is nearly always the same one
+    as last time. Noting them per pass buries the products: one import wrote
+    the same "not filling" line fifty times, at which point the log is no
+    longer a record of what happened, it is a record of what kept not
+    happening.
+
+    Keyed by slot and compared by content, rather than a "said it already"
+    flag, so a *changed* answer is still said — fix the setting mid-run and
+    the next pass tells you it worked.
+    """
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is None:
+            return
+        options = run.options
+        said = options.get("said") or {}
+        if said.get(slot) == message:
+            return
+        said[slot] = message
+        options["said"] = said
+        run.options_json = json.dumps(options)
+        run.note(message[:300])
+
+
 def _report_filter_metafields(run_id: int, client) -> None:
-    """Say once what this run can fill, and what it can't and why.
+    """Say what this run can fill, and what it can't and why.
 
     These definitions are never created here, and that is the point. A filter
     definition belongs to whoever built the filter: they chose its type and
@@ -813,8 +888,8 @@ def _report_filter_metafields(run_id: int, client) -> None:
             fillable.append(f"{space}.{key}")
 
     if fillable:
-        _note(
-            run_id,
+        _note_once(
+            run_id, "filters:filling",
             "Filling the storefront filter metafields "
             + ", ".join(fillable)
             + (f". Colours matched against: {', '.join(colours)}."
@@ -828,23 +903,23 @@ def _report_filter_metafields(run_id: int, client) -> None:
         catalogue = ", ".join(
             sorted(f"{d['namespace']}.{d['key']}" for d in everything)
         )
-        _note(
-            run_id,
+        _note_once(
+            run_id, "filters:missing",
             f"Not filling {', '.join(missing)} — this store has no such "
             "metafield defined. Define the filter in Shopify first, or point "
             "Settings at the right key. This store defines: "
             + (catalogue or "no product metafields at all"),
         )
     if unfilterable:
-        _note(
-            run_id,
+        _note_once(
+            run_id, "filters:unfilterable",
             f"Not filling {', '.join(unfilterable)} — a Shopify filter can "
             f"only be built on {' or '.join(FILTERABLE_TYPES)}, so filling "
             "these would give you a full metafield and an empty sidebar.",
         )
     if unrecognised:
-        _note(
-            run_id,
+        _note_once(
+            run_id, "filters:unrecognised",
             f"Ignoring {', '.join(unrecognised)} — nothing in this import "
             "corresponds to that. Recognised: "
             f"{', '.join(f for f, _ in FILTER_FIELDS)}.",
@@ -1135,6 +1210,13 @@ def _create_in_shopify(
             vendor=vendor or source.vendor,
             collection_title=collection_title,
             source_tag=options.get("source_tag"),
+            categories=product_copy.derive_categories(
+                _category_tags(),
+                title=f"{source.title} {copy.title}",
+                product_type=copy.product_type or source.product_type or "",
+                specs=source.specs,
+                tags=list(copy.tags),
+            ),
         )
         + list(copy.tags)
     )
@@ -1360,9 +1442,16 @@ def _attach_images(client, product_gid: str, source: SourceProduct, copy) -> int
     return saved
 
 
+def _category_tags() -> list[str]:
+    """The store's main categories, from Settings."""
+    raw = str(store.get(store.IMPORT_CATEGORY_TAGS) or "")
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
 def _required_tags(
     *, product_type: str | None, vendor: str | None,
     collection_title: str, source_tag: str | None,
+    categories: list[str] | None = None,
 ) -> list[str]:
     """The tags the store needs, before the ones the model thought of.
 
@@ -1375,8 +1464,15 @@ def _required_tags(
     Brand and collection together are what make a smart collection possible
     — a page defined as "these two tags" needs both present on every product
     in the range, every time, not usually.
+
+    The main categories are here for a blunter reason: on this store the
+    tags *are* the filters, so a product missing its category tag is a
+    product missing from the category. They sit ahead of the source tag
+    because "imported" is for us and "Vinyl flooring" is for a customer.
     """
-    wanted = [collection_title, vendor, product_type, source_tag]
+    wanted = [collection_title, vendor, product_type]
+    wanted += list(categories or [])
+    wanted.append(source_tag)
     return [str(t).strip() for t in wanted if t and str(t).strip()]
 
 
@@ -2037,6 +2133,9 @@ def reimport_skipped(
             row.status = ImportProductStatus.pending.value
             row.force_mode = mode
             row.error = None
+            # A fresh budget of passes. This is a new decision about the
+            # product, not a continuation of the one that gave up on it.
+            row.attempts = 0
             # Cleared so the second attempt is a real attempt: the create
             # re-asks Shopify what is on the handle, and the linking stage
             # rewrites this product's description once it has one.

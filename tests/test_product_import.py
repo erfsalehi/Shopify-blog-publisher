@@ -1280,6 +1280,182 @@ def test_a_store_that_cannot_be_reached_says_so_rather_than_500ing(
     assert "Shopify not configured" in response.json()["error"]
 
 
+# ── The main category tags ───────────────────────────────────────────
+#
+# On this store the tags *are* the filters, so a product missing its
+# category tag is a product missing from the category.
+
+
+def test_a_product_is_tagged_with_the_categories_it_belongs_to(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    store.set(store.IMPORT_CATEGORY_TAGS, "Tile, Vinyl flooring, Underlay")
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+
+    for node in fake_shopify.products.values():
+        assert "Tile" in node["tags"]          # a ceramic wall tile
+        assert "Vinyl flooring" not in node["tags"]
+        assert "Underlay" not in node["tags"]
+
+
+def test_the_categories_go_in_ahead_of_the_models_own_tags(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """`clean_tags` caps a product, and the model routinely proposes fifteen.
+    A category that lands after them is a category that gets dropped."""
+    store.set(store.IMPORT_CATEGORY_TAGS, "Tile")
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+
+    tags = next(iter(fake_shopify.products.values()))["tags"]
+    assert tags.index("Tile") < len(tags)
+    # Ahead of "imported", which is for us rather than for a customer.
+    assert tags.index("Tile") < tags.index("imported")
+
+
+def test_a_category_is_read_off_what_the_maker_asserts_not_off_the_prose():
+    """A description compares a product to other categories constantly.
+    "Warmer underfoot than tile" is not a tile."""
+    categories = ["Tile", "Laminate flooring"]
+    assert product_copy.derive_categories(
+        categories, title="Aspen Laminate Plank", product_type="Laminate Flooring",
+    ) == ["Laminate flooring"]
+    # The same product with the word only in its description stays one thing.
+    assert product_copy.derive_categories(
+        categories, title="Aspen Laminate Plank", product_type="Laminate Flooring",
+        specs={"Feel": "Warmer underfoot than tile"},
+    ) == ["Tile", "Laminate flooring"]
+
+
+def test_a_category_matches_whole_words_only():
+    assert product_copy.derive_categories(["Tile"], title="Textile Wall Panel") == []
+    assert product_copy.derive_categories(["Tile"], title="Porcelain Tiles") == ["Tile"]
+
+
+def test_a_category_nobody_wrote_aliases_for_still_works():
+    """The list is a setting, so it cannot only contain what this module
+    happens to know about."""
+    assert product_copy.derive_categories(
+        ["Bullnose trim"], title="Oak Bullnose Trim 8ft",
+    ) == ["Bullnose trim"]
+
+
+# ── Not walking on the spot ──────────────────────────────────────────
+
+
+def test_a_product_that_never_finishes_is_given_up_on_with_a_reason(
+    dashboard_db, fake_site, fake_shopify, no_llm, monkeypatch
+):
+    """A pass always does at least one product, however long it takes, and a
+    serverless function is killed at 60 seconds — so a product too big to
+    finish leaves no trace and the next pass picks the same one. One import
+    spent fourteen hours this way."""
+    killed = []
+
+    def die(*args, **kwargs):
+        killed.append(1)
+        raise SystemExit("function timed out")
+
+    monkeypatch.setattr(product_import, "fetch_product", die)
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    product_import.advance(run_id)  # discover
+
+    for _ in range(product_import.MAX_PRODUCT_ATTEMPTS + 2):
+        try:
+            product_import.advance(run_id)
+        except SystemExit:
+            pass
+
+    with get_session() as session:
+        rows = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .all()
+        )
+    given_up = [r for r in rows if r.status == ImportProductStatus.failed.value]
+    assert given_up, "a product retried forever is the bug"
+    assert "Gave up after" in given_up[0].error
+    assert "images or documents" in given_up[0].error
+
+
+def test_a_product_that_keeps_running_out_of_time_is_retried_with_less(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """What a pass runs out of time on is nearly always the photographs and
+    the PDFs. A product in the store with three of its six images beats one
+    that never lands."""
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    product_import.advance(run_id)
+    with get_session() as session:
+        row = (
+            session.query(ImportProduct)
+            .filter(ImportProduct.run_id == run_id)
+            .order_by(ImportProduct.position)
+            .first()
+        )
+        row.attempts = product_import.LEAN_AFTER_ATTEMPTS
+        product_id = row.id
+
+    _drive(run_id)
+
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        log = "\n".join(run.log)
+        row = session.get(ImportProduct, product_id)
+    assert "trying it again with fewer images and documents" in log
+    assert row.status == ImportProductStatus.created.value
+
+
+def test_re_queuing_a_product_gives_it_a_fresh_budget_of_passes(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    run_id = _second_run_of_the_same_collection()
+    with get_session() as session:
+        for row in session.query(ImportProduct).filter(
+            ImportProduct.run_id == run_id
+        ):
+            row.attempts = product_import.MAX_PRODUCT_ATTEMPTS
+
+    product_import.reimport_skipped(run_id, mode=product_import.FORCE_UPDATE)
+
+    with get_session() as session:
+        attempts = {
+            r.attempts
+            for r in session.query(ImportProduct).filter(
+                ImportProduct.run_id == run_id
+            )
+        }
+    assert attempts == {0}
+
+
+def test_the_same_answer_is_not_written_to_the_log_fifty_times(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """One import wrote the same "not filling" line fifty times, at which
+    point the log is no longer a record of what happened — it is a record of
+    what kept not happening, with the products buried in it."""
+    store.set(store.IMPORT_FILTER_KEYS, "brand, width")   # neither is defined
+
+    # Two runs of the same collection, so the second has products to skip
+    # and therefore several passes to repeat itself over.
+    run_id = _second_run_of_the_same_collection()
+
+    with get_session() as session:
+        log = session.get(ImportRun, run_id).log
+    said = [line for line in log if "Not filling" in line]
+    assert len(said) == 1, said
+
+    # But a changed answer is still said: fix the setting and the next pass
+    # tells you it worked, rather than staying quiet because it spoke once.
+    _store_defines(fake_shopify, brand="single_line_text_field")
+    store.set(store.IMPORT_FILTER_KEYS, "brand")
+    product_import.reimport_skipped(run_id, mode=product_import.FORCE_UPDATE)
+    _drive(run_id)
+
+    with get_session() as session:
+        log = session.get(ImportRun, run_id).log
+    assert any("Filling the storefront filter metafields" in line for line in log)
+
+
 # ── Overruling a skip ────────────────────────────────────────────────
 #
 # The skip is decided on the handle, so it answers "is there a product called

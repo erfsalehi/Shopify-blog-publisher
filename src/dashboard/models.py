@@ -1477,6 +1477,15 @@ class ImportProduct(Base):
     #: it, so a resumed linking stage doesn't rewrite what it already did.
     linked: Mapped[bool] = mapped_column(Boolean, default=False)
 
+    #: How many passes have begun work on this product. Written before the
+    #: work starts, in its own transaction, because the case it exists for
+    #: is the pass that never finishes: a serverless function is killed at
+    #: 60 seconds, and a product whose scrape and uploads take longer than
+    #: that leaves no trace at all — the row is written at the end. Without
+    #: this the next pass picks the same product, dies at the same point,
+    #: and the import walks on the spot for hours.
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
     #: The owner's override of a skip, and how they want it resolved. Unset
     #: for every product the importer handles on its own.
     #:

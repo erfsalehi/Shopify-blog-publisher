@@ -352,6 +352,29 @@ mistake than wrong on one. The same goes for every field here — an empty
 value is never written, because an empty string is a value and a filter would
 offer it as one.
 
+## When a product is too big for one pass
+
+A pass is bounded, but one product is not: `_products` always does at least
+one, however long it takes, because a pass that could do nothing would never
+finish anything. On Vercel, where the function is killed at 60 seconds, that
+has a failure mode — a product whose scrape and uploads take longer than the
+ceiling is never written, leaves no trace, and the next pass picks the same
+one and dies at the same point.
+
+One import spent fourteen hours this way: passes 69 seconds apart, a log line
+each time round, and no product between them.
+
+So each pass counts its attempt on the row **before** starting the work, in
+its own transaction, which is the only way the count survives the pass being
+killed. After two attempts the product is retried with fewer images and
+documents — what a pass runs out of time on is nearly always the photographs
+and the PDFs, and a product in the store with three of its six images beats
+one that never lands. After six it is given up on and marked failed, naming
+the two settings that fix it.
+
+Re-queuing a product from the run page gives it a fresh budget: that is a new
+decision about the product, not a continuation of the one that gave up.
+
 ## Live on creation
 
 Two switches, and a product needs both to be seen:
@@ -491,11 +514,38 @@ Collection", which is a mouthful in a heading and unusable as a filter.
 
 ## Tags
 
-Three tags are written by the app rather than left to the model, and they go
-**first** in the list: the collection name, the brand (vendor) and the
-flooring type, plus the `imported` source tag. Ordering is the point —
-`clean_tags` caps a product at 20 tags and the model routinely proposes
-fifteen, so tags appended after the model's would be the first ones dropped.
+Tags are written by the app rather than left to the model, and they go
+**first** in the list: the collection name, the brand (vendor), the flooring
+type, then the **main categories**, then the `imported` source tag. Ordering
+is the point — `clean_tags` caps a product at 20 tags and the model routinely
+proposes fifteen, so tags appended after the model's would be the first ones
+dropped.
+
+### The main categories
+
+On this store the **tags are the filters**, so a product missing its category
+tag is a product missing from the category. Every import writes the ones it
+belongs to:
+
+> Laminate flooring · Vinyl flooring · Engineered hardwood flooring · Tile ·
+> SPC · WPC · Herringbone · Stairnose · Underlay
+
+The list is a setting, so it is the store's and not this file's. A category
+nobody has written aliases for still works — its own name becomes the term.
+
+**Matched on whole words, against what the maker asserts**: the title, the
+product type, the spec values, and the tags written for the product. *Not* the
+description — prose compares a product to other categories constantly ("warmer
+underfoot than tile", "the look of oak"), and a substring search over it would
+shelve half a catalogue twice. `Textile` is not `Tile`.
+
+The aliases are deliberately narrow. `chevron` is not herringbone — different
+cut, different price — and `bullnose` is not a stairnose. A category tag is a
+shelf, and a product on a shelf it doesn't belong on is worse for a filter
+than a product on none.
+
+They sit ahead of `imported` because that one is for us and "Vinyl flooring"
+is for a customer.
 
 That guarantee is what makes a Shopify smart collection defined as *brand +
 collection* work: it needs both tags on every product in the range every

@@ -588,6 +588,101 @@ def derive_colour(variant: str | None, allowed: list[str] | None = None) -> str:
     return ""
 
 
+#: The store's main categories, and the words in a product that mean it is
+#: one. Keyed by the category exactly as it should appear as a tag.
+#:
+#: Read off the maker's own assertions — the title, the product type, the
+#: spec table — and never off the description, which is prose and says
+#: "warmer than tile" about laminate and "the look of hardwood" about vinyl.
+#: A category tag is a shelf, and a product on two shelves it doesn't belong
+#: on is worse for a filter than one on none.
+#:
+#: Aliases are deliberately narrow. `chevron` is not herringbone (different
+#: cut, different price) and `bullnose` is not a stairnose (different
+#: profile, different job), so neither is here.
+CATEGORY_ALIASES: dict[str, tuple[str, ...]] = {
+    "laminate flooring": ("laminate",),
+    "vinyl flooring": (
+        "vinyl", "lvp", "lvt", "luxury vinyl", "rigid core", "click vinyl",
+    ),
+    "engineered hardwood flooring": (
+        "engineered hardwood", "engineered wood", "engineered floor",
+        "engineered plank",
+    ),
+    "hardwood flooring": ("hardwood", "solid wood floor"),
+    "tile": (
+        "tile", "porcelain", "ceramic", "mosaic", "quarry tile",
+    ),
+    "spc": ("spc", "stone plastic composite", "stone polymer composite"),
+    "wpc": ("wpc", "wood plastic composite", "wood polymer composite"),
+    "herringbone": ("herringbone",),
+    "stairnose": ("stairnose", "stair nose", "stair-nose", "stair nosing"),
+    "underlay": ("underlay", "underlayment", "underpad"),
+    "carpet": ("carpet", "broadloom"),
+}
+
+
+def _category_terms(category: str) -> tuple[str, ...]:
+    """What to look for when deciding a product is in this category.
+
+    A category nobody has written aliases for still works: its own name is
+    the term. That is what keeps the list of categories a setting rather
+    than something only this module can change.
+    """
+    key = category.strip().lower()
+    aliases = CATEGORY_ALIASES.get(key)
+    if aliases:
+        return aliases
+    # "Engineered Hardwood Flooring" → look for that phrase, and for the
+    # phrase without the trailing "flooring", which is how a maker writes it.
+    trimmed = re.sub(r"\s+(flooring|floors?|tiles?)$", "", key).strip()
+    return (key, trimmed) if trimmed and trimmed != key else (key,)
+
+
+def derive_categories(
+    categories: list[str] | None,
+    *,
+    title: str = "",
+    product_type: str = "",
+    specs: dict | None = None,
+    tags: list[str] | None = None,
+) -> list[str]:
+    """Which of the store's main categories this product belongs to.
+
+    Matched on whole words against what the maker and the copy assert about
+    the item — its title, its type, its spec values and the tags written for
+    it — and not against the description. Prose compares products to other
+    categories constantly ("warmer underfoot than tile", "the look of oak"),
+    and a substring search over it would shelve half a catalogue twice.
+
+    Returns them in the order the setting lists them, so a product that is
+    both vinyl and SPC is tagged in a stable order rather than in whatever
+    order the words happened to appear.
+    """
+    wanted = [c.strip() for c in (categories or []) if c and c.strip()]
+    if not wanted:
+        return []
+
+    haystack = " ".join(
+        [str(title or ""), str(product_type or "")]
+        + [str(v) for v in (specs or {}).values()]
+        + [str(t) for t in (tags or [])]
+    ).lower()
+    if not haystack.strip():
+        return []
+
+    found = []
+    for category in wanted:
+        for term in _category_terms(category):
+            # Whole words, so "tile" does not match "tiles" — it does, via
+            # the \b at a plural boundary — but does not match "textile",
+            # which is the failure worth preventing.
+            if re.search(rf"\b{re.escape(term)}s?\b", haystack):
+                found.append(category)
+                break
+    return found
+
+
 def derive_variant(
     source_title: str, *, collection: str | None = None, size: str | None = None
 ) -> str:
