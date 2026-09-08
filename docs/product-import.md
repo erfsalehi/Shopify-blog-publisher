@@ -314,6 +314,24 @@ Five are filled, from what the import already read:
 | Colour | The maker's colour name mapped to the store's own filter vocabulary — Chalk is white, Silver is grey. |
 | Thickness | The spec table's thickness. Never the title: a title's only number is usually the size, and `12x24` read as a thickness is a catalogue of 12 mm tiles that aren't. |
 
+**A re-import backfills a range you already carry.** The values are written
+when a product is created — and a product the import *skips* because it is
+already in the store used to get none of them, because the skip returns
+before a single metafield is written. A run that reported "10 created, 15
+already existed" filled fifteen products with nothing, which is what "the
+metafields are still empty" looked like from the admin.
+
+They are now written for the skipped ones too, in the cross-linking pass:
+the pass that already touches every product in the range and already holds
+the copy this run generated for each of them. Only the skipped ones — a
+product this run created was written at create time, and doing it twice
+would cost a mutation per product out of the same bounded pass that has to
+get through the whole range.
+
+So: **to fill these on products already in your store, import the collection
+again.** Nothing is created, everything is skipped, and every product comes
+out of it with its filter fields.
+
 **These are filled and never created.** A filter definition belongs to
 whoever built the filter — they chose its type and gave it the storefront
 access a filter needs — and an import that invented a lookalike beside it
@@ -379,7 +397,11 @@ https://www.amestile.com/collections/anthology, Ames Tile & Stone, Anthology
 ```
 
 `url, brand` — or `url, brand, collection name` when the supplier's name for
-a range isn't what a customer would search for. Tabs and `|` work too, so a
+a range isn't what a customer would search for, or
+`url, brand, collection name, product type` to name the kind of thing it is.
+The type matters most here of all: a queued import runs overnight with nobody
+watching, so a range whose type the model happens not to answer reaches the
+shelf unnamed and stays that way until someone looks. Tabs and `|` work too, so a
 paste from a spreadsheet lands, and a brand can contain a comma. The **brand
 is required**, for the same reason it is on the form: it is the first word of
 every product name and most suppliers publish it nowhere a scraper can read.
@@ -546,6 +568,20 @@ routinely puts the size in `options` and nowhere else — no spec row, nothing
 in the title — and a size never found is a product named without one and a
 Width filter with nothing to offer. Options are read last: an option is a
 list of what the *range* offers, where a spec is a statement about this item.
+
+**The product type is asked once, on the form.** It is in every product's
+name — "Brand Collection **Type** Size - Colour" — and it is what the
+storefront's type filter reads, and the model does not answer it reliably:
+it named the type for four products of a thirteen-product range and nothing
+for the other nine, so nine reached the shelf as *"Ames Tile & Stone Arenosa
+2"x18" - Total White Matte"*, which does not say what the thing is.
+
+A range is one kind of thing even when it is several sizes, so this is a
+question worth asking once rather than thirteen times. Given on the form (or
+as the fourth field of a queued line), it wins over anything the model says
+and is written to Shopify's own product-type field as well. Left blank, the
+old behaviour stands: the first product in the range that answers settles it
+for the ones that don't.
 
 **When the source names no colour, the source's own title is used instead.**
 The colour is the only part that separates one item in a range from the

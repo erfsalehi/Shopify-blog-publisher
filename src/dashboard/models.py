@@ -1397,6 +1397,11 @@ class ImportQueueEntry(Base):
     #: range unnamed, hours after anyone could have noticed.
     vendor: Mapped[str] = mapped_column(String(200), nullable=False)
     collection_title: Mapped[str | None] = mapped_column(String(400), nullable=True)
+    #: Same field as on the import form, and the same reason: a queued
+    #: import runs overnight with nobody watching, so a range whose type the
+    #: model happens not to answer would reach the shelf unnamed and stay
+    #: that way until someone noticed.
+    product_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
     dry_run: Mapped[bool] = mapped_column(Boolean, default=False)
 
     status: Mapped[str] = mapped_column(
@@ -1444,6 +1449,19 @@ class ImportRun(Base):
     collection_handle: Mapped[str | None] = mapped_column(String(300), nullable=True)
     #: Vendor written onto every product in the run. Usually the manufacturer.
     vendor: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    #: The kind of thing this range is — "Ceramic Tile", "Porcelain Tile",
+    #: "Luxury Vinyl Plank" — given by the owner and authoritative over
+    #: anything the model says.
+    #:
+    #: It is in the name of every product ("Brand Collection Type Size -
+    #: Colour") and it is what the storefront's type filter reads, and the
+    #: model does not answer it reliably: it named the type for four
+    #: products of thirteen in one range and nothing for the other nine, so
+    #: nine products went to the shelf as "Ames Tile & Stone Arenosa 2\"x18\"
+    #: - Total White Matte", which does not say what the thing is. Asked once
+    #: per import, it is right every time — a range is one kind of thing even
+    #: when it is several sizes.
+    product_type: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     #: Options captured at submit time so a resumed run behaves like the run
     #: that was started, not like the settings page as it is now.

@@ -47,9 +47,19 @@ class QueueError(RuntimeError):
 def parse_lines(text: str) -> tuple[list[dict], list[str]]:
     """Read pasted lines into entries, and say which lines couldn't be.
 
-    One collection per line: `url, brand` or `url, brand, collection title`.
-    Both are returned rather than raising on the first bad line, because a
-    list of thirty pasted at once should add the twenty-nine that are fine
+    One collection per line, two required fields and two optional ones:
+
+        url, brand
+        url, brand, collection title
+        url, brand, collection title, product type
+
+    The last is what a product's name calls the thing — "Ceramic Tile" — and
+    is worth giving for a queued import above all others: it runs overnight
+    with nobody watching, and a range whose type the model happens not to
+    answer reaches the shelf unnamed and stays that way until someone looks.
+
+    Both lists are returned rather than raising on the first bad line,
+    because thirty pasted at once should add the twenty-nine that are fine
     and tell you about the one that isn't — losing the lot to a typo in the
     middle is the behaviour that makes people stop pasting lists.
     """
@@ -67,6 +77,7 @@ def parse_lines(text: str) -> tuple[list[dict], list[str]]:
         parts = [p.strip() for p in line.split(separator)]
         url, vendor = parts[0], (parts[1] if len(parts) > 1 else "")
         title = parts[2] if len(parts) > 2 else ""
+        product_type = parts[3] if len(parts) > 3 else ""
 
         if not url.lower().startswith(("http://", "https://")):
             problems.append(f"{url} — not a URL")
@@ -77,9 +88,12 @@ def parse_lines(text: str) -> tuple[list[dict], list[str]]:
             # rather than discovered hours later in an unnamed range.
             problems.append(f"{url} — no brand given")
             continue
-        entries.append(
-            {"source_url": url, "vendor": vendor, "collection_title": title or None}
-        )
+        entries.append({
+            "source_url": url,
+            "vendor": vendor,
+            "collection_title": title or None,
+            "product_type": product_type or None,
+        })
     return entries, problems
 
 
@@ -190,6 +204,7 @@ def start_next() -> dict | None:
         entry_id = entry.id
         source_url, vendor = entry.source_url, entry.vendor
         title, dry_run = entry.collection_title, entry.dry_run
+        product_type = entry.product_type
 
     try:
         run_id = product_import.start_run(
@@ -197,6 +212,7 @@ def start_next() -> dict | None:
             dry_run=dry_run,
             collection_title=title,
             vendor=vendor,
+            product_type=product_type,
             make_collection=True,
             link_products=True,
             collection_mode="new",
@@ -249,6 +265,7 @@ def entries(limit: int = 100) -> list[dict]:
                     "source_url": r.source_url,
                     "vendor": r.vendor,
                     "collection_title": r.collection_title,
+                    "product_type": r.product_type,
                     "dry_run": r.dry_run,
                     "status": r.status,
                     "run_id": r.run_id,
