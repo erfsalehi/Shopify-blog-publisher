@@ -262,6 +262,10 @@ class FakeShopify:
                 "description": kwargs.get("seo_description"),
             },
             "vendor": kwargs.get("vendor"),
+            # Sent by the real `create_product` and not recorded here, so
+            # nothing could assert on it — including the field a storefront's
+            # own type filter reads.
+            "productType": kwargs.get("product_type"),
         }
         self.products[handle] = node
         return node
@@ -1526,6 +1530,120 @@ def test_the_same_answer_is_not_written_to_the_log_fifty_times(
     with get_session() as session:
         log = session.get(ImportRun, run_id).log
     assert any("Filling the storefront filter metafields" in line for line in log)
+
+
+# ── The type in the name ─────────────────────────────────────────────
+
+
+def test_the_type_the_owner_gave_is_the_type_every_product_carries(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """The model named the type for four products of thirteen in one range
+    and nothing for the other nine, so nine went to the shelf as
+    "Ames Tile & Stone Arenosa 2\"x18\" - Total White Matte", which does not
+    say what the thing is. A range is one kind of thing."""
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage",
+        vendor="Ames Tile & Stone",
+        product_type="Ceramic Tile",
+    ))
+
+    titles = {node["title"] for node in fake_shopify.products.values()}
+    assert len(titles) == 12
+    assert all("Ceramic Tile" in title for title in titles)
+    # And it is what Shopify's own product type field says, too.
+    assert {n["productType"] for n in fake_shopify.products.values()} == {"Ceramic Tile"}
+
+
+def test_the_owners_type_wins_over_the_models(
+    dashboard_db, fake_site, fake_shopify, monkeypatch
+):
+    """Asked once and answered once beats asked per product and answered
+    sometimes."""
+    monkeypatch.setattr(
+        product_copy, "write_copy",
+        lambda source, **kwargs: (
+            product_copy.tidy(
+                product_copy.fallback_copy(source, vendor=kwargs.get("vendor")), source
+            ),
+            "test-stub",
+        ),
+    )
+    _drive(product_import.start_run(
+        "https://maker.test/collections/3dbars", product_type="Ceramic Tile",
+    ))
+    titles = {node["title"] for node in fake_shopify.products.values()}
+    assert all("Ceramic Tile" in t for t in titles)
+    assert not any("Wall Tile" in t for t in titles)
+
+
+def test_without_one_the_range_still_settles_on_a_single_type(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """The old path, unchanged: the first product that answers settles it
+    for the ones that don't."""
+    _drive(product_import.start_run("https://maker.test/collections/3dbars"))
+    titles = {node["title"] for node in fake_shopify.products.values()}
+    assert all("Wall Tile" in title for title in titles)
+
+
+# ── Backfilling a range that was already in the store ────────────────
+
+
+def test_a_re_import_fills_the_filter_fields_of_products_it_skipped(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """The whole of "the metafields are still empty".
+
+    The skip returns before a single metafield is written, so a re-import of
+    a range you already carry — which creates nothing and skips everything —
+    filled nothing. One real run reported "10 created, 15 already existed"
+    and the fifteen got none of it.
+    """
+    _store_defines(
+        fake_shopify,
+        brand="single_line_text_field", width="single_line_text_field",
+        colour="single_line_text_field",
+    )
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone",
+    ))
+
+    # Second run: everything is already in the store, so nothing is created.
+    fake_shopify.metafields.clear()
+    run_id = product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone",
+    )
+    _drive(run_id)
+
+    status = product_import.run_status(run_id)
+    assert status["counts"]["created"] == 0
+    assert status["counts"]["skipped"] == 12
+
+    # And every one of them now carries its filter fields anyway.
+    filters = [m for m in fake_shopify.metafields if m["namespace"] == "filter"]
+    assert {m["key"] for m in filters} == {"brand", "width", "colour"}
+    brands = [m for m in filters if m["key"] == "brand"]
+    assert len(brands) == 12
+    assert {m["value"] for m in brands} == {"Ames Tile & Stone"}
+
+
+def test_a_product_the_run_created_is_not_written_twice(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """It was written at create time. Doing it again would cost a mutation
+    per product out of the same bounded pass that has to get through the
+    whole range."""
+    _store_defines(fake_shopify, brand="single_line_text_field")
+    _drive(product_import.start_run(
+        "https://maker.test/collections/advantage", vendor="Ames Tile & Stone",
+    ))
+
+    brands = [
+        m for m in fake_shopify.metafields
+        if m["namespace"] == "filter" and m["key"] == "brand"
+    ]
+    assert len(brands) == 12
 
 
 # ── Overruling a skip ────────────────────────────────────────────────

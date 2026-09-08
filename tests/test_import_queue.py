@@ -52,6 +52,40 @@ def client(dashboard_db):
 # ── Reading a pasted list ────────────────────────────────────────────
 
 
+def test_a_queued_collection_can_name_its_product_type(dashboard_db):
+    """Worth giving for a queued import above all others: it runs overnight
+    with nobody watching, and a range whose type the model happens not to
+    answer reaches the shelf unnamed and stays that way until someone looks."""
+    added, problems = import_queue.add(
+        "https://maker.test/collections/arenosa, Ames Tile & Stone, Arenosa, "
+        "Ceramic Tile\n"
+    )
+    assert (added, problems) == (1, [])
+    entry = import_queue.entries()[0]
+    assert entry["collection_title"] == "Arenosa"
+    assert entry["product_type"] == "Ceramic Tile"
+
+
+def test_the_type_is_optional_and_older_lines_still_read(dashboard_db):
+    """Three fields still means url, brand, collection name."""
+    import_queue.add("https://maker.test/collections/a, Ames Tile, Arenosa\n")
+    entry = import_queue.entries()[0]
+    assert entry["collection_title"] == "Arenosa"
+    assert entry["product_type"] is None
+
+
+def test_a_queued_type_reaches_the_run_it_starts(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    import_queue.add(
+        "https://maker.test/collections/advantage, Ames Tile & Stone, , Ceramic Tile\n"
+    )
+    started = import_queue.start_next()
+    with get_session() as session:
+        run = session.get(ImportRun, started["run"])
+    assert run.product_type == "Ceramic Tile"
+
+
 def test_a_pasted_list_becomes_a_queue(dashboard_db):
     added, problems = import_queue.add(TWO)
     assert (added, problems) == (2, [])

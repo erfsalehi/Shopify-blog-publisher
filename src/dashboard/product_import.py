@@ -226,6 +226,7 @@ def start_run(
     dry_run: bool = False,
     collection_title: str | None = None,
     vendor: str | None = None,
+    product_type: str | None = None,
     max_products: int | None = None,
     publish_status: str | None = None,
     make_collection: bool = True,
@@ -266,6 +267,7 @@ def start_run(
             dry_run=bool(dry_run),
             collection_title=(collection_title or "").strip() or None,
             vendor=(vendor or "").strip() or None,
+            product_type=(product_type or "").strip() or None,
             options_json=json.dumps(options),
             stage=ImportStage.discover.value,
         )
@@ -407,6 +409,7 @@ def _products(run_id: int) -> PassResult:
         options, dry_run = run.options, run.dry_run
         base, vendor = run.source_base, run.vendor
         collection_title = run.collection_title
+        given_type = run.product_type
         pending = (
             session.query(ImportProduct.id)
             .filter(
@@ -450,6 +453,7 @@ def _products(run_id: int) -> PassResult:
                 run_id=run_id,
                 base=base,
                 vendor=vendor,
+                given_type=given_type,
                 collection_title=collection_title,
                 collection_description=options.get("collection_description"),
                 options=options,
@@ -534,6 +538,7 @@ def _one_product(
     run_id: int,
     base: str,
     vendor: str | None,
+    given_type: str | None,
     collection_title: str | None,
     collection_description: str | None,
     options: dict,
@@ -636,7 +641,13 @@ def _one_product(
         size = product_copy.derive_size(
             source.title, source.specs, source.options
         ) or product_copy.normalize_size(copy.size)
-        product_type = copy.product_type or source.product_type or ""
+        # The owner's answer first, and it settles it. The type is in every
+        # product's name and is what the storefront's type filter reads, and
+        # the model does not answer it reliably — it named the type for four
+        # products of thirteen in one range and nothing for the other nine.
+        # A range is one kind of thing even when it is several sizes, so
+        # this is a question worth asking once rather than thirteen times.
+        product_type = given_type or copy.product_type or source.product_type or ""
         size, product_type = _range_shape(run_id, size=size, kind=product_type)
         copy.size, copy.product_type = size, product_type or copy.product_type
 
@@ -1827,8 +1838,30 @@ def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
         source_url = row.source_url
         run = session.get(ImportRun, run_id)
         collection_title = (run.collection_title or "") if run else ""
+        vendor = (run.vendor or "") if run else ""
 
     copy = _copy_from(generated)
+
+    # The storefront's filter fields for a product this run left alone.
+    #
+    # That gap was the whole of "the metafields are still empty": the skip
+    # returns before a single metafield is written, so a re-import of a
+    # range you already carry — which creates nothing and skips everything —
+    # filled nothing. One run reported "10 created, 15 already existed" and
+    # the fifteen got none of it.
+    #
+    # Here rather than at the skip, because this is the pass that already
+    # touches every product in the range and already has the copy generated
+    # for it. Only the skipped ones: a product this run created was written
+    # at create time, and doing it twice would cost a mutation per product
+    # out of the same bounded pass that has to get through the whole range.
+    #
+    # So a re-import is now how a range is backfilled.
+    if item.get("existing"):
+        _write_filter_metafields(
+            run_id, client, item["gid"],
+            _seed_from(extracted, source_url), copy, vendor,
+        )
     docs = [
         SourceDoc(url=d.get("url", ""), title=d.get("title"), kind=d.get("kind", "other"),
                   pages=d.get("pages"))

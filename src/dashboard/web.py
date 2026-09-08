@@ -467,6 +467,7 @@ def create_app() -> FastAPI:
         source_url: str = Form(...),
         collection_title: str = Form(""),
         vendor: str = Form(""),
+        product_type: str = Form(""),
         max_products: int = Form(0),
         publish_status: str = Form(""),
         dry_run: str = Form(""),
@@ -495,6 +496,7 @@ def create_app() -> FastAPI:
             dry_run=bool(dry_run),
             collection_title=collection_title,
             vendor=vendor,
+            product_type=product_type,
             max_products=max_products or None,
             publish_status=publish_status or None,
             # Unchecked boxes post nothing, so a plain form submit would read
