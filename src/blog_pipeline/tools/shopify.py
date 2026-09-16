@@ -62,6 +62,85 @@ def _usable_target(title: str, handle: str) -> bool:
     return True
 
 
+#: Natural anchor phrase aliases for high-value landing pages and collections.
+#: When these phrases appear in an article, the internal linking pass recognizes
+#: them and links directly to the page without requiring an exact title match.
+_PAGE_ALIASES: dict[str, list[str]] = {
+    "flooring-in-surrey": [
+        "flooring in Surrey",
+        "flooring installation in Surrey",
+        "flooring in Surrey, BC",
+        "Surrey flooring",
+        "flooring store in Surrey",
+        "Surrey homes",
+        "in Surrey",
+    ],
+    "flooring-in-langley": [
+        "flooring in Langley",
+        "flooring in Langley, BC",
+        "Langley flooring showroom",
+        "Langley flooring store",
+        "flooring showroom in Langley",
+        "flooring store in Langley",
+        "our showroom in Langley",
+        "Langley showroom",
+        "Langley homes",
+        "in Langley",
+    ],
+    "custom-stair-nosing-manufacturer-bc": [
+        "custom stair nosing",
+        "custom stair nose",
+        "stair nosing manufacturer",
+        "stair nosing in BC",
+        "custom flush stair nosing",
+        "stair nosing manufacturer in BC",
+    ],
+    "services": [
+        "our services",
+        "flooring installation services",
+        "professional flooring installation",
+        "flooring installation",
+    ],
+    "contact": [
+        "contact us",
+        "contact our team",
+        "visit our showroom",
+    ],
+}
+
+_COLLECTION_ALIASES: dict[str, list[str]] = {
+    "vinyl-flooring": [
+        "luxury vinyl plank",
+        "vinyl plank flooring",
+        "LVP flooring",
+        "vinyl flooring",
+    ],
+    "laminate-flooring": [
+        "waterproof laminate flooring",
+        "laminate flooring",
+        "laminate floors",
+        "laminate plank",
+    ],
+    "engineered-flooring": [
+        "engineered hardwood flooring",
+        "engineered wood flooring",
+        "engineered hardwood",
+        "engineered flooring",
+    ],
+    "ceramic-tile": [
+        "porcelain tile",
+        "wall tile",
+        "ceramic tile flooring",
+        "ceramic tile",
+    ],
+    "flooring-accessories": [
+        "flooring accessories",
+        "transitions and moulding",
+        "underlayment",
+    ],
+}
+
+
 @dataclass
 class PublishResult:
     article_id: str | None
@@ -311,13 +390,21 @@ class ShopifyClient:
 
         targets: list[dict] = []
         for pg in data["pages"]["nodes"]:
-            if _usable_target(pg["title"], pg["handle"]):
-                targets.append({"title": pg["title"], "url": f"{base}/pages/{pg['handle']}"})
+            handle = pg["handle"]
+            if _usable_target(pg["title"], handle):
+                targets.append({
+                    "title": pg["title"],
+                    "url": f"{base}/pages/{handle}",
+                    "aliases": _PAGE_ALIASES.get(handle, []),
+                })
         for col in data["collections"]["nodes"]:
-            if _usable_target(col["title"], col["handle"]):
-                targets.append(
-                    {"title": col["title"], "url": f"{base}/collections/{col['handle']}"}
-                )
+            handle = col["handle"]
+            if _usable_target(col["title"], handle):
+                targets.append({
+                    "title": col["title"],
+                    "url": f"{base}/collections/{handle}",
+                    "aliases": _COLLECTION_ALIASES.get(handle, []),
+                })
         return targets
 
     def list_collection_cards(self, limit: int = 100) -> list[dict]:
@@ -1233,11 +1320,13 @@ _CURRENCY_SYMBOLS = {"USD": "$", "CAD": "$", "AUD": "$", "EUR": "â‚¬", "GBP": "Â
 
 
 def _format_money(amount: str | None, currency: str | None) -> str:
-    """A price a reader recognises, or "" when the store didn't give us one."""
+    """A price a reader recognises, or "" when the store didn't give us one or it is 0."""
     if amount in (None, ""):
         return ""
     try:
         value = float(amount)
+        if value <= 0:
+            return ""
     except (TypeError, ValueError):
         return ""
     symbol = _CURRENCY_SYMBOLS.get((currency or "").upper())

@@ -156,6 +156,15 @@ def generate_draft(
     if shop_hint:
         human.append(shop_hint)
 
+    if settings.local_seo and settings.business_location:
+        human.append(
+            f"LOCAL EXPERTISE & REGIONAL RELEVANCE ({settings.business_location} & Lower Mainland / Fraser Valley):\n"
+            f"Anchor practical advice in real homeowner conditions for {settings.business_location} and neighboring communities "
+            "(e.g. Langley, Surrey, Abbotsford). Address regional climate factors (rainy seasons, seasonal indoor humidity swings, "
+            "basement moisture over concrete, and strata acoustic bylaws). Where discussing seeing physical samples or installation, "
+            "naturally reference visiting our local Langley showroom or getting a local consultation."
+        )
+
     messages = [SystemMessage(content=SYSTEM), HumanMessage(content="\n\n".join(human))]
 
     # The model occasionally ends the body early. Regenerate once if the draft

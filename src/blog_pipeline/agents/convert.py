@@ -70,7 +70,14 @@ _CARD = (
     f"flex:1 1 180px;min-width:0;border:1px solid {_LINE};border-radius:10px;"
     "overflow:hidden;background:#ffffff;text-decoration:none;display:block"
 )
-_CARD_IMG = "display:block;width:100%;height:150px;object-fit:cover"
+_CARD_IMG = (
+    "display:block;width:100%;height:160px;object-fit:cover;"
+    "margin:0 !important;border-radius:0 !important;padding:0 !important;border:none !important"
+)
+_CARD_BTN = (
+    f"display:inline-block;margin-top:.6em;padding:.45em 1em;background:{_INK};"
+    "color:#ffffff;border-radius:6px;font-weight:600;font-size:.85em;text-align:center"
+)
 _ROW = "display:flex;flex-wrap:wrap;gap:1em;margin:2em 0"
 
 
@@ -118,11 +125,13 @@ def _render_cards(
         if not title or not item.get("url") or not item.get("image"):
             continue
         price = _esc(item.get("price", ""))
-        foot = (
-            f'<p style="margin:.2em 0 0;color:{_INK};font-weight:600">{price}</p>'
-            if price
-            else f'<p style="{_SUB};margin-top:.2em">{label}</p>'
-        )
+        if price in ("$0.00", "0.00", "0", "$0", ""):
+            foot = f'<div style="margin-top:.5em"><span style="{_CARD_BTN}">{label}</span></div>'
+        else:
+            foot = (
+                f'<p style="margin:.2em 0 0;color:{_INK};font-weight:600">{price}</p>'
+                f'<div style="margin-top:.4em"><span style="{_CARD_BTN}">{label}</span></div>'
+            )
         href = tag_url(item["url"], medium, campaign)
         cards.append(
             f'<a href="{href}" style="{_CARD}">'
@@ -138,15 +147,10 @@ def _render_cards(
 
 
 def render_product_row(products: list[dict], campaign: str) -> str:
-    """Matching products as a row of cards.
-
-    A row rather than the single hero card this replaced: a reader convinced
-    by an article about herringbone wants to see the herringbone range, and
-    one product is a suggestion where three are a choice.
-    """
+    """Matching products as a row of cards."""
     return _render_cards(
         products, medium="product-card", campaign=campaign,
-        css_class="product-cards", label="View product &rarr;",
+        css_class="product-cards", label="See More &rarr;",
     )
 
 
@@ -154,7 +158,7 @@ def render_collection_row(collections: list[dict], campaign: str) -> str:
     """A row of category cards for the reader who would rather browse."""
     return _render_cards(
         collections, medium="collection-card", campaign=campaign,
-        css_class="collection-cards", label="Shop the range &rarr;",
+        css_class="collection-cards", label="Shop Collection &rarr;",
     )
 
 
@@ -316,27 +320,42 @@ def blocks_present(body_html: str) -> set[str]:
 def _occupied_breaks(body_html: str) -> set[int]:
     """Section breaks that already have one of our blocks sitting before them.
 
-    A block is always inserted immediately before an `<h2>`, so the heading
-    that follows an existing block is the break it occupies. Excluding those
-    is what stops a top-up run from stacking a new banner against a card
+    A block is always inserted immediately before a heading or paragraph, so the
+    element that follows an existing block is the break it occupies. Excluding
+    those is what stops a top-up run from stacking a new banner against a card
     placed on an earlier run.
     """
     occupied: set[int] = set()
     for match in _ANY_BLOCK_RE.finditer(body_html):
-        nxt = re.search(r"<h2", body_html[match.end():], re.I)
+        nxt = re.search(r"<(?:h[23]|p)\b", body_html[match.end():], re.I)
         if nxt:
             occupied.add(match.end() + nxt.start())
     return occupied
 
 
 def _section_breaks(body_html: str) -> list[int]:
-    """Offsets of the `<h2>` boundaries a block may be inserted at.
+    """Offsets of boundaries a block may be inserted at.
 
-    The first heading is skipped: it's where the intro ends and where the GEO
-    pass puts its takeaways box, and a sales block wedged into that opening
-    run reads as an advert before the article has said anything.
+    Prefers <h2> boundaries. When fewer than 3 <h2> breaks are available, includes
+    <h3> boundaries so posts using subheadings receive conversion blocks. If
+    fewer than 2 heading breaks exist overall, falls back to <p> paragraph
+    boundaries (skipping the opening intro) so short or heading-free articles
+    still receive conversion blocks.
     """
-    return [m.start() for m in re.finditer(r"<h2", body_html, re.I)][1:]
+    h2_breaks = [m.start() for m in re.finditer(r"<h2\b", body_html, re.I)][1:]
+    if len(h2_breaks) >= 3:
+        return h2_breaks
+
+    all_h = [m.start() for m in re.finditer(r"<h[23]\b", body_html, re.I)]
+    h_breaks = all_h[1:] if len(all_h) > 1 else []
+    if len(h_breaks) >= 2:
+        return h_breaks
+
+    p_matches = [m.start() for m in re.finditer(r"<p\b", body_html, re.I)]
+    if len(p_matches) >= 3:
+        return p_matches[2:]
+
+    return h_breaks
 
 
 def place_blocks(body_html: str, blocks: list[tuple[float, str]]) -> str:

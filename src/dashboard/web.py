@@ -26,7 +26,7 @@ from markupsafe import Markup, escape
 
 from dashboard import (
     advisor, alerts, auth, charts, cron, diffing, experiments, import_queue,
-    product_import, refresh, reporting, scheduler, store, strategy,
+    manufacturer, product_import, refresh, reporting, scheduler, store, strategy,
 )
 from blog_pipeline.tools.shopify import ShopifyClient, ShopifyError
 
@@ -506,6 +506,135 @@ def create_app() -> FastAPI:
             build_page=bool(build_page),
         )
         return RedirectResponse(f"/import/{run_id}", status_code=303)
+
+    @app.post("/import/product")
+    def start_single_product_import(
+        source_url: str = Form(""),
+        vendor: str = Form(""),
+        collection_title: str = Form(""),
+        publish_status: str = Form(""),
+        dry_run: str = Form(""),
+        make_collection: str = Form("1"),
+    ):
+        url = (source_url or "").strip()
+        if not url:
+            return RedirectResponse(
+                "/import?error=" + quote("Paste a product URL first."),
+                status_code=303,
+            )
+        v = (vendor or "").strip()
+        if not v:
+            return RedirectResponse(
+                "/import?error=" + quote(
+                    "Set the brand — every product name begins with it ('Brand Collection Type Size - Colour')."
+                ),
+                status_code=303,
+            )
+        col_name = (collection_title or "").strip() or None
+        run_id = product_import.start_run(
+            url,
+            dry_run=bool(dry_run),
+            collection_title=col_name,
+            vendor=v,
+            publish_status=publish_status or None,
+            make_collection=bool(make_collection and col_name),
+            link_products=True,
+            is_single_product=True,
+        )
+        return RedirectResponse(f"/import/{run_id}", status_code=303)
+
+    @app.post("/import/discover-collections", response_class=HTMLResponse)
+    def discover_collections_page(
+        request: Request,
+        collections_url: str = Form(""),
+        vendor: str = Form(""),
+        dry_run: str = Form(""),
+    ):
+        url = (collections_url or "").strip()
+        if not url:
+            return RedirectResponse(
+                "/import?error=" + quote("Paste an all-collections or catalogue URL first."),
+                status_code=303,
+            )
+        v = (vendor or "").strip()
+        if not v:
+            return RedirectResponse(
+                "/import?error=" + quote("Set the brand for the collections to import."),
+                status_code=303,
+            )
+        try:
+            discovered = manufacturer.discover_all_collections(url)
+        except Exception as exc:
+            return RedirectResponse(
+                "/import?error=" + quote(f"Could not discover collections: {exc}"),
+                status_code=303,
+            )
+        if not discovered:
+            return RedirectResponse(
+                "/import?error=" + quote(f"No collections were found at {url}."),
+                status_code=303,
+            )
+
+        return render(
+            request,
+            "import_select_collections.html",
+            nav="import",
+            collections=discovered,
+            collections_url=url,
+            vendor=v,
+            dry_run=bool(dry_run),
+        )
+
+    @app.post("/import/queue-selected")
+    async def queue_selected_collections(request: Request):
+        form = await request.form()
+        vendor = str(form.get("vendor") or "").strip()
+        dry_run = bool(form.get("dry_run"))
+        selected_urls = form.getlist("selected_urls")
+
+        if not vendor:
+            return RedirectResponse(
+                "/import?error=" + quote("Brand name is required."),
+                status_code=303,
+            )
+        if not selected_urls:
+            return RedirectResponse(
+                "/import?error=" + quote("No collections were selected."),
+                status_code=303,
+            )
+
+        lines = []
+        for raw_u in selected_urls:
+            u = str(raw_u).strip()
+            if not u:
+                continue
+            custom_title = str(form.get(f"title_{u}") or "").strip()
+            if custom_title:
+                lines.append(f"{u}, {vendor}, {custom_title}")
+            else:
+                lines.append(f"{u}, {vendor}")
+
+        if not lines:
+            return RedirectResponse(
+                "/import?error=" + quote("No collections were selected."),
+                status_code=303,
+            )
+
+        added, problems = import_queue.add("\n".join(lines), dry_run=dry_run)
+        params = []
+        if added:
+            params.append(
+                "notice=" + quote(
+                    f"Queued {added} collection{'s' if added != 1 else ''} from {vendor}. "
+                    "They will be imported one at a time."
+                )
+            )
+        if problems:
+            shown = "; ".join(problems[:5])
+            params.append("error=" + quote("Could not read: " + shown))
+
+        return RedirectResponse("/import?" + "&".join(params), status_code=303)
+
 
     @app.post("/import/queue")
     def queue_imports(collections: str = Form(""), dry_run: str = Form("")):

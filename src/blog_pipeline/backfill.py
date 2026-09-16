@@ -189,6 +189,20 @@ def backfill_conversion_blocks(
                 .filter(Article.shopify_article_id.isnot(None))
                 .all()
             }
+            from sqlalchemy import func
+            from blog_pipeline.db.models import SearchPerformance
+            perf_map = dict(
+                session.query(
+                    Article.shopify_article_id,
+                    func.coalesce(func.sum(SearchPerformance.impressions), 0),
+                )
+                .outerjoin(SearchPerformance, Article.id == SearchPerformance.article_id)
+                .filter(Article.shopify_article_id.isnot(None))
+                .group_by(Article.shopify_article_id)
+                .all()
+            )
+
+        posts.sort(key=lambda p: perf_map.get(p.get("id"), 0), reverse=True)
 
         for post in posts:
             gid = post.get("id")

@@ -108,3 +108,29 @@ def test_score_seo_chunk_metric_reflects_compliant_sections():
         primary_keyword="running shoes", secondary_keywords=[],
     )
     assert metrics["chunk_compliant_sections"] == "1/2"
+
+
+def test_insert_internal_links_supports_aliases_and_deduplicates():
+    body = (
+        "<p>For flooring installation in Surrey, visit our team. "
+        "We also offer custom stair nosing for stairs in Surrey homes.</p>"
+    )
+    targets = [
+        {
+            "title": "Flooring in Surrey, BC",
+            "url": "https://drflooring.ca/pages/flooring-in-surrey",
+            "aliases": ["flooring installation in Surrey", "flooring in Surrey", "Surrey homes"],
+        },
+        {
+            "title": "Custom Stair Nosing Manufacturer BC",
+            "url": "https://drflooring.ca/pages/custom-stair-nosing-manufacturer-bc",
+            "aliases": ["custom stair nosing", "stair nosing"],
+        },
+    ]
+    linked, n = insert_internal_links(body, targets, max_links=4)
+    assert n == 2
+    assert '<a href="https://drflooring.ca/pages/flooring-in-surrey">flooring installation in Surrey</a>' in linked
+    assert '<a href="https://drflooring.ca/pages/custom-stair-nosing-manufacturer-bc">custom stair nosing</a>' in linked
+    # Surrey homes should NOT be linked again because destination URL is already linked
+    assert linked.count("https://drflooring.ca/pages/flooring-in-surrey") == 1
+

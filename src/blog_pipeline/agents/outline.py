@@ -47,6 +47,15 @@ def generate_outline(
             f"verbatim, and find a gap to differentiate):\n{joined}"
         )
 
+    if settings.local_seo and settings.business_location:
+        parts.append(
+            f"LOCAL & REGIONAL SEO REQUIREMENT ({settings.business_location} & Lower Mainland, BC):\n"
+            f"Dedicate at least one H2 section (or targeted H3 subpoints) to regional considerations for "
+            f"{settings.business_location} and surrounding communities (e.g. Langley, Surrey, Fraser Valley).\n"
+            "Address local climate realities (high seasonal humidity, rainy winters), basement concrete moisture, "
+            "radiant in-floor heating compatibility, or strata acoustic bylaws where relevant to the topic."
+        )
+
     return structured_invoke(
         model=settings.model_outline,
         schema=Outline,

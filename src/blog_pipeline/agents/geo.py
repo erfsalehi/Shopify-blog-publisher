@@ -91,10 +91,49 @@ def build_jsonld(
     url: str | None = None,
     sources: list[str] | None = None,
 ) -> str:
-    """schema.org Article + FAQPage as a single JSON-LD <script> block."""
+    """schema.org Article + LocalBusiness + BreadcrumbList + FAQPage as a single JSON-LD block."""
     settings = get_settings()
     graph: list[dict] = []
+    base_url = settings.store_link_base or "https://drflooring.ca"
+    org_id = f"{base_url}/#organization"
 
+    # 1. LocalBusiness / FlooringStore schema for D&R Flooring
+    biz_name = settings.business_name or "D&R Flooring"
+    local_business: dict = {
+        "@type": "LocalBusiness",
+        "@id": org_id,
+        "name": biz_name,
+        "url": base_url,
+        "telephone": settings.business_phone or "+1-604-532-2211",
+        "priceRange": "$$",
+        "address": {
+            "@type": "PostalAddress",
+            "streetAddress": "#103 - 20551 Langley Bypass",
+            "addressLocality": "Langley",
+            "addressRegion": "BC",
+            "postalCode": "V3A 5E8",
+            "addressCountry": "CA",
+        },
+        "geo": {
+            "@type": "GeoCoordinates",
+            "latitude": 49.1147,
+            "longitude": -122.6565,
+        },
+        "areaServed": [
+            {"@type": "AdministrativeArea", "name": "Langley"},
+            {"@type": "AdministrativeArea", "name": "Surrey"},
+            {"@type": "AdministrativeArea", "name": "Abbotsford"},
+            {"@type": "AdministrativeArea", "name": "White Rock"},
+            {"@type": "AdministrativeArea", "name": "Fraser Valley"},
+            {"@type": "AdministrativeArea", "name": "Lower Mainland"},
+            {"@type": "AdministrativeArea", "name": "British Columbia"},
+        ],
+    }
+    if settings.business_hours:
+        local_business["openingHours"] = settings.business_hours
+    graph.append(local_business)
+
+    # 2. Article schema
     article: dict = {
         "@type": "Article",
         "headline": title,
@@ -103,20 +142,43 @@ def build_jsonld(
     if url:
         article["url"] = url
         article["mainEntityOfPage"] = {"@type": "WebPage", "@id": url}
-    if settings.business_name:
-        publisher: dict = {"@type": "Organization", "name": settings.business_name}
-        if settings.business_location:
-            publisher["areaServed"] = settings.business_location
-        article["publisher"] = publisher
-        article["author"] = publisher
+    publisher_ref = {"@type": "Organization", "name": biz_name, "@id": org_id}
+    if settings.business_location:
+        publisher_ref["areaServed"] = settings.business_location
+    article["publisher"] = publisher_ref
+    article["author"] = publisher_ref
     names = [s.strip() for s in (sources or []) if s.strip()]
     if names:
-        # citation as plain org names is the pragmatic choice here — we don't
-        # have verifiable URLs for each standards body, and inventing one
-        # would be worse than a name-only citation.
         article["citation"] = names
     graph.append(article)
 
+    # 3. BreadcrumbList schema
+    if url:
+        graph.append({
+            "@type": "BreadcrumbList",
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": 1,
+                    "name": "Home",
+                    "item": base_url,
+                },
+                {
+                    "@type": "ListItem",
+                    "position": 2,
+                    "name": "Blog",
+                    "item": f"{base_url}/blogs/news",
+                },
+                {
+                    "@type": "ListItem",
+                    "position": 3,
+                    "name": title,
+                    "item": url,
+                },
+            ],
+        })
+
+    # 4. FAQPage schema
     faq_entries = [
         {
             "@type": "Question",

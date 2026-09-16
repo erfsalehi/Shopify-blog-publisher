@@ -1168,6 +1168,21 @@ def fetch_product(
     """
     own = http is None
     http = http or client()
+    if seed is None and "/products/" in url:
+        handle = handle_from_url(url)
+        if handle:
+            shopify_endpoint = f"{base}/products/{handle}.json"
+            if may_fetch(base, f"/products/{handle}.json", client=http):
+                try:
+                    resp = http.get(shopify_endpoint)
+                    if resp.status_code == 200:
+                        payload = resp.json() or {}
+                        node = payload.get("product")
+                        if node and isinstance(node, dict):
+                            seed = _product_from_shopify_node(node, base)
+                except Exception as e:
+                    log.debug("fetch_product shopify json check failed for %s: %s", url, e)
+
     product = seed or SourceProduct(source_url=url, handle=handle_from_url(url))
     product.source_url = url
     try:
@@ -1349,3 +1364,184 @@ def _description_fragment(soup: BeautifulSoup) -> str:
                     tag.decompose()
                 return str(node)[:60000]
     return ""
+
+
+# ── All collections discovery ────────────────────────────────────────
+
+#: Collection path markers across Shopify, WooCommerce, Magento and custom CMSs.
+_COLLECTION_PATH_PATTERN = re.compile(
+    r"/(collections?|categories?|category|catalog|series|ranges?)/([^/?#]+)/?$",
+    re.I,
+)
+
+#: Common collections that are utility/all-products rather than distinct ranges.
+_GENERIC_COLLECTION_HANDLES = {
+    "all", "all-products", "frontpage", "shop", "products", "new-arrivals",
+    "best-sellers", "sale", "clearance", "featured",
+}
+
+
+def discover_all_collections(
+    url: str, *, http: httpx.Client | None = None
+) -> list[dict]:
+    """Find all collections/ranges on an all-collections or catalogue page.
+
+    Checks:
+      1. Shopify `/collections.json` if available on the store.
+      2. HTML scrape of the page for collection cards and links.
+
+    Returns a list of dicts:
+      [{"url": str, "title": str, "handle": str, "image_url": str | None, "products_count": int | None}]
+    """
+    base, path = split_source_url(url)
+    own = http is None
+    http = http or client()
+    try:
+        if not may_fetch(base, path, client=http):
+            raise FetchError(
+                f"robots.txt on {base} disallows {path}. Not fetched — that's "
+                "the site's decision to make."
+            )
+
+        # 1. Try Shopify collections JSON endpoint
+        shopify_endpoint = f"{base}/collections.json"
+        if may_fetch(base, "/collections.json", client=http):
+            try:
+                resp = http.get(shopify_endpoint, params={"limit": 250})
+                if resp.status_code == 200:
+                    payload = resp.json() or {}
+                    raw_collections = payload.get("collections")
+                    if isinstance(raw_collections, list) and raw_collections:
+                        results = []
+                        for node in raw_collections:
+                            handle = str(node.get("handle") or "").strip()
+                            if not handle or handle.lower() in _GENERIC_COLLECTION_HANDLES:
+                                continue
+                            raw_title = str(node.get("title") or "").strip()
+                            title = raw_title or handle.replace("-", " ").replace("_", " ").title()
+                            img_obj = node.get("image")
+                            image_url = None
+                            if isinstance(img_obj, dict):
+                                image_url = img_obj.get("src")
+                            elif isinstance(img_obj, str) and img_obj:
+                                image_url = img_obj
+                            results.append({
+                                "url": f"{base}/collections/{handle}",
+                                "title": title,
+                                "handle": handle,
+                                "image_url": image_url,
+                                "products_count": node.get("products_count"),
+                            })
+                        if results:
+                            log.info("Discovered %d collections via Shopify collections.json on %s", len(results), base)
+                            return results
+            except Exception as e:
+                log.debug("Shopify /collections.json check failed on %s: %s", base, e)
+
+        # 2. Scrape HTML of the page
+        html = _get_html(http, f"{base}{path}")
+        if not html:
+            # Try firecrawl if plain GET returned nothing
+            rendered, _ = _firecrawl_scrape(f"{base}{path}")
+            html = rendered or ""
+
+        if not html:
+            raise FetchError(f"Could not read page content at {url}.")
+
+        soup = soup_of(html)
+        current_clean = f"{base}{path}".split("?", 1)[0].split("#", 1)[0].rstrip("/")
+        seen_urls: set[str] = set()
+        discovered: list[dict] = []
+
+        # Find candidate collection links
+        for a in soup.find_all("a", href=True):
+            raw_href = a["href"].strip()
+            if not raw_href or raw_href.startswith(("#", "javascript:", "mailto:", "tel:")):
+                continue
+
+            full_url = absolute(base, raw_href).split("?", 1)[0].split("#", 1)[0].rstrip("/")
+            if not full_url.startswith(base) or full_url == current_clean:
+                continue
+            if full_url in seen_urls:
+                continue
+
+            # Must not be a product page or file download
+            parsed = urlsplit(full_url)
+            cand_path = parsed.path.rstrip("/")
+            if any(cand_path.lower().endswith(ext) for ext in DOC_EXTENSIONS + (".png", ".jpg", ".jpeg", ".webp")):
+                continue
+            if "/products/" in cand_path.lower() or "/product/" in cand_path.lower():
+                continue
+            if any(seg in cand_path.lower() for seg in ("/cart", "/checkout", "/account", "/search", "/policies", "/blogs", "/pages")):
+                continue
+
+            match = _COLLECTION_PATH_PATTERN.search(cand_path)
+            # Also accept if inside a recognized collection/category card container
+            is_card = False
+            card_parent = a.find_parent(class_=re.compile(r"(collection|category|range|series)", re.I))
+            if card_parent is not None:
+                is_card = True
+
+            if not match and not is_card:
+                continue
+
+            handle = cand_path.split("/")[-1]
+            if handle.lower() in _GENERIC_COLLECTION_HANDLES:
+                continue
+
+            # Extract title: heading, card heading, anchor text, img alt, or title-cased handle
+            title = ""
+            heading = a.find(["h1", "h2", "h3", "h4", "h5", "h6"])
+            if not heading and card_parent:
+                heading = card_parent.find(["h1", "h2", "h3", "h4", "h5", "h6"])
+            if heading:
+                title = heading.get_text(" ", strip=True)
+
+            if not title:
+                text = a.get_text(" ", strip=True)
+                if text and len(text) <= 80 and not text.lower().startswith(("shop", "view", "explore", "more", "see")):
+                    title = text
+
+            if not title and card_parent:
+                title_node = card_parent.find(class_=re.compile(r"(title|name|heading)", re.I))
+                if title_node:
+                    title = title_node.get_text(" ", strip=True)
+
+            if not title:
+                img = a.find("img")
+                if img and img.get("alt"):
+                    title = img["alt"].strip()
+
+            if not title:
+                title = handle.replace("-", " ").replace("_", " ").title()
+
+            # Clean up title
+            title = re.sub(r"\s+", " ", title).strip()
+            if len(title) < 2 or title.lower() in ("shop all", "view all", "all products"):
+                continue
+
+            # Extract image thumbnail
+            image_url = None
+            img_tag = a.find("img") or (card_parent.find("img") if card_parent else None)
+            if img_tag:
+                src = img_tag.get("src") or img_tag.get("data-src") or img_tag.get("data-original")
+                if src:
+                    full_img = absolute(base, src)
+                    if _looks_like_photo(full_img):
+                        image_url = full_img
+
+            seen_urls.add(full_url)
+            discovered.append({
+                "url": full_url,
+                "title": title,
+                "handle": handle,
+                "image_url": image_url,
+                "products_count": None,
+            })
+
+        log.info("Discovered %d collections from HTML at %s", len(discovered), url)
+        return discovered
+    finally:
+        if own:
+            http.close()
+

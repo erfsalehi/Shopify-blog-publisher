@@ -39,11 +39,12 @@ def render_shop_cta() -> str:
         return ""
     name = html.escape(settings.business_name)
     loc = settings.business_location.strip()
-    visit = f" or visit us in {html.escape(loc)}" if loc else ""
+    loc_display = html.escape(loc) if loc else "Langley, BC"
     return (
         '<div class="shop-cta"><h2>Shop your flooring project with '
         f"{name}</h2><p>{name} has everything you need to get the job done — "
         "browse our full range of flooring and accessories online, or talk to "
         f'our team about your space. <a href="{base}/collections/all">Shop '
-        f"flooring at {name}</a>{visit}.</p></div>"
+        f'flooring at {name}</a>, visit our <a href="{base}/pages/flooring-in-langley">showroom in {loc_display}</a>, '
+        f'or ask about our <a href="{base}/pages/flooring-in-surrey">flooring installation services in Surrey</a> and the Fraser Valley.</p></div>'
     )

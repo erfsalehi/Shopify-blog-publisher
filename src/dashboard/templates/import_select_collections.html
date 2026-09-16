@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Choose collections to import{% endblock %}
+
+{% block content %}
+<div class="page-head">
+  <h1>Choose collections to import</h1>
+  <span class="muted small">
+    <a href="/import">← Back to import</a>
+  </span>
+</div>
+
+<p class="muted window-note">
+  Found <strong>{{ collections | length }}</strong> collections at
+  <a href="{{ collections_url }}" target="_blank" rel="noopener noreferrer"><code>{{ collections_url }}</code></a>
+  for brand <strong>{{ vendor }}</strong>.
+  Select the collections you would like to import. They will be added to the queue to import one at a time.
+</p>
+
+<form method="post" action="/import/queue-selected" id="collections-form">
+  <input type="hidden" name="vendor" value="{{ vendor }}">
+  {% if dry_run %}
+  <input type="hidden" name="dry_run" value="1">
+  {% endif %}
+
+  <div class="panel">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 10px;">
+      <div style="display: flex; gap: 8px; align-items: center;">
+        <button type="button" class="small-btn" id="btn-select-all">Select all</button>
+        <button type="button" class="small-btn" id="btn-deselect-all">Deselect all</button>
+        <span class="muted small" id="selection-count" style="margin-left: 8px;">
+          {{ collections | length }} of {{ collections | length }} selected
+        </span>
+      </div>
+      <div>
+        <label class="check small">
+          <input type="checkbox" name="dry_run" value="1" {{ 'checked' if dry_run else '' }}>
+          <span>Dry run — read everything, create nothing</span>
+        </label>
+      </div>
+    </div>
+
+    <table>
+      <thead>
+        <tr>
+          <th style="width: 40px; text-align: center;">
+            <input type="checkbox" id="th-select-all" checked title="Select / Deselect all">
+          </th>
+          <th style="width: 60px;">Image</th>
+          <th>Collection title (click to edit)</th>
+          <th>Source URL</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for col in collections %}
+        <tr>
+          <td style="text-align: center;">
+            <input type="checkbox" name="selected_urls" value="{{ col.url }}" class="col-checkbox" checked>
+          </td>
+          <td>
+            {% if col.image_url %}
+            <img src="{{ col.image_url }}" alt="" style="width: 48px; height: 48px; object-fit: cover; border-radius: 4px; border: 1px solid #e0deda;">
+            {% else %}
+            <div style="width: 48px; height: 48px; background: #f0f0ee; border-radius: 4px; display: flex; align-items: center; justify-content: center; color: #999; font-size: 11px;">
+              none
+            </div>
+            {% endif %}
+          </td>
+          <td>
+            <input type="text" name="title_{{ col.url }}" value="{{ col.title }}" class="wide"
+                   style="max-width: 420px; font-weight: 600;" placeholder="Collection title">
+          </td>
+          <td class="small truncate">
+            <a href="{{ col.url }}" target="_blank" rel="noopener noreferrer">
+              {{ col.url }}
+            </a>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+
+    <div class="actions" style="margin-top: 24px;">
+      <button type="submit" class="primary" id="btn-submit">
+        Queue selected collections
+      </button>
+      <a href="/import" class="small-btn" style="text-decoration: none; padding: 8px 16px; margin-left: 8px;">Cancel</a>
+    </div>
+  </div>
+</form>
+
+<script>
+  (function() {
+    var checkboxes = document.querySelectorAll('.col-checkbox');
+    var thSelectAll = document.getElementById('th-select-all');
+    var btnSelectAll = document.getElementById('btn-select-all');
+    var btnDeselectAll = document.getElementById('btn-deselect-all');
+    var countLabel = document.getElementById('selection-count');
+    var total = checkboxes.length;
+
+    function updateCount() {
+      var selected = 0;
+      checkboxes.forEach(function(cb) {
+        if (cb.checked) selected++;
+      });
+      if (countLabel) {
+        countLabel.textContent = selected + ' of ' + total + ' selected';
+      }
+      if (thSelectAll) {
+        thSelectAll.checked = (selected === total);
+        thSelectAll.indeterminate = (selected > 0 && selected < total);
+      }
+    }
+
+    if (btnSelectAll) {
+      btnSelectAll.addEventListener('click', function() {
+        checkboxes.forEach(function(cb) { cb.checked = true; });
+        updateCount();
+      });
+    }
+
+    if (btnDeselectAll) {
+      btnDeselectAll.addEventListener('click', function() {
+        checkboxes.forEach(function(cb) { cb.checked = false; });
+        updateCount();
+      });
+    }
+
+    if (thSelectAll) {
+      thSelectAll.addEventListener('change', function() {
+        var state = thSelectAll.checked;
+        checkboxes.forEach(function(cb) { cb.checked = state; });
+        updateCount();
+      });
+    }
+
+    checkboxes.forEach(function(cb) {
+      cb.addEventListener('change', updateCount);
+    });
+
+    updateCount();
+  })();
+</script>
+{% endblock %}

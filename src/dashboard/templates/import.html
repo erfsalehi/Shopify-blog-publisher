@@ -30,6 +30,111 @@
 </p>
 
 <section class="panel">
+  <h2>Import a single product</h2>
+  <p class="muted small">
+    Import an individual product directly from its manufacturer or supplier product page URL.
+    For the best outcome, provide both the <strong>Brand</strong> (required for storefront naming)
+    and the <strong>Collection name</strong> (to properly group, categorize, and cross-link).
+  </p>
+  <form method="post" action="/import/product">
+    <div class="field">
+      <label for="single_source_url">Product page URL</label>
+      <input type="url" class="wide" id="single_source_url" name="source_url" required
+             placeholder="https://www.example.com/products/some-product">
+      <p class="help">
+        The direct link to the product on the manufacturer's or supplier's site.
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="single_vendor">Brand</label>
+      <input type="text" class="wide" id="single_vendor" name="vendor" required
+             placeholder="EUROSTYLE, Ames Tile, Cyrus Floors, Toucan, …">
+      <p class="help">
+        Required. Every product name starts with the brand — "Brand Collection Type Size - Colour".
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="single_collection_title">Collection / Range name (recommended)</label>
+      <input type="text" class="wide" id="single_collection_title" name="collection_title"
+             placeholder="e.g. Pure Plank, Aquafix, etc.">
+      <p class="help">
+        Specifying the range name ensures optimal SEO copy, tags, and adds the product to this collection in Shopify.
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="single_publish_status">Create product as</label>
+      <select id="single_publish_status" name="publish_status">
+        <option value="DRAFT" {{ 'selected' if defaults.publish_status == 'DRAFT' }}>
+          Draft — review in Shopify admin first
+        </option>
+        <option value="ACTIVE" {{ 'selected' if defaults.publish_status == 'ACTIVE' }}>
+          Active — live on the storefront immediately
+        </option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="make_collection" value="1" checked>
+        <span>Put in the named collection (if provided)</span>
+      </label>
+    </div>
+
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="dry_run" value="1">
+        <span>Dry run — read everything, create nothing</span>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="primary">Import product</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Discover from an all-collections page</h2>
+  <p class="muted small">
+    Scan a manufacturer's catalogue index or all-collections page (e.g. <code>https://maker.com/collections</code>).
+    The scraper will discover every collection on that page, and let you choose which collections to import.
+  </p>
+  <form method="post" action="/import/discover-collections">
+    <div class="field">
+      <label for="collections_url">All-collections page URL</label>
+      <input type="url" class="wide" id="collections_url" name="collections_url" required
+             placeholder="https://www.example.com/collections">
+      <p class="help">
+        A page that lists multiple collections or product ranges.
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="all_col_vendor">Brand</label>
+      <input type="text" class="wide" id="all_col_vendor" name="vendor" required
+             placeholder="EUROSTYLE, Ames Tile, Cyrus Floors, Toucan, …">
+      <p class="help">
+        The brand to assign to all discovered collections.
+      </p>
+    </div>
+
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="dry_run" value="1">
+        <span>Dry run — read everything, create nothing</span>
+      </label>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="primary">Scan for collections</button>
+    </div>
+  </form>
+</section>
+
+<section class="panel">
   <h2>Import a collection</h2>
   <form method="post" action="/import">
     <div class="field">

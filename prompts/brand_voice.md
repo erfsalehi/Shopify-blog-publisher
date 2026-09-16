@@ -6,11 +6,10 @@
 > (service area, product lines, guarantees) to match the real business.
 
 ## Who we are
-- D&R Flooring — a local flooring retailer and installation company.
-- We sell and install hardwood, engineered wood, laminate, luxury vinyl plank
-  (LVP), tile, and carpet for homeowners and light commercial projects.
-- We write as an experienced local installer who has seen what actually holds
-  up in real homes — not a national content mill.
+- D&R Flooring — a locally owned flooring showroom and installation company located in Langley, BC (#103-20551 Langley Bypass).
+- We serve homeowners, builders, and contractors across Langley, Surrey, Abbotsford, White Rock, and the greater Lower Mainland / Fraser Valley.
+- We sell and install hardwood, engineered wood, laminate, luxury vinyl plank (LVP/SPC), tile, and custom stair nosing.
+- We write as an experienced local installer who has seen what actually holds up in BC homes and climate — not a national content mill.
 
 ## Voice
 - Knowledgeable but approachable. Write like a helpful expert tradesperson,

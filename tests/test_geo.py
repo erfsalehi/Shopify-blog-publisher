@@ -110,3 +110,29 @@ def test_apply_geo_includes_quote_and_sources():
     # ordering: quote sits near the top (after takeaways, before Details), sources near the end
     assert out.index("Our team recommends") < out.index("Details")
     assert out.index("Sources &amp; standards") > out.index("Details")
+
+
+def test_build_jsonld_includes_local_business_and_breadcrumbs():
+    block = build_jsonld(
+        title="Best Hardwood Flooring in BC",
+        description="A complete guide to BC hardwood.",
+        faq=FAQ,
+        url="https://drflooring.ca/blogs/news/best-hardwood-bc",
+    )
+    raw = re.search(r">(.*)</script>", block, re.S).group(1).replace("<\\/", "</")
+    data = json.loads(raw)
+    types = {node["@type"] for node in data["@graph"]}
+    assert "LocalBusiness" in types
+    assert "Article" in types
+    assert "FAQPage" in types
+    assert "BreadcrumbList" in types
+
+    biz = next(n for n in data["@graph"] if n["@type"] == "LocalBusiness")
+    assert biz["address"]["addressLocality"] == "Langley"
+    assert biz["address"]["addressRegion"] == "BC"
+    area_names = {a["name"] for a in biz["areaServed"]}
+    assert "Langley" in area_names and "Surrey" in area_names and "Fraser Valley" in area_names
+
+    crumbs = next(n for n in data["@graph"] if n["@type"] == "BreadcrumbList")
+    assert len(crumbs["itemListElement"]) == 3
+    assert crumbs["itemListElement"][-1]["name"] == "Best Hardwood Flooring in BC"

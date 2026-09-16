@@ -49,7 +49,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from dashboard import product_copy, product_docs, store
+from dashboard import manufacturer, product_copy, product_docs, store
 from dashboard.competitors import FetchError
 from dashboard.config import is_serverless
 from dashboard.db import get_session
@@ -232,6 +232,7 @@ def start_run(
     link_products: bool = True,
     collection_mode: str = "new",
     build_page: bool = True,
+    is_single_product: bool = False,
 ) -> int:
     """Record the request and return its run id. Does no fetching.
 
@@ -259,6 +260,7 @@ def start_run(
         "max_docs": int(store.get(store.IMPORT_MAX_DOCS)),
         "batch": int(store.get(store.IMPORT_BATCH)),
         "source_tag": str(store.get(store.IMPORT_TAG_PREFIX) or "").strip(),
+        "single_product": bool(is_single_product),
     }
     with get_session() as session:
         run = ImportRun(
@@ -269,8 +271,9 @@ def start_run(
             options_json=json.dumps(options),
             stage=ImportStage.discover.value,
         )
+        action_desc = "single product " if is_single_product else ""
         run.note(
-            f"Queued {'a dry run of ' if dry_run else ''}{source_url.strip()}"
+            f"Queued {'a dry run of ' if dry_run else ''}{action_desc}{source_url.strip()}"
         )
         session.add(run)
         session.flush()
@@ -344,6 +347,69 @@ def _discover(run_id: int) -> PassResult:
         source_url, options = run.source_url, run.options
         dry_run = run.dry_run
         forced_title, forced_vendor = run.collection_title, run.vendor
+
+    if options.get("single_product"):
+        base, path = manufacturer.split_source_url(source_url)
+        handle = manufacturer.handle_from_url(source_url)
+        seed = None
+        http = source_client()
+        try:
+            if "/products/" in path:
+                shopify_endpoint = f"{base}/products/{handle}.json"
+                if manufacturer.may_fetch(base, f"/products/{handle}.json", client=http):
+                    try:
+                        resp = http.get(shopify_endpoint)
+                        if resp.status_code == 200:
+                            payload = resp.json() or {}
+                            node = payload.get("product")
+                            if node and isinstance(node, dict):
+                                seed = manufacturer._product_from_shopify_node(node, base)
+                    except Exception as e:
+                        log.debug("single product shopify lookup failed: %s", e)
+        finally:
+            http.close()
+
+        with get_session() as session:
+            run = session.get(ImportRun, run_id)
+            run.source_base = base
+            run.collection_title = forced_title or None
+            if forced_title:
+                run.collection_handle = product_copy.slugify(
+                    forced_title, fallback="single-product"
+                )
+            else:
+                run.collection_handle = None
+
+            if not forced_vendor and seed and seed.vendor and not run.vendor:
+                run.vendor = seed.vendor
+
+            existing = {
+                row.source_url
+                for row in session.query(ImportProduct.source_url)
+                .filter(ImportProduct.run_id == run_id)
+                .all()
+            }
+            if source_url not in existing:
+                session.add(
+                    ImportProduct(
+                        run_id=run_id,
+                        position=1,
+                        source_url=source_url,
+                        source_handle=(seed.handle if seed else handle),
+                        title=(seed.title if seed else None),
+                        extracted_json=json.dumps(seed.as_dict()) if seed else "{}",
+                        status=ImportProductStatus.pending.value,
+                    )
+                )
+
+            options["platform"] = "shopify" if seed else "generic"
+            run.options_json = json.dumps(options)
+            run.note(
+                f"Found product on {options['platform']} source."
+                + (" Dry run — nothing will be created." if dry_run else "")
+            )
+            _set_stage(session, run, ImportStage.products, "Reading product.")
+            return PassResult(run_id, ImportStage.products.value, done=False, handled=1)
 
     try:
         collection = discover_collection(
@@ -423,9 +489,12 @@ def _products(run_id: int) -> PassResult:
         with get_session() as session:
             run = session.get(ImportRun, run_id)
             counts = _counts(session, run_id)
+            make_col = options.get("make_collection", True) and (
+                not options.get("single_product") or bool(run.collection_title)
+            )
             next_stage = (
                 ImportStage.collection
-                if options.get("make_collection", True)
+                if make_col
                 else ImportStage.linking
             )
             _set_stage(
@@ -1587,6 +1656,13 @@ def _collection(run_id: int) -> PassResult:
     with get_session() as session:
         run = session.get(ImportRun, run_id)
         options, dry_run = run.options, run.dry_run
+        if options.get("single_product") and not run.collection_title:
+            with get_session() as s2:
+                r2 = s2.get(ImportRun, run_id)
+                r2.note("No collection name provided for single product, skipping collection creation.")
+                _set_stage(s2, r2, ImportStage.linking, "Cross-linking.")
+            return PassResult(run_id, ImportStage.linking.value, done=False)
+
         # The range name is what the products are tagged with and what the
         # "more from this range" heading reads. What goes on the shelf is
         # the store's own standard — brand, range, "Collection" — so the two

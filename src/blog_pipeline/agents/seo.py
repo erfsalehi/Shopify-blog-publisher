@@ -170,31 +170,44 @@ def score_seo(
 def insert_internal_links(
     body_html: str, targets: list[dict], max_links: int = 4
 ) -> tuple[str, int]:
-    """Hyperlink the first occurrence of each target's title in the body.
+    """Hyperlink occurrences of target titles or aliases in the body.
 
-    Skips text already inside a tag or an existing anchor (naive: only links
-    inside <p>...</p> plain runs). Returns (html, links_added).
+    Skips text already inside a tag or an existing anchor. Avoids linking to
+    the same destination URL multiple times. Returns (html, links_added).
     """
     added = 0
     result = body_html
+    linked_urls: set[str] = set()
+
     for target in targets:
         if added >= max_links:
             break
-        anchor = target.get("title", "").strip()
         url = target.get("url", "").strip()
-        if not anchor or not url or len(anchor) < 4:
+        if not url or url in linked_urls:
             continue
-        # Only replace when the phrase appears as visible text (rough guard:
-        # not immediately preceded by '>' of an anchor or inside a tag).
-        pattern = re.compile(
-            r"(?<![\">])\b" + re.escape(anchor) + r"\b(?![^<]*</a>)", re.I
-        )
-        new_result, n = pattern.subn(
-            f'<a href="{url}">{anchor}</a>', result, count=1
-        )
-        if n:
-            result = new_result
-            added += 1
+
+        phrases = [target.get("title", "").strip()]
+        if target.get("aliases"):
+            phrases.extend(target["aliases"])
+
+        # Try phrases longest first to match specific phrasing before generic
+        matched = False
+        for phrase in sorted(set(p.strip() for p in phrases if p.strip()), key=len, reverse=True):
+            if len(phrase) < 4:
+                continue
+            pattern = re.compile(
+                r"(?<![\">])\b" + re.escape(phrase) + r"\b(?![^<]*</a>)", re.I
+            )
+            # Find the actual matched casing from text
+            match = pattern.search(result)
+            if match:
+                matched_text = match.group(0)
+                result = pattern.sub(f'<a href="{url}">{matched_text}</a>', result, count=1)
+                added += 1
+                linked_urls.add(url)
+                matched = True
+                break
+
     return result, added
 
 

@@ -102,6 +102,28 @@ def test_product_card_carries_image_price_and_utm():
     assert "utm_campaign=best-vinyl-plank-2026" in out
     assert "$3.49" in out
     assert 'loading="lazy"' in out
+    assert "margin:0 !important" in out
+    assert "border-radius:0 !important" in out
+
+
+def test_product_card_renders_see_more_button_when_price_is_zero():
+    prod = {"title": "Zero Price Floor", "url": "https://x/p", "image": "https://x/i.jpg", "price": "$0.00"}
+    out = render_product_row([prod], "Guide")
+    assert "$0.00" not in out
+    assert "See More &rarr;" in out
+
+
+def test_product_card_renders_see_more_button_when_price_is_empty():
+    prod = {"title": "Unpriced Floor", "url": "https://x/p", "image": "https://x/i.jpg", "price": ""}
+    out = render_product_row([prod], "Guide")
+    assert "See More &rarr;" in out
+
+
+def test_placement_uses_h3_when_h2_count_is_low():
+    body = "<p>Intro</p><h2>Main Section</h2><p>text</p><h3>Subsection 1</h3><p>text</p><h3>Subsection 2</h3><p>text</p>"
+    out = place_blocks(body, [(0.4, "<div>A</div>"), (0.8, "<div>B</div>")])
+    assert "<div>A</div>" in out
+    assert "<div>B</div>" in out
 
 
 def test_product_card_needs_a_picture():
