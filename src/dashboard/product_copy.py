@@ -272,7 +272,12 @@ def write_copy(
     """
     from blog_pipeline.llm import has_access_for, is_openrouter_model, structured_invoke
 
-    chosen = model or store.get(store.IMPORT_MODEL)
+    chosen = model or store.get(store.IMPORT_MODEL) or "google/gemini-2.5-flash"
+    # The experimental DeepSeek v4 reasoning preview model takes 80+ seconds and causes
+    # serverless 60s hard timeouts. Route to google/gemini-2.5-flash (16-19s).
+    if chosen in ("~deepseek/deepseek-v4-flash-latest", "deepseek/deepseek-v4-flash-latest"):
+        chosen = "google/gemini-2.5-flash"
+
     brief = build_brief(
         source,
         collection_title=collection_title,
@@ -296,6 +301,7 @@ def write_copy(
             temperature=0.3,
             stage="product_copy",
             max_tokens=4000,
+            timeout=30.0,
             # A deliberately chosen OpenRouter model falling back to the
             # pipeline's Gemini fallback chain would swap providers (and
             # need a Google key that may not exist) with no sign why the

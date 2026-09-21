@@ -33,7 +33,7 @@ PROVIDER_FEE = 0.0  # no credit-top-up fee on AI Studio, unlike OpenRouter
 _RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
 _RETRYABLE_MARKERS = (
     "unavailable", "overloaded", "rate limit", "resource_exhausted",
-    "try again", "temporarily",
+    "try again", "temporarily", "timeout", "timed out",
 )
 
 
@@ -61,6 +61,7 @@ def make_llm(
     temperature: float = 0.7,
     max_retries: int = 2,
     max_tokens: int | None = None,
+    timeout: float | None = 35.0,
     **kwargs,
 ) -> ChatOpenAI:
     """Build a ChatOpenAI client for `model`, routed to whichever gateway its
@@ -68,6 +69,8 @@ def make_llm(
     settings = get_settings()
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
+    if timeout is not None:
+        kwargs["timeout"] = timeout
     if is_openrouter_model(model):
         if not settings.openrouter_api_key:
             raise RuntimeError(
@@ -158,6 +161,7 @@ def structured_invoke(
     fallbacks: list[str] | None = None,
     max_attempts: int = 3,
     max_tokens: int | None = None,
+    timeout: float | None = 35.0,
 ) -> Any:
     """Invoke `model` for structured output, retrying transient errors with
     backoff and falling back across other models if it keeps failing.
@@ -174,7 +178,7 @@ def structured_invoke(
     last_exc: Exception | None = None
     for m in chain:
         structured = make_llm(
-            m, temperature=temperature, max_tokens=max_tokens
+            m, temperature=temperature, max_tokens=max_tokens, timeout=timeout
         ).with_structured_output(schema, include_raw=True)
         for attempt in range(max_attempts):
             try:

@@ -473,15 +473,12 @@ SPECS = SPECS + LOCAL_SPECS
 IMPORT_SPECS: tuple[Spec, ...] = (
     Spec(
         key=IMPORT_MODEL,
-        default="~deepseek/deepseek-v4-flash-latest",
+        default="google/gemini-2.5-flash",
         label="Model that writes product copy",
         help=(
             "One call per product, and it is the call that decides what the "
-            "page says about a product the store has to stand behind. Worth "
-            "a stronger model than the dashboard's advisor uses — a "
-            "rate-limited one falls back to a plain description built from "
-            "the source, not to a guess. A name containing '/' (like the "
-            "default) routes through OpenRouter and needs OPENROUTER_API_KEY; "
+            "page says about a product the store has to stand behind. "
+            "A name containing '/' routes through OpenRouter and needs OPENROUTER_API_KEY; "
             "anything else routes through Google AI Studio and needs "
             "GOOGLE_API_KEY."
         ),
