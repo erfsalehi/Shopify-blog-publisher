@@ -709,6 +709,44 @@ class ShopifyClient:
             url = self.wait_for_file_url(node["id"])
         return {"id": node["id"], "url": url}
 
+    def wait_for_file_urls(
+        self, file_gids: list[str], *, attempts: int = 4, pause: float = 1.0
+    ) -> dict[str, str]:
+        """Poll uploaded generic files until each has a URL. Returns {file_gid: url}.
+
+        Queries all files in a single batch rather than serialising sleeps, and checks
+        immediately on attempt 0 so fast files return in milliseconds.
+        """
+        pending = [_as_gid(gid, "GenericFile") for gid in file_gids if gid]
+        if not pending:
+            return {}
+        urls: dict[str, str] = {}
+        for attempt in range(attempts):
+            data = self.graphql(
+                """
+                query($ids: [ID!]!) {
+                  nodes(ids: $ids) {
+                    ... on GenericFile { id fileStatus url }
+                  }
+                }
+                """,
+                {"ids": pending},
+            )
+            for node in data.get("nodes") or []:
+                if not node or not node.get("id"):
+                    continue
+                gid = node["id"]
+                if node.get("url"):
+                    urls[gid] = node["url"]
+                elif str(node.get("fileStatus") or "").upper() == "FAILED":
+                    log.warning("file %s failed processing in Shopify", gid)
+            pending = [gid for gid in pending if gid not in urls]
+            if not pending:
+                break
+            if attempt < attempts - 1:
+                time.sleep(pause)
+        return urls
+
     def wait_for_file_url(self, file_gid: str, attempts: int = 6) -> str | None:
         """Poll a file until Shopify finishes processing it and gives a URL.
 
@@ -717,23 +755,9 @@ class ShopifyClient:
         of giving up early is a missing download link on one product, not a
         lost file. Blocking a whole import on Shopify's queue would be worse.
         """
-        for attempt in range(attempts):
-            time.sleep(min(1.5 * (attempt + 1), 6.0))
-            node = self.graphql(
-                """
-                query($id: ID!) {
-                  node(id: $id) {
-                    ... on GenericFile { id fileStatus url }
-                  }
-                }
-                """,
-                {"id": file_gid},
-            ).get("node") or {}
-            if node.get("url"):
-                return node["url"]
-            if str(node.get("fileStatus") or "").upper() == "FAILED":
-                raise ShopifyError(f"Shopify failed to process file {file_gid}.")
-        return None
+        gid = _as_gid(file_gid, "GenericFile")
+        urls = self.wait_for_file_urls([gid], attempts=attempts)
+        return urls.get(gid)
 
     # ── products ─────────────────────────────────────────────────
     def find_product(self, handle: str) -> dict | None:

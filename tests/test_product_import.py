@@ -333,6 +333,12 @@ class FakeShopify:
     def upload_image(self, data, filename, mime_type="image/png"):
         return {"id": self._gid("MediaImage"), "url": f"https://cdn.shopify.test/{filename}"}
 
+    def wait_for_file_urls(self, file_gids, attempts=4, pause=1.0):
+        return {gid: f"https://cdn.shopify.test/{gid.split('/')[-1]}.pdf" for gid in file_gids}
+
+    def wait_for_file_url(self, file_gid, attempts=6):
+        return f"https://cdn.shopify.test/{file_gid.split('/')[-1]}.pdf"
+
     #: Definitions the store has, keyed by metafield key. The importer asks
     #: for these before it writes: a value written under a key the store has
     #: not defined is stored by Shopify and shown by nothing, which is what
@@ -728,6 +734,7 @@ def _drive(run_id: int, passes: int = 20) -> None:
 def test_a_collection_becomes_live_products_a_collection_and_cross_links(
     dashboard_db, fake_site, fake_shopify, no_llm
 ):
+    store.set(store.IMPORT_FILL_METAFIELDS, True)
     run_id = product_import.start_run("https://maker.test/collections/3dbars")
     _drive(run_id)
 
@@ -920,6 +927,7 @@ def test_two_products_that_compose_one_name_are_not_reported_as_yours(
 def test_an_import_defines_the_metafields_it_writes(
     dashboard_db, fake_site, fake_shopify, no_llm
 ):
+    store.set(store.IMPORT_FILL_METAFIELDS, True)
     run_id = product_import.start_run("https://maker.test/collections/3dbars")
     _drive(run_id)
 
@@ -945,6 +953,7 @@ def test_the_range_metafield_is_defined_even_when_nothing_is_created(
     the definitions have to be settled by the stage that needs them rather
     than as a side effect of making something.
     """
+    store.set(store.IMPORT_FILL_METAFIELDS, True)
     _drive(product_import.start_run("https://maker.test/collections/3dbars"))
     fake_shopify.definitions.clear()
     fake_shopify.undefined_writes.clear()
@@ -960,6 +969,7 @@ def test_a_store_that_already_defined_a_key_differently_is_told_not_corrected(
 ):
     """Changing the type of a definition that already has values under it is
     destructive, and belongs to whoever made it. Saying so is not."""
+    store.set(store.IMPORT_FILL_METAFIELDS, True)
     fake_shopify.definitions["specifications"] = "multi_line_text_field"
 
     run_id = product_import.start_run("https://maker.test/collections/3dbars")
@@ -983,6 +993,8 @@ def test_metafields_that_could_not_be_defined_do_not_fail_the_import(
     left to notice an empty panel and wonder which of the two happened.
     """
     from blog_pipeline.tools.shopify import ShopifyError
+
+    store.set(store.IMPORT_FILL_METAFIELDS, True)
 
     def refused(definitions, *, namespace, owner_type="PRODUCT"):
         raise ShopifyError("Access denied for metafieldDefinitionCreate")
@@ -1013,6 +1025,8 @@ def test_a_metafield_that_shopify_refuses_is_said_out_loud(
     just failed to write."""
     from blog_pipeline.tools.shopify import ShopifyError
 
+    store.set(store.IMPORT_FILL_METAFIELDS, True)
+
     def refuse(metafields):
         raise ShopifyError("metafieldsSet userErrors: [{'message': 'Value is invalid'}]")
 
@@ -1032,6 +1046,25 @@ def test_a_metafield_that_shopify_refuses_is_said_out_loud(
     assert "Value is invalid" in log
 
 
+def test_by_default_metafields_are_not_filled(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    """By default, filling metafields is disabled to prevent timeout and API overhead."""
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    _drive(run_id)
+
+    status = product_import.run_status(run_id)
+    assert status["counts"]["created"] == 2
+    assert status["stage"] == ImportStage.done.value
+    # No metafields written to Shopify
+    assert fake_shopify.metafields == []
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        log = "\n".join(run.log)
+    assert "Filling the storefront filter metafields" not in log
+    assert "Could not define this store's metafields" not in log
+
+
 # ── The storefront's filter fields ───────────────────────────────────
 #
 # A filter definition belongs to whoever built the filter: they chose its
@@ -1045,6 +1078,9 @@ def _store_defines(fake, **keys) -> None:
     fake.definitions.update(
         {key: type_ for key, type_ in keys.items()}
     )
+    store.set(store.IMPORT_FILL_METAFIELDS, True)
+    if not store.get(store.IMPORT_FILTER_KEYS):
+        store.set(store.IMPORT_FILTER_KEYS, "brand, type, width, colour, thickness")
 
 
 def test_the_filter_fields_are_filled_from_what_the_import_read(
@@ -1505,6 +1541,7 @@ def test_the_same_answer_is_not_written_to_the_log_fifty_times(
     """One import wrote the same "not filling" line fifty times, at which
     point the log is no longer a record of what happened — it is a record of
     what kept not happening, with the products buried in it."""
+    store.set(store.IMPORT_FILL_METAFIELDS, True)
     store.set(store.IMPORT_FILTER_KEYS, "brand, width")   # neither is defined
 
     # Two runs of the same collection, so the second has products to skip
@@ -2039,3 +2076,69 @@ def test_publishing_can_be_turned_off(
 
     assert fake.products
     assert fake.published == []
+
+
+def test_retry_reuses_generated_copy_without_reinvoking_llm(
+    dashboard_db, fake_site, fake_shopify, monkeypatch
+):
+    """If attempt 1 fails or times out after copy generation, attempt 2 reuses
+    the saved copy rather than re-invoking the model."""
+    call_count = {"llm": 0}
+
+    def counting_write_copy(*args, **kwargs):
+        call_count["llm"] += 1
+        from dashboard.product_copy import ProductCopy
+        return ProductCopy(
+            title="Bar Flat White 4x12",
+            product_type="Tile",
+            summary="A white tile",
+            paragraphs=["White tile description"],
+            bullets=["Tile bullet"],
+            seo_title="Bar Flat White 4x12 | Tile",
+            seo_description="White tile for bathroom and kitchen",
+        ), "mock-model"
+
+    monkeypatch.setattr(product_import.product_copy, "write_copy", counting_write_copy)
+
+    # First pass: discover
+    run_id = product_import.start_run("https://maker.test/collections/3dbars")
+    product_import.advance(run_id)
+
+    with get_session() as session:
+        product = session.query(ImportProduct).filter(ImportProduct.run_id == run_id).first()
+        product_id = product.id
+
+    # Simulate attempt 1 crashing inside _create_in_shopify after copy is saved
+    orig_create = product_import._create_in_shopify
+
+    def fail_once(*args, **kwargs):
+        # Even though create fails, the row already has generated_json saved
+        raise RuntimeError("Simulated timeout during Shopify create")
+
+    monkeypatch.setattr(product_import, "_create_in_shopify", fail_once)
+    product_import.advance(run_id)
+
+    assert call_count["llm"] >= 1
+    llm_first_pass = call_count["llm"]
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        assert row.attempts == 1
+        assert "White" in row.generated.get("title")
+
+    # Reset row status to pending to simulate retry on next pass
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        row.status = ImportProductStatus.pending.value
+        session.commit()
+
+    # Restore create_in_shopify, and run attempt 2
+    monkeypatch.setattr(product_import, "_create_in_shopify", orig_create)
+    product_import.advance(run_id)
+
+    # LLM was NOT called again for that product
+    assert call_count["llm"] == llm_first_pass
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        assert row.attempts == 2
+        assert row.status == ImportProductStatus.created.value
+

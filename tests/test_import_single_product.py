@@ -106,6 +106,32 @@ def test_web_route_single_product_validation(client):
     assert resp.status_code == 303
     assert "error" in resp.headers["location"]
 
+    # Rejects collection URL in single product importer
+    resp = client.post(
+        "/import/product",
+        data={
+            "source_url": "https://www.amestile.com/collections/beraberen",
+            "vendor": "Ames Tile",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error" in resp.headers["location"]
+    assert "collection+URL" in resp.headers["location"] or "collection" in resp.headers["location"]
+
+    # Rejects single product URL in collection importer
+    resp = client.post(
+        "/import",
+        data={
+            "source_url": "https://www.amestile.com/products/single-tile",
+            "vendor": "Ames Tile",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "error" in resp.headers["location"]
+    assert "product+URL" in resp.headers["location"] or "product" in resp.headers["location"]
+
     # Valid submission
     resp = client.post(
         "/import/product",
@@ -119,3 +145,4 @@ def test_web_route_single_product_validation(client):
     )
     assert resp.status_code == 303
     assert resp.headers["location"].startswith("/import/")
+

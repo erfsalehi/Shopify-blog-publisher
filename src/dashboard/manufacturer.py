@@ -446,6 +446,22 @@ def collect_images(soup: BeautifulSoup, base: str, limit: int = 20) -> list[Sour
     found: list[SourceImage] = []
     seen: set[str] = set()
 
+    _NAV_TAGS = {"header", "nav", "footer"}
+
+    def _is_nav_or_furniture(el) -> bool:
+        for parent in el.parents:
+            if getattr(parent, "name", None) in _NAV_TAGS:
+                return True
+            classes = parent.get("class") or []
+            if isinstance(classes, str):
+                classes = classes.split()
+            if any("mega-nav" in c or "mobile-menu" in c or "header-nav" in c for c in classes):
+                return True
+            id_val = str(parent.get("id") or "").lower()
+            if "mobile-menu" in id_val or "mega-nav" in id_val:
+                return True
+        return False
+
     def add(raw: str | None, alt: str | None) -> None:
         if not raw or len(found) >= limit:
             return
@@ -460,6 +476,8 @@ def collect_images(soup: BeautifulSoup, base: str, limit: int = 20) -> list[Sour
                                  position=len(found) + 1))
 
     for tag in soup.find_all("img"):
+        if _is_nav_or_furniture(tag):
+            continue
         alt = tag.get("alt")
         src = (
             tag.get("src") or tag.get("data-src") or tag.get("data-original")

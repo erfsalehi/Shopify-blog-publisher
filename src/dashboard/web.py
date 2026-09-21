@@ -490,6 +490,14 @@ def create_app() -> FastAPI:
                 ),
                 status_code=303,
             )
+        if "/products/" in url.lower() and "/collections/" not in url.lower():
+            return RedirectResponse(
+                "/import?error=" + quote(
+                    f"'{url}' looks like an individual product page, not a collection. "
+                    "Use the 'Import a single product' form instead."
+                ),
+                status_code=303,
+            )
         run_id = product_import.start_run(
             url,
             dry_run=bool(dry_run),
@@ -527,6 +535,14 @@ def create_app() -> FastAPI:
             return RedirectResponse(
                 "/import?error=" + quote(
                     "Set the brand — every product name begins with it ('Brand Collection Type Size - Colour')."
+                ),
+                status_code=303,
+            )
+        if "/collections/" in url.lower() and "/products/" not in url.lower():
+            return RedirectResponse(
+                "/import?error=" + quote(
+                    f"'{url}' looks like a collection URL with multiple products. "
+                    "Use the 'Import a collection' form to import all products from this collection."
                 ),
                 status_code=303,
             )

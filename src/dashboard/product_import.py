@@ -76,7 +76,7 @@ log = logging.getLogger(__name__)
 #: the same one and dies at the same point. One import spent fourteen hours
 #: this way, walking on the spot and writing a log line each time round.
 MAX_PRODUCT_ATTEMPTS = 6
-LEAN_AFTER_ATTEMPTS = 2
+LEAN_AFTER_ATTEMPTS = 1
 
 #: Wall clock one `advance()` may spend before returning, whatever stage it's
 #: in. Under Vercel's 60s ceiling with room to finish the product in hand and
@@ -233,6 +233,7 @@ def start_run(
     collection_mode: str = "new",
     build_page: bool = True,
     is_single_product: bool = False,
+    fill_metafields: bool | None = None,
 ) -> int:
     """Record the request and return its run id. Does no fetching.
 
@@ -261,6 +262,11 @@ def start_run(
         "batch": int(store.get(store.IMPORT_BATCH)),
         "source_tag": str(store.get(store.IMPORT_TAG_PREFIX) or "").strip(),
         "single_product": bool(is_single_product),
+        "fill_metafields": bool(
+            store.get(store.IMPORT_FILL_METAFIELDS)
+            if fill_metafields is None
+            else fill_metafields
+        ),
     }
     with get_session() as session:
         run = ImportRun(
@@ -507,7 +513,7 @@ def _products(run_id: int) -> PassResult:
         return PassResult(run_id, next_stage.value, done=False)
 
     client = _shopify_client() if not dry_run else None
-    if client is not None:
+    if client is not None and options.get("fill_metafields", False):
         _ensure_metafield_definitions(run_id, client)
         _report_filter_metafields(run_id, client)
     http = source_client()
@@ -624,6 +630,7 @@ def _one_product(
         attempt = row.attempts
         source_url = row.source_url
         seed_data = row.extracted
+        saved_copy = row.generated
         force_mode = row.force_mode
         label = row.title or row.source_url
 
@@ -652,83 +659,85 @@ def _one_product(
         }
         _note_once(
             run_id, f"lean:{product_id}",
-            f"{label} has run out of time {attempt - 1} times — trying it "
+            f"{label} has run out of time {attempt - 1} "
+            f"{'times' if attempt - 1 > 1 else 'time'} — trying it "
             "again with fewer images and documents.",
         )
 
     try:
-        seed = _seed_from(seed_data, source_url)
-        source = fetch_product(source_url, base, seed=seed, http=http)
-        source.images = source.images[: int(options.get("max_images", 8))]
+        reused = False
+        if attempt > 1 and seed_data and saved_copy:
+            try:
+                source = _seed_from(seed_data, source_url)
+                source.images = source.images[: int(options.get("max_images", 8))]
+                max_docs = int(options.get("max_docs", 4))
+                if max_docs and source.docs and not dry_run:
+                    product_docs.read_docs(
+                        source.docs, http=http, limit=max_docs, keep_data=True
+                    )
+                elif not max_docs:
+                    source.docs = []
+                copy_dict = {
+                    k: v for k, v in saved_copy.items()
+                    if k not in ("model", "doc_urls")
+                }
+                copy = product_copy.ProductCopy(**copy_dict)
+                model_used = saved_copy.get("model", "cached")
+                reused = True
+            except Exception as e:
+                log.warning("could not reuse cached copy for %s: %s", product_id, e)
+                reused = False
 
-        max_docs = int(options.get("max_docs", 4))
-        if max_docs and source.docs:
-            product_docs.read_docs(
-                source.docs, http=http, limit=max_docs, keep_data=not dry_run
+        if not reused:
+            seed = _seed_from(seed_data, source_url)
+            source = fetch_product(source_url, base, seed=seed, http=http)
+            source.images = source.images[: int(options.get("max_images", 8))]
+
+            max_docs = int(options.get("max_docs", 4))
+            if max_docs and source.docs:
+                product_docs.read_docs(
+                    source.docs, http=http, limit=max_docs, keep_data=not dry_run
+                )
+            elif not max_docs:
+                source.docs = []
+
+            copy, model_used = product_copy.write_copy(
+                source,
+                collection_title=collection_title,
+                collection_description=collection_description,
+                vendor=vendor or source.vendor,
             )
-        elif not max_docs:
-            source.docs = []
 
-        copy, model_used = product_copy.write_copy(
-            source,
-            collection_title=collection_title,
-            collection_description=collection_description,
-            vendor=vendor or source.vendor,
-        )
+            # The store's naming standard, applied here rather than left to the
+            # model: brand, range, type, colour. Done before the row is written
+            # so a dry run shows the name the product would actually get.
+            size = product_copy.derive_size(
+                source.title, source.specs, source.options
+            ) or product_copy.normalize_size(copy.size)
+            product_type = copy.product_type or source.product_type or ""
+            size, product_type = _range_shape(run_id, size=size, kind=product_type)
+            copy.size, copy.product_type = size, product_type or copy.product_type
 
-        # The store's naming standard, applied here rather than left to the
-        # model: brand, range, type, colour. Done before the row is written
-        # so a dry run shows the name the product would actually get.
-        # The manufacturer's own title is the better source for what
-        # separates this item from its siblings, and the model is the
-        # fallback rather than the other way round. Asked for it directly it
-        # returned nothing for twelve products out of fourteen, and for the
-        # one it answered it said "Onix" — dropping the finish, which is
-        # half the discriminator in a range where "Onix Bevel Gloss" and
-        # "Onix Diamond Gloss" are different products.
-        # Size is the item's, not the range's, and it is read off the
-        # maker's own title. A range is very often several sizes — Ames'
-        # "Advantage" is four colours in three of them — and the size is
-        # what separates those twelve products from each other. Taking it
-        # from the range instead gave all twelve the same name, and since
-        # the handle follows the name, eight of them were reported as
-        # already in the store and never imported.
-        #
-        # Normalised on the way through, both the source's answer and the
-        # model's, because `5"x10"` and `5" x 10"` are the same size and
-        # only one of them can be the store's. That, rather than settling
-        # one size for the range, is what keeps a range spelled one way.
-        #
-        # `_range_shape` is now only the fallback for a product whose page
-        # names no size or no type at all: it takes the range's rather than
-        # going to market unnamed.
-        size = product_copy.derive_size(
-            source.title, source.specs, source.options
-        ) or product_copy.normalize_size(copy.size)
-        product_type = copy.product_type or source.product_type or ""
-        size, product_type = _range_shape(run_id, size=size, kind=product_type)
-        copy.size, copy.product_type = size, product_type or copy.product_type
-
-        variant = product_copy.derive_variant(
-            source.title, collection=collection_title, size=size,
-        ) or copy.color
-        copy.color = variant
-        copy.title = product_copy.compose_title(
-            brand=vendor or source.vendor,
-            collection=collection_title,
-            product_type=product_type,
-            size=size,
-            color=variant,
-            fallback=copy.title or source.title,
-        )
-
-        with get_session() as session:
-            row = session.get(ImportProduct, product_id)
-            row.title = copy.title
-            row.extracted_json = json.dumps(source.as_dict())
-            row.generated_json = json.dumps(
-                {**copy.model_dump(), "model": model_used}
+            variant = product_copy.derive_variant(
+                source.title, collection=collection_title, size=size,
+            ) or copy.color
+            copy.color = variant
+            copy.title = product_copy.compose_title(
+                brand=vendor or source.vendor,
+                collection=collection_title,
+                product_type=product_type,
+                size=size,
+                color=variant,
+                fallback=copy.title or source.title,
             )
+
+            with get_session() as session:
+                row = session.get(ImportProduct, product_id)
+                row.title = copy.title
+                row.extracted_json = json.dumps(source.as_dict())
+                row.generated_json = json.dumps(
+                    {**copy.model_dump(), "model": model_used}
+                )
 
         if dry_run:
             _finish_product(
@@ -1244,7 +1253,15 @@ def _create_in_shopify(
     from blog_pipeline.tools.shopify import ShopifyError
 
     handle = product_copy.slugify(copy.title, fallback=source.handle or "product")
-    existing = client.find_product(handle)
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        row_gid = row.product_gid if row else None
+
+    existing = None
+    if row_gid:
+        existing = {"id": row_gid}
+    if not existing:
+        existing = client.find_product(handle)
 
     # A name this run has already used, on a different source page. Not a
     # skip, whatever the store says: two supplier products that composed the
@@ -1254,14 +1271,15 @@ def _create_in_shopify(
     # note says what happened.
     twin = (
         _claimed_in_run(run_id, handle, product_id)
-        if existing and not force_mode
+        if existing and not force_mode and not row_gid
         else None
     )
     if twin:
         handle = _free_handle(client, handle)
         existing = None
 
-    if existing and not force_mode:
+    is_resumed_create = bool(row_gid and existing and existing.get("id") == row_gid)
+    if existing and not force_mode and not is_resumed_create:
         _finish_product(
             product_id, ImportProductStatus.skipped,
             note="already in the store, left untouched",
@@ -1336,6 +1354,12 @@ def _create_in_shopify(
             status=status,
         )
     product_gid = created["id"]
+    with get_session() as session:
+        row = session.get(ImportProduct, product_id)
+        if row is not None:
+            row.product_gid = product_gid
+            row.handle = created.get("handle") or handle
+            session.flush()
 
     # Asked for rather than assumed. Every channel has its own "automatically
     # publish new products" setting, so an import that never mentions
@@ -1374,25 +1398,27 @@ def _create_in_shopify(
         )
         client.update_product(product_gid, description_html=body)
 
-    try:
-        client.set_metafields(_metafields(product_gid, source, copy, doc_urls))
-    except ShopifyError as e:
-        # Still not fatal — metafields are the machine-readable copy of what
-        # is already in the description, so losing them costs a theme feature
-        # and not the product. But it is said out loud on the run log now.
-        # This was a `log.info` into a serverless function's stderr, which is
-        # the same as silence: the run reported the product created, with a
-        # count of its images and documents, and nothing whatsoever about the
-        # structured data it had just failed to write.
-        log.info("metafields for %s failed: %s", product_gid, e)
-        _note(run_id, f"Metafields for {copy.title} were not written: {e}")
+    filled = []
+    if options.get("fill_metafields", False):
+        try:
+            client.set_metafields(_metafields(product_gid, source, copy, doc_urls))
+        except ShopifyError as e:
+            # Still not fatal — metafields are the machine-readable copy of what
+            # is already in the description, so losing them costs a theme feature
+            # and not the product. But it is said out loud on the run log now.
+            # This was a `log.info` into a serverless function's stderr, which is
+            # the same as silence: the run reported the product created, with a
+            # count of its images and documents, and nothing whatsoever about the
+            # structured data it had just failed to write.
+            log.info("metafields for %s failed: %s", product_gid, e)
+            _note(run_id, f"Metafields for {copy.title} were not written: {e}")
 
-    # The storefront's filter fields, in their own mutation. Written for an
-    # overwrite as well as a create — a product rewritten on request is a
-    # product whose width and colour have just been re-read.
-    filled = _write_filter_metafields(
-        run_id, client, product_gid, source, copy, vendor,
-    )
+        # The storefront's filter fields, in their own mutation. Written for an
+        # overwrite as well as a create — a product rewritten on request is a
+        # product whose width and colour have just been re-read.
+        filled = _write_filter_metafields(
+            run_id, client, product_gid, source, copy, vendor,
+        )
 
     # Where each document ended up, kept on the row: the cross-linking pass
     # rebuilds this description from scratch and would otherwise drop the
@@ -1404,7 +1430,7 @@ def _create_in_shopify(
     detail = f"{images_saved} images, {docs_saved} documents"
     if filled:
         detail += f", {len(filled)} filter fields"
-    if existing:
+    if existing and not is_resumed_create:
         detail = (
             "rewritten in place, "
             + (
@@ -1424,7 +1450,7 @@ def _create_in_shopify(
 
     _finish_product(
         product_id,
-        ImportProductStatus.updated if existing else ImportProductStatus.created,
+        ImportProductStatus.updated if (existing and not is_resumed_create) else ImportProductStatus.created,
         note=detail,
         product_gid=product_gid,
         handle=created.get("handle") or handle,
@@ -1587,14 +1613,23 @@ def _attach_docs(client, product_gid: str, source: SourceProduct) -> tuple[dict,
             # The bytes have done their job twice over — read, then uploaded.
             doc.data = None
 
-    for source_url, file_gid in awaiting:
+    if awaiting:
+        gids = [gid for _, gid in awaiting]
         try:
-            url = client.wait_for_file_url(file_gid, attempts=3)
+            if hasattr(client, "wait_for_file_urls"):
+                urls = client.wait_for_file_urls(gids, attempts=3, pause=1.0)
+            else:
+                urls = {gid: client.wait_for_file_url(gid, attempts=3) for gid in gids}
         except Exception as e:  # noqa: BLE001 - no URL is a missing link, not a failure
-            log.info("file %s never got a URL: %s", file_gid, e)
-            continue
-        if url:
-            doc_urls[source_url] = url
+            log.info("waiting for file urls failed: %s", e)
+            urls = {}
+
+        from blog_pipeline.tools.shopify import _as_gid
+        for source_url, file_gid in awaiting:
+            norm_gid = _as_gid(file_gid, "GenericFile")
+            url = urls.get(norm_gid) or urls.get(file_gid)
+            if url:
+                doc_urls[source_url] = url
     return doc_urls, saved
 
 
@@ -1785,7 +1820,7 @@ def _linking(run_id: int) -> PassResult:
     deadline = time.monotonic() + _budget()
     with get_session() as session:
         run = session.get(ImportRun, run_id)
-        dry_run = run.dry_run
+        dry_run, options = run.dry_run, run.options
         rows = (
             session.query(ImportProduct)
             .filter(
@@ -1849,7 +1884,8 @@ def _linking(run_id: int) -> PassResult:
     # This stage writes `related_products`, which no earlier stage does — a
     # run whose products all already existed reaches here having never
     # created one, and would otherwise write that field undefined.
-    _ensure_metafield_definitions(run_id, client)
+    if options.get("fill_metafields", False):
+        _ensure_metafield_definitions(run_id, client)
     handled = 0
     for item in todo:
         try:
@@ -1903,6 +1939,7 @@ def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
         source_url = row.source_url
         run = session.get(ImportRun, run_id)
         collection_title = (run.collection_title or "") if run else ""
+        options = run.options if run else {}
 
     copy = _copy_from(generated)
     docs = [
@@ -1925,7 +1962,7 @@ def _link_one(client, run_id: int, item: dict, siblings: list[dict]) -> None:
     client.update_product(item["gid"], description_html=body)
 
     related_gids = [s["gid"] for s in ordered if s["gid"] != item["gid"]][:limit]
-    if related_gids:
+    if related_gids and options.get("fill_metafields", False):
         try:
             client.set_metafields([{
                 "ownerId": item["gid"],

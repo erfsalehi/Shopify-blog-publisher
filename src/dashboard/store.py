@@ -69,6 +69,7 @@ IMPORT_FILTER_NAMESPACE = "import.filter_namespace"
 IMPORT_FILTER_KEYS = "import.filter_keys"
 IMPORT_FILTER_COLOURS = "import.filter_colours"
 IMPORT_CATEGORY_TAGS = "import.category_tags"
+IMPORT_FILL_METAFIELDS = "import.fill_metafields"
 
 
 
@@ -690,8 +691,23 @@ IMPORT_SPECS: tuple[Spec, ...] = (
         maximum=60,
     ),
     Spec(
+        key=IMPORT_FILL_METAFIELDS,
+        default=False,
+        label="Fill product metafields",
+        help=(
+            "Whether to write structured metafields (specifications, documents, "
+            "FAQ, source URL, and storefront filters) to Shopify products. "
+            "Disabled by default to speed up imports and avoid Shopify API limits. "
+            "The product description already contains all specifications, "
+            "downloads, and FAQs formatted in HTML."
+        ),
+        group="Product import",
+        kind="bool",
+        coerce=_as_bool,
+    ),
+    Spec(
         key=IMPORT_FILTER_KEYS,
-        default="brand, type, width, colour, thickness",
+        default="",
         label="Filter metafields to fill",
         help=(
             "Which of the store's filter metafields an import fills, by key, "
@@ -701,8 +717,7 @@ IMPORT_SPECS: tuple[Spec, ...] = (
             "These are never created: a filter definition is yours, made "
             "with the storefront access and the type the filter needs, and "
             "an import that invented a lookalike beside it would fill the "
-            "wrong one. Anything named here that the store hasn't defined is "
-            "reported on the run log, along with what it has."
+            "wrong one. Left blank by default to disable filling filter metafields."
         ),
         group="Product import",
         kind="str",

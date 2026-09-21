@@ -29,7 +29,138 @@
   Prices are never set: manufacturers don't publish yours.
 </p>
 
-<section class="panel">
+<div class="tab-nav">
+  <button type="button" class="tab-btn active" data-tab="tab-collection" onclick="switchImportTab('tab-collection')">
+    📁 Import a collection
+  </button>
+  <button type="button" class="tab-btn" data-tab="tab-single" onclick="switchImportTab('tab-single')">
+    📦 Import a single product
+  </button>
+  <button type="button" class="tab-btn" data-tab="tab-discover" onclick="switchImportTab('tab-discover')">
+    🔍 Scan all-collections page
+  </button>
+</div>
+
+<!-- Tab 1: Import a collection (Default) -->
+<section id="tab-collection" class="panel tab-content active">
+  <h2>Import a collection</h2>
+  <p class="muted small">
+    Import all products belonging to a collection range from the manufacturer's site.
+    The scraper reads every product, specifications, photos, and linked PDFs, creating
+    draft products linked together.
+  </p>
+  <form method="post" action="/import">
+    <div class="field">
+      <label for="source_url">Manufacturer collection URL</label>
+      <input type="url" class="wide" id="source_url" name="source_url" required
+             placeholder="https://www.example.com/collections/some-range">
+      <p class="help">
+        The page listing the range (e.g. <code>https://www.amestile.com/collections/beraberen</code>), not one product.
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="collection_title">Call the collection (optional)</label>
+      <input type="text" class="wide" id="collection_title" name="collection_title"
+             placeholder="Left blank: whatever the source page calls it">
+      <p class="help">
+        A manufacturer's internal name for a range is rarely what a customer
+        searches for. This is the title of the collection created here.
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="vendor">Brand</label>
+      <input type="text" class="wide" id="vendor" name="vendor" required
+             placeholder="EUROSTYLE, Ames Tile, …">
+      <p class="help">
+        Required, because every product name starts with it — "Brand
+        Collection Type Size - Colour".
+      </p>
+    </div>
+
+    <div class="field">
+      <label for="max_products">Most products to take</label>
+      <input type="number" id="max_products" name="max_products" min="1" max="500"
+             value="{{ defaults.max_products }}">
+      <p class="help">A ceiling, in case the URL turns out to be the whole catalogue.</p>
+    </div>
+
+    <div class="field">
+      <label for="publish_status">Create products as</label>
+      <select id="publish_status" name="publish_status">
+        <option value="DRAFT" {{ 'selected' if defaults.publish_status == 'DRAFT' }}>
+          Draft — review in Shopify admin first
+        </option>
+        <option value="ACTIVE" {{ 'selected' if defaults.publish_status == 'ACTIVE' }}>
+          Active — live on the storefront immediately
+        </option>
+      </select>
+    </div>
+
+    <div class="field">
+      <label>Is this a new range, or one we already carry?</label>
+      <label class="check">
+        <input type="radio" name="collection_mode" value="new" checked>
+        <span>New — nothing from this range is in the store yet</span>
+      </label>
+      <label class="check">
+        <input type="radio" name="collection_mode" value="update">
+        <span>We already carry it — add whatever is missing</span>
+      </label>
+      <p class="help">
+        Either way nothing is removed. Products already in the store are left
+        exactly as they are and simply added to the collection.
+      </p>
+    </div>
+
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="make_collection" value="1" checked>
+        <span>Put the products in a collection</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="build_page" value="1" checked>
+        <span>Build the collection page if there isn't one yet</span>
+      </label>
+      <p class="help">
+        An existing page is added to, never rewritten.
+      </p>
+    </div>
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="link_products" value="1" checked>
+        <span>Link every product to the others in the range, with pictures</span>
+      </label>
+    </div>
+    <div class="field">
+      <label class="check">
+        <input type="checkbox" name="dry_run" value="1">
+        <span>Dry run — read everything, create nothing</span>
+      </label>
+      <p class="help">
+        The safe way to try a supplier's site for the first time: you see
+        exactly what was extracted from each product page and what the
+        description would say, with nothing sent to Shopify.
+      </p>
+    </div>
+
+    <div class="actions">
+      <button type="submit" class="primary">Start collection import</button>
+    </div>
+  </form>
+  <p class="muted small">
+    Images, documents, copy and tags are governed by the
+    <a href="/settings">Product import settings</a> — currently
+    {{ defaults.max_images }} images and {{ defaults.max_docs }} documents per
+    product, copy written by <code>{{ defaults.model }}</code>.
+  </p>
+</section>
+
+<!-- Tab 2: Import a single product -->
+<section id="tab-single" class="panel tab-content">
   <h2>Import a single product</h2>
   <p class="muted small">
     Import an individual product directly from its manufacturer or supplier product page URL.
@@ -42,7 +173,7 @@
       <input type="url" class="wide" id="single_source_url" name="source_url" required
              placeholder="https://www.example.com/products/some-product">
       <p class="help">
-        The direct link to the product on the manufacturer's or supplier's site.
+        The direct link to the specific product on the manufacturer's or supplier's site.
       </p>
     </div>
 
@@ -91,12 +222,13 @@
     </div>
 
     <div class="actions">
-      <button type="submit" class="primary">Import product</button>
+      <button type="submit" class="primary">Import single product</button>
     </div>
   </form>
 </section>
 
-<section class="panel">
+<!-- Tab 3: Discover from an all-collections page -->
+<section id="tab-discover" class="panel tab-content">
   <h2>Discover from an all-collections page</h2>
   <p class="muted small">
     Scan a manufacturer's catalogue index or all-collections page (e.g. <code>https://maker.com/collections</code>).
@@ -132,133 +264,6 @@
       <button type="submit" class="primary">Scan for collections</button>
     </div>
   </form>
-</section>
-
-<section class="panel">
-  <h2>Import a collection</h2>
-  <form method="post" action="/import">
-    <div class="field">
-      <label for="source_url">Manufacturer collection URL</label>
-      <input type="url" class="wide" id="source_url" name="source_url" required
-             placeholder="https://www.example.com/collections/some-range">
-      <p class="help">
-        The page listing the range, not one product. A Shopify manufacturer
-        site gives the most complete result — the whole product, images and all,
-        comes from their own feed.
-      </p>
-    </div>
-
-    <div class="field">
-      <label for="collection_title">Call the collection (optional)</label>
-      <input type="text" class="wide" id="collection_title" name="collection_title"
-             placeholder="Left blank: whatever the source page calls it">
-      <p class="help">
-        A manufacturer's internal name for a range is rarely what a customer
-        searches for. This is the title of the collection created here.
-      </p>
-    </div>
-
-    <div class="field">
-      <label for="vendor">Brand</label>
-      <input type="text" class="wide" id="vendor" name="vendor" required
-             placeholder="EUROSTYLE, Ames Tile, …">
-      <p class="help">
-        Required, because every product name starts with it — "Brand
-        Collection Type Size - Colour". It used to say "left blank: taken
-        from the source", which is true of a Shopify supplier and false of
-        most others: a Magento catalogue publishes no brand anywhere a
-        scraper can read, so leaving it blank silently dropped the brand
-        from every name in the range.
-      </p>
-    </div>
-
-    <div class="field">
-      <label for="max_products">Most products to take</label>
-      <input type="number" id="max_products" name="max_products" min="1" max="500"
-             value="{{ defaults.max_products }}">
-      <p class="help">A ceiling, in case the URL turns out to be the whole catalogue.</p>
-    </div>
-
-    <div class="field">
-      <label for="publish_status">Create products as</label>
-      <select id="publish_status" name="publish_status">
-        <option value="DRAFT" {{ 'selected' if defaults.publish_status == 'DRAFT' }}>
-          Draft — review in Shopify admin first
-        </option>
-        <option value="ACTIVE" {{ 'selected' if defaults.publish_status == 'ACTIVE' }}>
-          Active — live on the storefront immediately
-        </option>
-      </select>
-    </div>
-
-    {# New versus existing changes what happens to a product that is already
-       in the store, so it is asked rather than inferred. Inferring it from
-       whether a collection with this handle exists gets the common case
-       wrong in the expensive direction: a range imported before the
-       collection page was ever built looks new, and would be created twice. #}
-    <div class="field">
-      <label>Is this a new range, or one we already carry?</label>
-      <label class="check">
-        <input type="radio" name="collection_mode" value="new" checked>
-        <span>New — nothing from this range is in the store yet</span>
-      </label>
-      <label class="check">
-        <input type="radio" name="collection_mode" value="update">
-        <span>We already carry it — add whatever is missing</span>
-      </label>
-      <p class="help">
-        Either way nothing is removed. Products already in the store are left
-        exactly as they are and simply added to the collection, and a product
-        the supplier has since dropped stays on the store — their catalogue
-        is not a record of what you sell.
-      </p>
-    </div>
-
-    <div class="field">
-      <label class="check">
-        <input type="checkbox" name="make_collection" value="1" checked>
-        <span>Put the products in a collection</span>
-      </label>
-    </div>
-    <div class="field">
-      <label class="check">
-        <input type="checkbox" name="build_page" value="1" checked>
-        <span>Build the collection page if there isn't one yet</span>
-      </label>
-      <p class="help">
-        An existing page is added to, never rewritten. Untick this to add
-        products to a collection you maintain by hand — or for an older range
-        whose page you would rather build yourself.
-      </p>
-    </div>
-    <div class="field">
-      <label class="check">
-        <input type="checkbox" name="link_products" value="1" checked>
-        <span>Link every product to the others in the range, with pictures</span>
-      </label>
-    </div>
-    <div class="field">
-      <label class="check">
-        <input type="checkbox" name="dry_run" value="1">
-        <span>Dry run — read everything, create nothing</span>
-      </label>
-      <p class="help">
-        The safe way to try a supplier's site for the first time: you see
-        exactly what was extracted from each product page and what the
-        description would say, with nothing sent to Shopify.
-      </p>
-    </div>
-
-    <div class="actions">
-      <button type="submit" class="primary">Start import</button>
-    </div>
-  </form>
-  <p class="muted small">
-    Images, documents, copy and tags are governed by the
-    <a href="/settings">Product import settings</a> — currently
-    {{ defaults.max_images }} images and {{ defaults.max_docs }} documents per
-    product, copy written by <code>{{ defaults.model }}</code>.
-  </p>
 </section>
 
 {# Filling a list once and leaving it is a different shape of work from
@@ -396,4 +401,29 @@ https://www.amestile.com/collections/anthology, Ames Tile &amp; Stone, Anthology
   </tbody>
 </table>
 {% endif %}
+
+<script>
+function switchImportTab(tabId) {
+  document.querySelectorAll('.tab-content').forEach(function(el) {
+    el.classList.remove('active');
+  });
+  document.querySelectorAll('.tab-btn').forEach(function(el) {
+    el.classList.remove('active');
+  });
+  var target = document.getElementById(tabId);
+  if (target) target.classList.add('active');
+  var btn = document.querySelector('.tab-btn[data-tab="' + tabId + '"]');
+  if (btn) btn.classList.add('active');
+  if (history.replaceState) {
+    history.replaceState(null, null, '#' + tabId);
+  }
+}
+window.addEventListener('DOMContentLoaded', function() {
+  var hash = (window.location.hash || '').replace('#', '');
+  if (hash && document.getElementById(hash)) {
+    switchImportTab(hash);
+  }
+});
+</script>
 {% endblock %}
+
