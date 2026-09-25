@@ -845,6 +845,39 @@ def slugify(text: str, *, fallback: str = "product") -> str:
     return (slug or fallback)[:100].strip("-")
 
 
+def _vendor_words(name: str) -> list[str]:
+    return re.sub(r"[^a-z0-9]+", " ", (name or "").lower().replace("&", " and ")).split()
+
+
+def store_vendor(name: str | None, known: list[str]) -> str | None:
+    """The store's own spelling of this brand, when it already has one.
+
+    The vendor is typed on every import, and brand pages are smart
+    collections on the exact string. "Ames Tile" against a store whose brand
+    page wants "Ames Tile & Stone" put 120 products on no brand page at all,
+    and nothing said so. So a name the store already uses, however it was
+    capitalised or punctuated, is used as the store writes it; and one that
+    is the start of exactly one existing name (or that one name is the start
+    of it) is taken to mean that name. Anything else is a new brand and is
+    left as typed — two candidates is a guess, not a match.
+    """
+    if not name or not name.strip():
+        return name
+    words = _vendor_words(name)
+    if not words:
+        return name
+    for vendor in known:
+        if _vendor_words(vendor) == words:
+            return vendor
+    candidates = []
+    for vendor in known:
+        other = _vendor_words(vendor)
+        shorter, longer = sorted((words, other), key=len)
+        if shorter and longer[: len(shorter)] == shorter:
+            candidates.append(vendor)
+    return candidates[0] if len(candidates) == 1 else name
+
+
 # ── Rendering ────────────────────────────────────────────────────────
 
 

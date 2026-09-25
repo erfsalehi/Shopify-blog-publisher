@@ -27,6 +27,7 @@ muted within a week — taking the real ones with it.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -39,6 +40,7 @@ from dashboard.jobs.gsc import settled_through
 from dashboard.models import (
     AdsCampaignDaily,
     Alert,
+    AppSetting,
     AlertRule,
     Competitor,
     CompetitorMatch,
@@ -381,6 +383,53 @@ def _competitor_posted(threshold: float, today: date) -> list[Finding]:
     return findings
 
 
+def _storefront_gaps(threshold: float, today: date) -> list[Finding]:
+    """Live products and non-empty collections the Online Store doesn't carry.
+
+    Both 404 on the storefront. The collection is the expensive one: it is
+    usually the only page linking its range, so a range whose collection
+    404s is a range Google never crawls. Seventeen of them sat like that for
+    up to three weeks in September 2026 — indexing for new products fell
+    from ~95% to 13% — with nothing on screen to say so.
+
+    Asked of Shopify directly rather than read from a sync: nothing synced
+    records which channels carry what. Threshold unused.
+    """
+    from blog_pipeline.config import get_settings
+    from blog_pipeline.tools.shopify import ShopifyClient
+
+    if not get_settings().has_shopify:
+        return []
+    client = ShopifyClient()
+    try:
+        gaps = client.storefront_gaps()
+    finally:
+        client.close()
+
+    findings = []
+    for key, noun in (("collections", "collection"), ("products", "product")):
+        items = gaps.get(key) or []
+        if not items:
+            continue
+        names = "\n".join(f"- {i.get('title') or i.get('handle')}" for i in items[:15])
+        more = f"\n…and {len(items) - 15} more." if len(items) > 15 else ""
+        findings.append(Finding(
+            kind="storefront_gaps",
+            subject=key,
+            title=(
+                f"{len(items)} live {noun}{'' if len(items) == 1 else 's'} "
+                "not on the Online Store"
+            ),
+            body=(
+                f"{names}{more}\n\nThese 404 on the storefront, so Google can't "
+                "index them — or, for a collection, anything only it links to. "
+                "Publish them to the Online Store in Shopify admin."
+            ),
+            severity="high" if key == "collections" else "warn",
+        ))
+    return findings
+
+
 KINDS: tuple[RuleKind, ...] = (
     RuleKind(
         key="clicks_drop", label="Organic clicks drop (week over week)",
@@ -431,7 +480,24 @@ KINDS: tuple[RuleKind, ...] = (
              "One alert per competitor per window, not one per post.",
         unit="days", default_threshold=7, evaluate=_competitor_posted,
     ),
+    RuleKind(
+        key="storefront_gaps", label="Pages missing from the Online Store",
+        help="Fires when a live product, or a collection with products in it, "
+             "isn't published to the Online Store — its page 404s and Google "
+             "can't index it. Threshold unused.",
+        unit="", default_threshold=0, evaluate=_storefront_gaps,
+    ),
 )
+
+#: The kinds every database had from its first seeding. A kind added after
+#: that is seeded into an existing database once, and recorded as seeded —
+#: see `ensure_default_rules`.
+_ORIGINAL_KINDS = frozenset({
+    "clicks_drop", "position_drop", "conversions_drop",
+    "spend_without_conversions", "cost_per_conversion", "job_failure",
+    "competitor_undercut", "competitor_posted",
+})
+_SEEDED_KEY = "alerts.seeded_kinds"
 
 _BY_KIND = {k.key: k for k in KINDS}
 
@@ -450,14 +516,31 @@ def default_rules() -> list[dict]:
 
 
 def ensure_default_rules() -> int:
-    """Create the default rule set once. Never re-creates a deleted rule —
-    removing a rule the owner deleted every night would be its own bug."""
+    """Create each default rule once. Never re-creates a deleted rule —
+    removing a rule the owner deleted every night would be its own bug.
+
+    "Once" is per kind, not per database: a kind added in a later release
+    would otherwise never reach a database seeded before it existed, and
+    the rule would ship switched off everywhere it mattered. Which kinds
+    have been seeded is recorded, so deleting one still sticks.
+    """
     with get_session() as session:
-        if session.query(AlertRule).count():
-            return 0
-        for spec in default_rules():
+        marker = session.get(AppSetting, _SEEDED_KEY)
+        if not session.query(AlertRule).count() and marker is None:
+            seeded: set[str] = set()
+        elif marker is None:
+            seeded = set(_ORIGINAL_KINDS)
+        else:
+            seeded = set(json.loads(marker.value_json or "[]"))
+        todo = [s for s in default_rules() if s["kind"] not in seeded]
+        for spec in todo:
             session.add(AlertRule(**spec))
-        return len(KINDS)
+        seeded |= {k.key for k in KINDS}
+        if marker is None:
+            session.add(AppSetting(key=_SEEDED_KEY, value_json=json.dumps(sorted(seeded))))
+        else:
+            marker.value_json = json.dumps(sorted(seeded))
+        return len(todo)
 
 
 def _fingerprint(rule_id: int | None, finding: Finding) -> str:

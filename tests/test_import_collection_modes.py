@@ -42,6 +42,19 @@ class FakeShopify:
         self.collections = list(collections or [])
         self.created: list[dict] = []
         self.added: list[tuple[str, list[str]]] = []
+        self.published: list[str] = []
+        self.menu_adds: list[tuple[str, str, str]] = []
+
+    def publish_to_all_channels(self, resource_gid):
+        self.published.append(resource_gid)
+        return ["Online Store"]
+
+    def not_on_online_store(self, gids):
+        return [{"id": g, "title": g} for g in gids if g not in self.published]
+
+    def add_collection_to_menu(self, menu_handle, collection_gid, title):
+        self.menu_adds.append((menu_handle, collection_gid, title))
+        return "added"
 
     def find_collection(self, handle):
         return next((c for c in self.collections if c["handle"] == handle), None)
@@ -62,7 +75,10 @@ class FakeShopify:
 @pytest.fixture
 def run_factory(dashboard_db, monkeypatch):
     """Build a run sitting at the collection stage with a known product mix."""
-    def build(*, mode="new", build_page=True, created=2, skipped=0, shopify=None):
+    def build(
+        *, mode="new", build_page=True, created=2, skipped=0, shopify=None,
+        all_channels=True,
+    ):
         fake = shopify or FakeShopify()
         monkeypatch.setattr(product_import, "_shopify_client", lambda: fake)
         with get_session() as session:
@@ -77,6 +93,7 @@ def run_factory(dashboard_db, monkeypatch):
                     "collection_mode": mode,
                     "build_page": build_page,
                     "link_products": False,
+                    "all_channels": all_channels,
                 }),
             )
             session.add(run)
@@ -211,3 +228,48 @@ def test_calling_it_new_when_it_is_not_says_so_rather_than_duplicating(
     assert fake.created == []
     assert "already existed" in _note(run_id)
 
+
+
+# ── Whether the page can be reached ────────────────────────────────
+
+
+def test_a_new_page_is_published_to_the_storefront(run_factory):
+    """`collectionCreate` puts the collection on no channel, and the page
+    404s. It is how Google reaches the range: every range created this way
+    from 7 Sep 2026 went uncrawled."""
+    run_id, fake = run_factory(mode="new", created=3)
+    product_import.advance(run_id)
+    assert fake.published == ["gid://shopify/Collection/1"]
+
+
+def test_an_existing_page_is_published_too(run_factory):
+    """A re-run is how a range left unpublished gets repaired."""
+    fake = FakeShopify([
+        {"id": "gid://shopify/Collection/9", "handle": HANDLE,
+         "title": "Berlin Series"},
+    ])
+    run_id, fake = run_factory(mode="update", shopify=fake)
+    product_import.advance(run_id)
+    assert fake.published == ["gid://shopify/Collection/9"]
+
+
+def test_the_page_is_not_published_when_publishing_is_off(run_factory):
+    run_id, fake = run_factory(mode="new", all_channels=False)
+    product_import.advance(run_id)
+    assert fake.created and fake.published == []
+
+
+def test_a_channel_refusal_is_said_rather_than_failing_the_stage(run_factory):
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    class Refusing(FakeShopify):
+        def publish_to_all_channels(self, resource_gid):
+            raise ShopifyError("publishablePublish: access denied")
+
+    run_id, fake = run_factory(mode="new", shopify=Refusing())
+    product_import.advance(run_id)
+
+    assert fake.created
+    assert "could not be published" in _note(run_id)
+    with get_session() as session:
+        assert session.get(ImportRun, run_id).stage != ImportStage.collection.value

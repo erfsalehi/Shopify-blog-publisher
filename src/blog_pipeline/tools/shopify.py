@@ -901,6 +901,146 @@ class ShopifyClient:
         self._check_user_errors(data, "publishablePublish")
         return [p["name"] for p in publications]
 
+    def _online_store_id(self) -> str | None:
+        return next(
+            (p["id"] for p in self.list_publications() if p.get("name") == "Online Store"),
+            None,
+        )
+
+    def not_on_online_store(self, gids: list[str]) -> list[dict]:
+        """Which of these products or collections the storefront can't show.
+
+        A resource that isn't published to the Online Store 404s there,
+        whatever its status says, and that is invisible from the admin
+        unless someone opens the channel list. None comes back as "can't
+        tell" rather than as a clean bill: a store with no Online Store
+        channel has nothing to check against.
+        """
+        online = self._online_store_id()
+        if not online or not gids:
+            return []
+        missing: list[dict] = []
+        for start in range(0, len(gids), 100):
+            data = self.graphql(
+                """
+                query($ids: [ID!]!, $pub: ID!) {
+                  nodes(ids: $ids) {
+                    ... on Product { id handle title publishedOnPublication(publicationId: $pub) }
+                    ... on Collection { id handle title publishedOnPublication(publicationId: $pub) }
+                  }
+                }
+                """,
+                {"ids": gids[start:start + 100], "pub": online},
+            )
+            missing += [
+                n for n in data.get("nodes") or []
+                if n and n.get("publishedOnPublication") is False
+            ]
+        return missing
+
+    def storefront_gaps(self, limit: int = 50) -> dict[str, list[dict]]:
+        """Live products and non-empty collections the Online Store doesn't carry.
+
+        Both 404 on the storefront, and a collection that 404s is worse than
+        it looks: it is usually the only page linking its range, so Google
+        never finds the products either. An empty collection is left out on
+        purpose — publishing it would put a page with nothing on it live.
+        """
+        online = self._online_store_id()
+        if not online:
+            return {"products": [], "collections": []}
+        data = self.graphql(
+            """
+            query($pub: ID!, $n: Int!) {
+              products(first: $n, query: "status:active published_status:unpublished") {
+                nodes { id handle title publishedOnPublication(publicationId: $pub) }
+              }
+              collections(first: $n, query: "published_status:unpublished") {
+                nodes {
+                  id handle title productsCount { count }
+                  publishedOnPublication(publicationId: $pub)
+                }
+              }
+            }
+            """,
+            {"pub": online, "n": limit},
+        )
+        products = [
+            n for n in (data.get("products") or {}).get("nodes") or []
+            if n.get("publishedOnPublication") is False
+        ]
+        collections = [
+            n for n in (data.get("collections") or {}).get("nodes") or []
+            if n.get("publishedOnPublication") is False
+            and ((n.get("productsCount") or {}).get("count") or 0) > 0
+        ]
+        return {"products": products, "collections": collections}
+
+    def product_vendors(self) -> list[str]:
+        """Every vendor name the store's products already use."""
+        data = self.graphql("{ shop { productVendors(first: 250) { nodes } } }")
+        return list(((data.get("shop") or {}).get("productVendors") or {}).get("nodes") or [])
+
+    def add_collection_to_menu(
+        self, menu_handle: str, collection_gid: str, title: str
+    ) -> str:
+        """Put a collection on a navigation menu, if the menu exists.
+
+        Returns "added", "present" or "no-menu". A brand page that lists its
+        ranges from a menu shows a new range the moment it is added here; one
+        that lists them in hand-written theme HTML never does, which is how
+        eleven Ames Tile ranges ended up with nothing linking to them.
+
+        `menuUpdate` replaces the item list wholesale, so every existing item
+        is sent back with its id — leaving one out deletes it.
+        """
+        data = self.graphql(
+            """
+            fragment I on MenuItem { id title type resourceId url tags }
+            query($q: String!) {
+              menus(first: 5, query: $q) {
+                nodes { id handle title items { ...I items { ...I items { ...I } } } }
+              }
+            }
+            """,
+            {"q": f"handle:{menu_handle}"},
+        )
+        menu = next(
+            (m for m in (data.get("menus") or {}).get("nodes") or []
+             if m.get("handle") == menu_handle),
+            None,
+        )
+        if menu is None:
+            return "no-menu"
+        items = menu.get("items") or []
+        if any(i.get("resourceId") == collection_gid for i in items):
+            return "present"
+        kept = [_menu_item_input(i) for i in items]
+        # Slotted in alphabetically without re-sorting the rest: the owner
+        # may have put the list in an order of their own.
+        at = next(
+            (n for n, i in enumerate(kept)
+             if (i.get("title") or "").lower() > title.lower()),
+            len(kept),
+        )
+        ordered = kept[:at] + [
+            {"title": title, "type": "COLLECTION", "resourceId": collection_gid}
+        ] + kept[at:]
+        result = self.graphql(
+            """
+            mutation($id: ID!, $title: String!, $handle: String!, $items: [MenuItemUpdateInput!]!) {
+              menuUpdate(id: $id, title: $title, handle: $handle, items: $items) {
+                menu { id }
+                userErrors { field message }
+              }
+            }
+            """,
+            {"id": menu["id"], "title": menu["title"], "handle": menu["handle"],
+             "items": ordered},
+        )["menuUpdate"]
+        self._check_user_errors(result, "menuUpdate")
+        return "added"
+
     def update_product(
         self,
         product_gid: str,
@@ -1320,6 +1460,25 @@ _JUNK_TAG_PREFIXES = (
 )
 _JUNK_COLLECTION_TITLES = {"home page", "all products"}
 
+
+
+def _menu_item_input(item: dict) -> dict:
+    """A menu item as read, in the shape `menuUpdate` takes it back.
+
+    Children included: `menuUpdate` replaces the whole tree, so a submenu
+    not sent back is a submenu deleted. A resource item must not also send
+    its url, which Shopify derives from the resource.
+    """
+    out = {
+        k: item[k] for k in ("id", "title", "type", "resourceId", "url", "tags")
+        if item.get(k) is not None
+    }
+    if out.get("resourceId"):
+        out.pop("url", None)
+    children = [_menu_item_input(i) for i in item.get("items") or []]
+    if children:
+        out["items"] = children
+    return out
 
 def _match_text(product: dict) -> str:
     """The words a product should be findable by.

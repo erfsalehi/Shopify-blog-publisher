@@ -226,6 +226,10 @@ class FakeShopify:
         self.collections: list[dict] = []
         self.updates: list[dict] = []
         self.published: list[str] = []
+        #: Vendor names the store's products already use, and the menus a
+        #: brand page could list its ranges from: {handle: [items]}.
+        self.vendors: list[str] = []
+        self.menus: dict[str, list[dict]] = {}
         #: {key: type} the store has defined, and every value written under
         #: a key that had no definition at the time. This store keeps its
         #: filter definitions in `filter`, apart from the `custom` namespace
@@ -319,6 +323,22 @@ class FakeShopify:
     def publish_to_all_channels(self, resource_gid):
         self.published.append(resource_gid)
         return ["Online Store"]
+
+    def not_on_online_store(self, gids):
+        known = {n["id"]: n for n in [*self.products.values(), *self.collections]}
+        return [known.get(g, {"id": g}) for g in gids if g not in self.published]
+
+    def product_vendors(self):
+        return list(self.vendors)
+
+    def add_collection_to_menu(self, menu_handle, collection_gid, title):
+        if menu_handle not in self.menus:
+            return "no-menu"
+        items = self.menus[menu_handle]
+        if any(i["resourceId"] == collection_gid for i in items):
+            return "present"
+        items.append({"title": title, "resourceId": collection_gid})
+        return "added"
 
     def upload_file(self, data, filename, mime_type="application/pdf", alt=None, wait=True):
         record = {
@@ -2036,7 +2056,8 @@ def test_a_new_product_is_published_to_every_channel(
         if product_import.advance(run_id).done:
             break
 
-    assert len(fake.published) == len(fake.products)
+    product_gids = {p["id"] for p in fake.products.values()}
+    assert product_gids <= set(fake.published)
     assert fake.published
 
 
@@ -2076,6 +2097,111 @@ def test_publishing_can_be_turned_off(
 
     assert fake.products
     assert fake.published == []
+
+
+# ── Reachable, not just created ─────────────────────────────────────
+#
+# September 2026: every product page was live and almost none of the new
+# ones were indexed. The range collections 404'd, and the brand page filtered
+# on a vendor spelled differently from the one typed into the import. See
+# tests/test_storefront_reach.py for the pieces; these are whole runs.
+
+
+def _run_to_end(run_id: int) -> None:
+    for _ in range(60):
+        if product_import.advance(run_id).done:
+            return
+    raise AssertionError("run did not finish")
+
+
+def _run_log(run_id: int) -> str:
+    with get_session() as session:
+        return " ".join(session.get(ImportRun, run_id).log)
+
+
+def test_a_vendor_typed_differently_uses_the_stores_spelling(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    fake_shopify.vendors = ["Ames Tile & Stone"]
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    _run_to_end(run_id)
+
+    vendors = {p["vendor"] for p in fake_shopify.products.values()}
+    assert vendors == {"Ames Tile & Stone"}
+    assert "is written “Ames Tile & Stone” in this store" in _run_log(run_id)
+
+
+def test_a_new_range_is_listed_on_its_brand_menu(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    fake_shopify.menus["ames-tile-collections"] = []
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    _run_to_end(run_id)
+
+    items = fake_shopify.menus["ames-tile-collections"]
+    assert [i["resourceId"] for i in items] == [fake_shopify.collections[0]["id"]]
+    # The brand page already says whose range it is.
+    assert not items[0]["title"].lower().startswith("ames tile")
+
+
+def test_a_brand_with_no_menu_is_told_to_link_the_range(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    _run_to_end(run_id)
+    assert "No “ames-tile-collections” menu" in _run_log(run_id)
+
+
+def test_the_end_of_a_run_confirms_the_storefront_carries_it(
+    dashboard_db, fake_site, fake_shopify, no_llm
+):
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    _run_to_end(run_id)
+    assert fake_shopify.collections[0]["id"] in fake_shopify.published
+    assert "everything from this run is on the Online Store" in _run_log(run_id)
+
+
+def test_the_end_of_a_run_says_what_would_404(
+    dashboard_db, fake_site, no_llm, monkeypatch
+):
+    """With publishing off, nothing reaches the storefront — and the run
+    says so instead of reporting a clean import."""
+    from dashboard import store
+
+    store.set(store.IMPORT_ALL_CHANNELS, False)
+    fake = ChannelShopify()
+    monkeypatch.setattr(product_import, "_shopify_client", lambda: fake)
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    _run_to_end(run_id)
+    assert "not on the Online Store, so their pages 404" in _run_log(run_id)
+
+
+def test_a_failing_storefront_check_does_not_fail_the_run(
+    dashboard_db, fake_site, fake_shopify, no_llm, monkeypatch
+):
+    import httpx
+
+    def boom(gids):
+        raise httpx.ConnectError("reset")
+
+    monkeypatch.setattr(fake_shopify, "not_on_online_store", boom)
+    run_id = product_import.start_run(
+        "https://maker.test/collections/3dbars", vendor="Ames Tile",
+    )
+    _run_to_end(run_id)
+    with get_session() as session:
+        assert session.get(ImportRun, run_id).error is None
+    assert "Could not check what the storefront shows" in _run_log(run_id)
 
 
 def test_retry_reuses_generated_copy_without_reinvoking_llm(

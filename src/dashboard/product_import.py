@@ -34,6 +34,10 @@ own, because being wrong means overwriting a product nobody asked to touch.
 
 **What it does do, loudly.** Products are created Active and published to
 every sales channel, which means an import is live to customers as it runs.
+The range's collection is published too, and added to its brand's menu —
+an unpublished collection 404s, and a range nothing crawlable links to is a
+range Google never indexes. The last thing every run does is ask Shopify
+whether the Online Store really carries what it made.
 That is the owner's setting and their decision — the previous default was
 Draft, and it meant every import finished with a second, manual pass in
 Shopify admin that was easy to forget and left the catalogue half-published.
@@ -513,6 +517,8 @@ def _products(run_id: int) -> PassResult:
         return PassResult(run_id, next_stage.value, done=False)
 
     client = _shopify_client() if not dry_run else None
+    if client is not None and not options.get("vendor_settled"):
+        vendor = _settle_vendor(run_id, client, vendor)
     if client is not None and options.get("fill_metafields", False):
         _ensure_metafield_definitions(run_id, client)
         _report_filter_metafields(run_id, client)
@@ -553,6 +559,36 @@ def _products(run_id: int) -> PassResult:
         run_id, ImportStage.products.value, done=False, handled=handled,
         message=f"{remaining} to go",
     )
+
+
+def _settle_vendor(run_id: int, client, vendor: str | None) -> str | None:
+    """Use the store's spelling of the brand, once per run, before any product.
+
+    Brand pages are smart collections on the exact vendor string, so a
+    vendor typed slightly differently from the store's own leaves every
+    product in the range off its brand page. Settled once, before the first
+    product is created, so a range is never split between two spellings.
+    """
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    settled = vendor
+    if vendor:
+        try:
+            settled = product_copy.store_vendor(vendor, client.product_vendors())
+        except ShopifyError as exc:
+            log.warning("could not read the store's vendors: %s", exc)
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        options = run.options
+        options["vendor_settled"] = True
+        run.options_json = json.dumps(options)
+        if settled != vendor:
+            run.vendor = settled
+            run.note(
+                f"Vendor “{vendor}” is written “{settled}” in this store, so "
+                "the products use that — it is what the brand page filters on."
+            )
+    return settled
 
 
 def _range_shape(run_id: int, *, size: str, kind: str) -> tuple[str, str]:
@@ -1703,6 +1739,7 @@ def _collection(run_id: int) -> PassResult:
         # the store's own standard — brand, range, "Collection" — so the two
         # are composed separately rather than one being reused as the other.
         range_name = run.collection_title or "Imported collection"
+        brand = run.vendor
         title = product_copy.compose_collection_title(
             brand=run.vendor, collection=range_name,
         ) or range_name
@@ -1794,6 +1831,24 @@ def _collection(run_id: int) -> PassResult:
             f"({tally})."
         )
 
+    # `collectionCreate` makes a collection no channel carries, so the page
+    # 404s on the storefront. That page is how Google finds a range: from
+    # 7 Sep 2026 every range was created this way, and Search Console had
+    # never crawled 178 of its products because nothing it could reach
+    # linked to them. An existing collection is published too, because a
+    # re-run is how a range left unpublished gets repaired.
+    if collection_gid and options.get("all_channels", True):
+        from blog_pipeline.tools.shopify import ShopifyError
+
+        try:
+            client.publish_to_all_channels(collection_gid)
+        except ShopifyError as exc:
+            log.warning("could not publish %s to all channels: %s", collection_gid, exc)
+            message += f" It could not be published to the storefront: {exc}"
+
+    if collection_gid and brand:
+        message += _add_to_brand_menu(client, brand, collection_gid, title)
+
     with get_session() as session:
         run = session.get(ImportRun, run_id)
         run.collection_gid = collection_gid
@@ -1810,7 +1865,91 @@ def _collection(run_id: int) -> PassResult:
             if next_stage is ImportStage.linking
             else "Done.",
         )
+    if next_stage is ImportStage.done:
+        _check_storefront(run_id, client)
     return PassResult(run_id, next_stage.value, done=next_stage is ImportStage.done)
+
+
+def brand_menu_handle(brand: str) -> str:
+    """The navigation menu a brand page lists its ranges from.
+
+    "Ames Tile & Stone" → `ames-tile-stone-collections`. A brand opts in by
+    having a menu with this handle; the importer never creates one, because
+    a menu nothing renders is clutter in the owner's Navigation screen.
+    """
+    return f"{product_copy.slugify(brand, fallback='brand')}-collections"
+
+
+def _add_to_brand_menu(client, brand: str, collection_gid: str, title: str) -> str:
+    """Put a new range on its brand page's list, and say what happened.
+
+    The ranges on a brand page were hand-written HTML in the theme, so every
+    range imported after it was written had no link from the brand page —
+    and a range page nothing links to is a range Google never crawls.
+    Listed from a menu instead, a range is on the brand page as soon as it
+    exists. Labelled without the brand, as the brand page already says it.
+    """
+    from blog_pipeline.tools.shopify import ShopifyError
+
+    label = title
+    if title.lower().startswith(brand.lower()):
+        label = title[len(brand):].strip(" -–") or title
+    menu = brand_menu_handle(brand)
+    try:
+        outcome = client.add_collection_to_menu(menu, collection_gid, label)
+    except ShopifyError as exc:
+        log.warning("could not add %s to menu %s: %s", collection_gid, menu, exc)
+        return f" It could not be added to the brand menu “{menu}”: {exc}"
+    if outcome == "added":
+        return f" Listed on the brand page (menu “{menu}”)."
+    if outcome == "no-menu":
+        return (
+            f" No “{menu}” menu, so the brand page does not list this range "
+            "— link it by hand, or create that menu."
+        )
+    return ""
+
+
+def _check_storefront(run_id: int, client) -> None:
+    """Say out loud if anything this run made would 404 on the storefront.
+
+    Publishing is asked for, and asking is not the same as it having
+    happened: a channel can refuse, and until 24 Sep 2026 collections were
+    never asked for at all. Seventeen ranges sat at 404 for up to three
+    weeks with every run reporting success. So the end of every run asks
+    Shopify what the Online Store actually carries.
+    """
+    with get_session() as session:
+        run = session.get(ImportRun, run_id)
+        if run is None or run.dry_run:
+            return
+        gids = [
+            r.product_gid for r in session.query(ImportProduct).filter(
+                ImportProduct.run_id == run_id,
+                ImportProduct.status.in_(_IN_THE_STORE),
+            )
+            if r.product_gid
+        ]
+        if run.collection_gid:
+            gids.append(run.collection_gid)
+    if not gids:
+        return
+    try:
+        missing = client.not_on_online_store(gids)
+    except Exception as exc:  # noqa: BLE001 - a check, not a stage: never fails the run
+        log.warning("storefront check for run %s failed: %s", run_id, exc)
+        _note(run_id, f"Could not check what the storefront shows: {exc}")
+        return
+    if not missing:
+        _note(run_id, "Checked: everything from this run is on the Online Store.")
+        return
+    names = ", ".join((m.get("title") or m.get("handle") or "?") for m in missing[:5])
+    more = f" and {len(missing) - 5} more" if len(missing) > 5 else ""
+    _note(
+        run_id,
+        f"⚠ {len(missing)} not on the Online Store, so their pages 404 and "
+        f"Google can't index them: {names}{more}.",
+    )
 
 
 # ── Stage 4: link the range together ─────────────────────────────────
@@ -1856,6 +1995,8 @@ def _linking(run_id: int) -> PassResult:
 
     todo = [s for s in siblings if not s["linked"]]
     if dry_run or not todo or len(siblings) < 2:
+        if not dry_run:
+            _check_storefront(run_id, _shopify_client())
         with get_session() as session:
             run = session.get(ImportRun, run_id)
             if dry_run:

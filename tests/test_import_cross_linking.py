@@ -45,6 +45,9 @@ class LinkingShopify:
             self.bodies[gid] = kwargs["description_html"]
         return {"id": gid}
 
+    def not_on_online_store(self, gids):
+        return []
+
     #: Definitions the store has, keyed by metafield key. The importer asks
     #: for these before it writes: a value written under a key the store has
     #: not defined is stored by Shopify and shown by nothing, which is what
