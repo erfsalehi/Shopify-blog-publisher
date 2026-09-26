@@ -697,7 +697,7 @@ def fetch_shopify_collection(
 
 #: What a product URL looks like across Shopify, Woo, BigCommerce, Magento
 #: and hand-rolled sites.
-_PRODUCT_PATH = re.compile(r"/(products?|shop|item|p|tile|tiles|collections?/[^/]+/products)/[^/]+$", re.I)
+_PRODUCT_PATH = re.compile(r"/(products?|shop|item|p|tile|tiles|flooring|collections?/[^/]+/products)/[^/]+$", re.I)
 
 
 #: Containers a storefront wraps each product card in. Checked before the
@@ -710,6 +710,9 @@ _ITEM_SELECTORS = (
     ".product-tile",
     "li.item.product",
     "[data-container='product-grid']",
+    ".card-grid > li",
+    ".card-grid .card",
+    "ul.card-grid li",
 )
 
 
@@ -791,6 +794,7 @@ _CARD_NAME_SELECTORS = (
     ".product-item-name",
     ".product-item-link",
     ".product-name",
+    ".card-name",
     ".card-title",
     "h2", "h3", "h4",
 )

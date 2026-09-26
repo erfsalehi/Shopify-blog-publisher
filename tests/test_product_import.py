@@ -2268,3 +2268,33 @@ def test_retry_reuses_generated_copy_without_reinvoking_llm(
         assert row.attempts == 2
         assert row.status == ImportProductStatus.created.value
 
+
+
+def test_a_card_grid_with_no_product_classes_is_still_read():
+    """Inhaus's range pages: `ul.card-grid > li > a.card`, links under
+    `/flooring/<slug>/` with a trailing slash, and no "product" anywhere in
+    the class names. Caught live as "the page loaded, but nothing on it
+    looked like a product link" for a grid that was in the plain HTML.
+    """
+    base = "https://www.inhaussurfaces.com"
+    page = f"{base}/collection/inhaus-moldings/"
+    html = (
+        "<html><body><nav><a href='/flooring/'>Flooring</a>"
+        "<a href='/collection/lamdura/'>Lamdura</a></nav>"
+        "<ul class='card-grid'>"
+        "<li class='filtered'><a class='card' href='/flooring/stairnose-pro/'>"
+        "<div class='card-image'><img alt='' src='/app/uploads/2026/03/ps-iso-web.jpg'></div>"
+        "<div class='card-content'><h2 class='card-name'>Stairnose Pro</h2>"
+        "<p class='card-code'>#PS</p></div></a></li>"
+        "<li class='filtered'><a class='card' href='/flooring/t-molding/'>"
+        "<div class='card-content'><h2 class='card-name'>T-Molding</h2></div></a></li>"
+        "</ul></body></html>"
+    )
+    soup = manufacturer.soup_of(html)
+
+    assert manufacturer._extract_products(soup, base, page) == [
+        f"{base}/flooring/stairnose-pro/",
+        f"{base}/flooring/t-molding/",
+    ]
+    cards = manufacturer._grid_cards(soup, base, page)
+    assert [c["title"] for c in cards] == ["Stairnose Pro", "T-Molding"]
