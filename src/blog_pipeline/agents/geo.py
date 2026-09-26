@@ -134,10 +134,12 @@ def build_jsonld(
     graph.append(local_business)
 
     # 2. Article schema
+    clean_title = re.sub(r"<[^>]+>", "", title).strip()
+    clean_desc = re.sub(r"<[^>]+>", "", description).strip()
     article: dict = {
         "@type": "Article",
-        "headline": title,
-        "description": description,
+        "headline": clean_title,
+        "description": clean_desc,
     }
     if url:
         article["url"] = url
@@ -172,7 +174,7 @@ def build_jsonld(
                 {
                     "@type": "ListItem",
                     "position": 3,
-                    "name": title,
+                    "name": clean_title,
                     "item": url,
                 },
             ],
@@ -182,8 +184,8 @@ def build_jsonld(
     faq_entries = [
         {
             "@type": "Question",
-            "name": f.question.strip(),
-            "acceptedAnswer": {"@type": "Answer", "text": f.answer.strip()},
+            "name": re.sub(r"<[^>]+>", "", f.question).strip(),
+            "acceptedAnswer": {"@type": "Answer", "text": re.sub(r"<[^>]+>", "", f.answer).strip()},
         }
         for f in faq
         if f.question.strip() and f.answer.strip()

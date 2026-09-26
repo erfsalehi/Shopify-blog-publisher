@@ -172,12 +172,30 @@ def insert_internal_links(
 ) -> tuple[str, int]:
     """Hyperlink occurrences of target titles or aliases in the body.
 
-    Skips text already inside a tag or an existing anchor. Avoids linking to
-    the same destination URL multiple times. Returns (html, links_added).
+    Skips text already inside tags, existing anchors, scripts, styles,
+    headings, and code blocks. Avoids linking to the same destination URL
+    multiple times. Returns (html, links_added).
     """
     added = 0
-    result = body_html
     linked_urls: set[str] = set()
+
+    # 1. Protect blocks that must NEVER have internal links inserted
+    protected_blocks: list[str] = []
+
+    def _protect(m: re.Match) -> str:
+        idx = len(protected_blocks)
+        protected_blocks.append(m.group(0))
+        return f"___PROTECTED_BLOCK_{idx}___"
+
+    sheltered = re.sub(
+        r"(<script\b[^>]*>[\s\S]*?</script>|<style\b[^>]*>[\s\S]*?</style>|<a\b[^>]*>[\s\S]*?</a>|<h[1-6]\b[^>]*>[\s\S]*?</h[1-6]>|<pre\b[^>]*>[\s\S]*?</pre>|<code\b[^>]*>[\s\S]*?</code>)",
+        _protect,
+        body_html,
+        flags=re.IGNORECASE,
+    )
+
+    # 2. Split into text vs HTML tags (even indices are text outside tags)
+    tokens = re.split(r"(<[^>]+>)", sheltered)
 
     for target in targets:
         if added >= max_links:
@@ -195,18 +213,29 @@ def insert_internal_links(
         for phrase in sorted(set(p.strip() for p in phrases if p.strip()), key=len, reverse=True):
             if len(phrase) < 4:
                 continue
-            pattern = re.compile(
-                r"(?<![\">])\b" + re.escape(phrase) + r"\b(?![^<]*</a>)", re.I
-            )
-            # Find the actual matched casing from text
-            match = pattern.search(result)
-            if match:
-                matched_text = match.group(0)
-                result = pattern.sub(f'<a href="{url}">{matched_text}</a>', result, count=1)
-                added += 1
-                linked_urls.add(url)
-                matched = True
+            pattern = re.compile(r"\b" + re.escape(phrase) + r"\b", re.I)
+            for i in range(0, len(tokens), 2):
+                token_text = tokens[i]
+                if "___PROTECTED_BLOCK_" in token_text:
+                    stripped = re.sub(r"___PROTECTED_BLOCK_\d+___", "", token_text)
+                    if not pattern.search(stripped):
+                        continue
+                match = pattern.search(token_text)
+                if match:
+                    matched_text = match.group(0)
+                    tokens[i] = pattern.sub(f'<a href="{url}">{matched_text}</a>', token_text, count=1)
+                    added += 1
+                    linked_urls.add(url)
+                    matched = True
+                    break
+            if matched:
                 break
+
+    result = "".join(tokens)
+
+    # 3. Restore protected blocks
+    for idx, original in enumerate(protected_blocks):
+        result = result.replace(f"___PROTECTED_BLOCK_{idx}___", original)
 
     return result, added
 

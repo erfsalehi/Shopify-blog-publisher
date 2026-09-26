@@ -36,7 +36,7 @@ class _FakeLLM:
 def _patch_make_llm(monkeypatch, by_model: dict):
     monkeypatch.setattr(
         llm_mod, "make_llm",
-        lambda m, temperature=0.4, max_tokens=None: _FakeLLM(by_model[m]),
+        lambda m, temperature=0.4, max_tokens=None, **kwargs: _FakeLLM(by_model[m]),
     )
     # No real sleeping during retry backoff.
     monkeypatch.setattr(llm_mod.time, "sleep", lambda *_: None)

@@ -41,8 +41,8 @@ def extract_faqs_from_html(soup: BeautifulSoup) -> list[FAQItem]:
             for node in (graph or [data]):
                 if node.get("@type") == "FAQPage":
                     for entity in node.get("mainEntity", []):
-                        q = entity.get("name", "").strip()
-                        ans = (entity.get("acceptedAnswer") or {}).get("text", "").strip()
+                        q = re.sub(r"<[^>]+>", "", entity.get("name", "")).strip()
+                        ans = re.sub(r"<[^>]+>", "", (entity.get("acceptedAnswer") or {}).get("text", "")).strip()
                         if q and ans:
                             faqs.append(FAQItem(question=q, answer=ans))
         except Exception:
@@ -173,9 +173,16 @@ def update_article_geo(
     # Check existing JSON-LD script
     existing_script = temp_soup.find("script", type="application/ld+json")
     if existing_script:
-        # Check if it already has LocalBusiness and BreadcrumbList
+        # Check if it already has LocalBusiness and BreadcrumbList and is valid JSON
         old_raw = existing_script.string or ""
-        if "LocalBusiness" in old_raw and "BreadcrumbList" in old_raw:
+        is_valid = False
+        try:
+            parsed = json.loads(old_raw.replace("<\\/", "</"))
+            is_valid = isinstance(parsed, dict)
+        except Exception:
+            is_valid = False
+
+        if is_valid and "LocalBusiness" in old_raw and "BreadcrumbList" in old_raw:
             final_body = body_with_links
         else:
             # Replace existing script with upgraded JSON-LD

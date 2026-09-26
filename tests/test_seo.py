@@ -134,3 +134,32 @@ def test_insert_internal_links_supports_aliases_and_deduplicates():
     # Surrey homes should NOT be linked again because destination URL is already linked
     assert linked.count("https://drflooring.ca/pages/flooring-in-surrey") == 1
 
+
+def test_insert_internal_links_preserves_jsonld_and_headings_and_attributes():
+    body = (
+        '<h2>Flooring in Langley Showroom</h2>'
+        '<img src="photo.jpg" alt="Flooring in Langley store">'
+        '<p>Visit our flooring in Langley showroom for vinyl.</p>'
+        '<script type="application/ld+json">'
+        '{"headline": "Best Flooring in Langley Homes", "description": "Flooring in Langley"}'
+        '</script>'
+    )
+    targets = [
+        {
+            "title": "Flooring in Langley, BC",
+            "url": "https://drflooring.ca/pages/flooring-in-langley",
+            "aliases": ["flooring in Langley"],
+        }
+    ]
+    linked, n = insert_internal_links(body, targets, max_links=2)
+    assert n == 1
+    # Only the <p> text gets linked
+    assert '<p>Visit our <a href="https://drflooring.ca/pages/flooring-in-langley">flooring in Langley</a> showroom for vinyl.</p>' in linked
+    # <h2> heading is untouched
+    assert '<h2>Flooring in Langley Showroom</h2>' in linked
+    # alt attribute is untouched
+    assert 'alt="Flooring in Langley store"' in linked
+    # script content is untouched and remains valid JSON
+    assert '{"headline": "Best Flooring in Langley Homes", "description": "Flooring in Langley"}' in linked
+
+
